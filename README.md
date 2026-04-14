@@ -208,6 +208,16 @@ UNPACK_EXTRACT_WORKERS=4
 UNPACK_DELETE_ARCHIVE=true
 ```
 
+#### 解包任务说明
+
+- 前端“解包”按钮和 `POST /api/unpack/run` 都会创建后台任务，实际执行依赖 `run_worker.py`。
+- 后端当前加载的解包实现为 `scripts/unpack_archives_parallel.py`；旧的 `scripts/unpack_archives.py` 保留作历史实现参考，不再作为默认入口。
+- 当前并发模型为“扫描并发 + 多压缩包并行解包”。单个 `.tar.gz` 仍按单包单线程处理，不会把一个压缩包拆成多核并行。
+- `UNPACK_SCAN_WORKERS` 控制源目录扫描并发，适合目录层级深、来源路径多的场景。
+- `UNPACK_EXTRACT_WORKERS` 控制同时解包的压缩包数量。建议先从 `4` 起步，根据源盘/目标盘吞吐逐步调整到 `6` 或 `8`；如果压缩包和目标目录都在同一台 NAS，上限通常受 I/O 而不是 CPU 限制。
+- 并行解包会在任务内部做目标盘空间预留，避免多个压缩包同时判断“空间足够”后把盘写满。
+- 运行日志与进度文件位于 `logs/tasks/unpacker/`；并行实现使用 `unpacker_parallel_YYYYMMDD.*` 文件名。
+
 ### 部署场景配置
 
 #### 场景 1：本地开发
