@@ -1,0 +1,11 @@
+﻿{
+    "generated_at":  "2026-02-11T14:48:36",
+    "source_file":  "backend/geojson/中华人民共和国.geojson",
+    "output_file":  "backend/geojson/全国行政区.geojson",
+    "total_features":  477,
+    "features_with_treeid":  477,
+    "unmatched_count":  0,
+    "unmatched":  [
+
+                  ]
+}

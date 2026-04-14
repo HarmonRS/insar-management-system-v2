@@ -1,0 +1,20 @@
+import apiClient from './client';
+
+// 引擎状态
+export const listEngines = () =>
+  apiClient.get('/dinsar-production/engines').then(r => r.data);
+
+export const getEngineDetail = (engineCode) =>
+  apiClient.get(`/dinsar-production/engines/${encodeURIComponent(engineCode)}`).then(r => r.data);
+
+// WSL 校验（管理员）
+export const runWslCheck = (payload = {}) =>
+  apiClient.post('/dinsar-production/wsl-check', payload).then(r => r.data);
+
+// 提交生产任务
+export const submitRun = (payload) =>
+  apiClient.post('/dinsar-production/run', payload).then(r => r.data);
+
+// 运行历史
+export const listRuns = (limit = 20) =>
+  apiClient.get(`/dinsar-production/runs?limit=${encodeURIComponent(limit)}`).then(r => r.data);

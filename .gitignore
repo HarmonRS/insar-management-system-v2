@@ -1,0 +1,61 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+frontend/.env
+frontend/.env.*
+backend/license/*
+license-issuer/private_key.b64
+license-issuer/*.lic
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+*.local
+
+# Runtime / generated outputs
+.orbit_stage/
+.start_process_probe/
+.idl/
+backend/.idl/
+backend/tmp/
+backend/runtime/
+backend/image_cache/
+backend/result_products/
+nginx/temp/
+experiments/**/scratch/
+backend/quality_model.pkl
+
+# Large local datasets / installers
+Data/
+配置包/

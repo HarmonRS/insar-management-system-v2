@@ -1,0 +1,582 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import ast
+import re
+import shutil
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from pathlib import Path
+
+from export_isce_geotiff import DEFAULT_WAVELENGTH, export_products
+from lt1_input_resolver import (
+    DEFAULT_WSL_DEM_CANDIDATES,
+    ensure_lt1_orbit_xml,
+    resolve_prepared_dem_path,
+)
+
+
+DEFAULT_TARGET_GRID_SIZE_M = 10
+METERS_PER_DEGREE = 111320.0
+
+
+@dataclass
+class Scene:
+    role: str
+    tiff_path: Path
+    meta_path: Path
+    date_yyyymmdd: str
+    orbit_xml_path: Path
+
+
+@dataclass
+class PipelineConfig:
+    task_name: str
+    output_prefix: str
+    dem_path: Path
+    reference: Scene
+    secondary: Scene
+    bbox: list[float] | None
+    target_grid_size_m: int
+    geo_posting_deg: float
+
+
+def parse_args() -> argparse.Namespace:
+    script_dir = Path(__file__).resolve().parent
+    repo_root = script_dir.parent
+
+    parser = argparse.ArgumentParser(
+        description="Run an LT-1 ISCE2 DInSAR production pipeline with SNAPHU."
+    )
+    parser.add_argument("task_dir", help="Task directory, for example Task_20250112_20250309")
+    parser.add_argument(
+        "--task-name",
+        default=None,
+        help="Override the task name used for work directory and default outputs",
+    )
+    parser.add_argument(
+        "--work-root",
+        default=str(script_dir / "jobs"),
+        help="Root directory for ISCE2 work folders",
+    )
+    parser.add_argument(
+        "--work-dir",
+        default=None,
+        help="Explicit work directory. Overrides --work-root/<task_name>",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for final GeoTIFFs. Default: work_dir",
+    )
+    parser.add_argument(
+        "--output-prefix",
+        default=None,
+        help="Prefix for final output filenames. Default: task name",
+    )
+    parser.add_argument(
+        "--orbit-root",
+        default=str(repo_root / "orbit"),
+        help="Directory containing LT1A_GpsData_GAS_C_YYYYMMDD.txt",
+    )
+    parser.add_argument(
+        "--orbit-output-dir",
+        default=None,
+        help="Directory to place generated orbit XML files. Default: work_dir/orbits",
+    )
+    parser.add_argument(
+        "--dem",
+        default=None,
+        help="DEM base path. Default: auto-detect the prepared WGS84 DEM",
+    )
+    parser.add_argument(
+        "--bbox",
+        default=None,
+        help="Optional geocode bounding box: south,north,west,east",
+    )
+    parser.add_argument(
+        "--bbox-margin",
+        type=float,
+        default=0.05,
+        help="Auto-expand topo estimated bbox by this many degrees on each side",
+    )
+    parser.add_argument(
+        "--orbit-margin-sec",
+        type=float,
+        default=60.0,
+        help="Seconds to expand around scene time when clipping precise orbit, must be between 60 and 120",
+    )
+    parser.add_argument(
+        "--master-dir-name",
+        default="master",
+        help="Subdirectory name for the reference scene inside the task directory",
+    )
+    parser.add_argument(
+        "--slave-dir-name",
+        default="slave",
+        help="Subdirectory name for the secondary scene inside the task directory",
+    )
+    parser.add_argument(
+        "--scene-glob",
+        default="*.tiff",
+        help="Glob pattern used to find scene files inside master/slave directories",
+    )
+    parser.add_argument(
+        "--prefer-scene-keyword",
+        default="_SLC_",
+        help="Prefer matching files containing this keyword when multiple scene files are present",
+    )
+    parser.add_argument(
+        "--coh-threshold",
+        type=float,
+        default=0.05,
+        help="Coherence threshold for *_disp.tif export",
+    )
+    parser.add_argument(
+        "--target-grid-size-m",
+        type=int,
+        default=DEFAULT_TARGET_GRID_SIZE_M,
+        help="Target grid size in meters used to control multilook scale and geocoding spacing",
+    )
+    parser.add_argument(
+        "--include-disp-full",
+        action="store_true",
+        help="Also export the unmasked displacement GeoTIFF for debugging",
+    )
+    parser.add_argument(
+        "--wavelength",
+        type=float,
+        default=DEFAULT_WAVELENGTH,
+        help="Radar wavelength in meters",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Delete an existing work directory before rerunning",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve inputs and print the planned configuration without running ISCE2",
+    )
+    args = parser.parse_args()
+    if args.orbit_margin_sec < 60 or args.orbit_margin_sec > 120:
+        raise ValueError("--orbit-margin-sec must be between 60 and 120 seconds")
+    if args.target_grid_size_m <= 0:
+        raise ValueError("--target-grid-size-m must be greater than 0")
+    return args
+
+
+def locate_stripmap_app() -> Path:
+    import isce
+
+    app_path = Path(isce.__file__).resolve().parent / "applications" / "stripmapApp.py"
+    if not app_path.exists():
+        raise FileNotFoundError(f"stripmapApp.py not found: {app_path}")
+    return app_path
+
+
+def normalize_linux_path(value: str | Path) -> Path:
+    text = str(value).strip()
+    if text.startswith("\\\\"):
+        raise ValueError("UNC paths are not supported directly. Mount them in WSL first.")
+
+    match = re.match(r"^([A-Za-z]):[\\/](.*)$", text)
+    if match:
+        drive = match.group(1).lower()
+        rest = match.group(2).replace("\\", "/")
+        return Path(f"/mnt/{drive}/{rest}")
+
+    return Path(text)
+
+
+def choose_scene_tiff(scene_dir: Path, scene_glob: str, prefer_scene_keyword: str) -> Path:
+    candidates = sorted(scene_dir.glob(scene_glob))
+    if not candidates:
+        raise FileNotFoundError(f"No scene file matching {scene_glob} found in {scene_dir}")
+
+    slc_candidates = [path for path in candidates if prefer_scene_keyword in path.name]
+    if len(slc_candidates) == 1:
+        return slc_candidates[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    raise RuntimeError(
+        f"Expected one scene file in {scene_dir}; found {len(candidates)} matches for {scene_glob}"
+    )
+
+
+def scene_meta_from_tiff(tiff_path: Path) -> Path:
+    meta_path = Path(str(tiff_path).replace(".tiff", ".meta.xml"))
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Missing meta XML for {tiff_path}: {meta_path}")
+    return meta_path
+
+
+def extract_scene_date(name: str) -> str:
+    match = re.search(r"_(\d{8})_SLC_", name)
+    if not match:
+        match = re.search(r"(\d{8})", name)
+    if not match:
+        raise ValueError(f"Unable to extract scene date from filename: {name}")
+    return match.group(1)
+
+
+def ensure_orbit_xml(
+    date_yyyymmdd: str,
+    annotation_xml: Path,
+    orbit_root: Path,
+    orbit_out_dir: Path,
+    margin_sec: float,
+) -> Path:
+    resolution = ensure_lt1_orbit_xml(
+        date_yyyymmdd=date_yyyymmdd,
+        satellite="LT1A",
+        annotation_xml=annotation_xml,
+        orbit_root=orbit_root,
+        orbit_output_dir=orbit_out_dir,
+        margin_sec=margin_sec,
+    )
+    return resolution.path
+
+
+def resolve_dem(dem_value: str | None) -> Path:
+    dem_path = resolve_prepared_dem_path(
+        explicit_path=dem_value,
+        env_values=None,
+        default_candidates=DEFAULT_WSL_DEM_CANDIDATES,
+        path_transform=normalize_linux_path,
+    )
+    if dem_path is not None:
+        return dem_path
+
+    searched = ", ".join(str(path) for path in DEFAULT_WSL_DEM_CANDIDATES)
+    raise FileNotFoundError(
+        "Unable to resolve a prepared DEM with ISCE wrappers. "
+        f"Searched: {searched}"
+    )
+
+
+def resolve_task(
+    task_dir: Path,
+    orbit_root: Path,
+    orbit_out_dir: Path,
+    margin_sec: float,
+    master_dir_name: str,
+    slave_dir_name: str,
+    scene_glob: str,
+    prefer_scene_keyword: str,
+) -> tuple[Scene, Scene]:
+    scenes: list[Scene] = []
+    for role, subdir in (("master", master_dir_name), ("slave", slave_dir_name)):
+        scene_dir = task_dir / subdir
+        if not scene_dir.exists():
+            raise FileNotFoundError(f"Missing task subdirectory: {scene_dir}")
+
+        tiff_path = choose_scene_tiff(scene_dir, scene_glob, prefer_scene_keyword)
+        meta_path = scene_meta_from_tiff(tiff_path)
+        date_yyyymmdd = extract_scene_date(tiff_path.name)
+        orbit_xml_path = ensure_orbit_xml(
+            date_yyyymmdd=date_yyyymmdd,
+            annotation_xml=meta_path,
+            orbit_root=orbit_root,
+            orbit_out_dir=orbit_out_dir,
+            margin_sec=margin_sec,
+        )
+        scenes.append(
+            Scene(
+                role=role,
+                tiff_path=tiff_path,
+                meta_path=meta_path,
+                date_yyyymmdd=date_yyyymmdd,
+                orbit_xml_path=orbit_xml_path,
+            )
+        )
+
+    return scenes[0], scenes[1]
+
+
+def render_bbox(bbox: list[float] | None) -> str:
+    if bbox is None:
+        return ""
+    values = ", ".join(f"{value:.10f}".rstrip("0").rstrip(".") for value in bbox)
+    return f'    <property name="geocode bounding box">[{values}]</property>\n'
+
+
+def meters_to_geoposting_degrees(target_grid_size_m: int) -> float:
+    return float(target_grid_size_m) / METERS_PER_DEGREE
+
+
+def write_stripmap_xml(xml_path: Path, config: PipelineConfig) -> None:
+    bbox_xml = render_bbox(config.bbox)
+    text = (
+        "<stripmapApp>\n"
+        "  <component name=\"stripmapApp\">\n"
+        "    <property name=\"sensor name\">LUTAN1</property>\n"
+        "    <property name=\"reference sensor name\">LUTAN1</property>\n"
+        "    <property name=\"secondary sensor name\">LUTAN1</property>\n"
+        "    <property name=\"renderer\">xml</property>\n"
+        "    <property name=\"do unwrap\">True</property>\n"
+        "    <property name=\"unwrapper name\">snaphu</property>\n"
+        f"    <property name=\"posting\">{config.target_grid_size_m}</property>\n"
+        f"    <property name=\"geoPosting\">{config.geo_posting_deg:.12f}</property>\n"
+        f"{bbox_xml}"
+        f"    <property name=\"demFilename\">{config.dem_path.as_posix()}</property>\n"
+        "\n"
+        "    <component name=\"Reference\">\n"
+        f"      <property name=\"tiff\">{config.reference.tiff_path.as_posix()}</property>\n"
+        f"      <property name=\"orbitFile\">{config.reference.orbit_xml_path.as_posix()}</property>\n"
+        "      <property name=\"OUTPUT\">reference</property>\n"
+        "    </component>\n"
+        "\n"
+        "    <component name=\"Secondary\">\n"
+        f"      <property name=\"tiff\">{config.secondary.tiff_path.as_posix()}</property>\n"
+        f"      <property name=\"orbitFile\">{config.secondary.orbit_xml_path.as_posix()}</property>\n"
+        "      <property name=\"OUTPUT\">secondary</property>\n"
+        "    </component>\n"
+        "  </component>\n"
+        "</stripmapApp>\n"
+    )
+    xml_path.write_text(text, encoding="utf-8")
+
+
+def run_logged(cmd: list[str], cwd: Path, log_path: Path) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    print("Running:")
+    print("  " + " ".join(cmd))
+    print(f"Log: {log_path}")
+
+    with log_path.open("w", encoding="utf-8") as handle:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            handle.write(line)
+
+        status = proc.wait()
+
+    if status != 0:
+        raise RuntimeError(f"Command failed with exit code {status}: {' '.join(cmd)}")
+
+
+def parse_bbox_arg(value: str | None) -> list[float] | None:
+    if value is None:
+        return None
+    parts = [item.strip() for item in value.split(",")]
+    if len(parts) != 4:
+        raise ValueError("Bounding box must be south,north,west,east")
+    return [float(item) for item in parts]
+
+
+def load_estimated_bbox(topo_xml: Path) -> list[float]:
+    root = ET.fromstring(topo_xml.read_text(encoding="utf-8"))
+    for prop in root.findall("property"):
+        if prop.attrib.get("name") == "estimatedboundingbox":
+            value = prop.findtext("value")
+            if not value:
+                break
+            bbox = ast.literal_eval(value)
+            return [float(item) for item in bbox]
+    raise ValueError(f"estimatedboundingbox not found in {topo_xml}")
+
+
+def expand_bbox(bbox: list[float], margin: float) -> list[float]:
+    south, north, west, east = bbox
+    return [
+        max(-90.0, south - margin),
+        min(90.0, north + margin),
+        max(-180.0, west - margin),
+        min(180.0, east + margin),
+    ]
+
+
+def prepare_snaphu_resume(work_dir: Path, bbox: list[float] | None) -> None:
+    pickle_dir = work_dir / "PICKLE"
+    src = pickle_dir / "filter"
+    src_xml = pickle_dir / "filter.xml"
+    dst = pickle_dir / "filter_high_band"
+    dst_xml = pickle_dir / "filter_high_band.xml"
+
+    if not src.exists() or not src_xml.exists():
+        raise FileNotFoundError("filter step output is missing; cannot prepare SNAPHU resume state.")
+
+    shutil.copy2(src, dst)
+    shutil.copy2(src_xml, dst_xml)
+
+    root = ET.fromstring(dst_xml.read_text(encoding="utf-8"))
+    props = {prop.attrib.get("name"): prop for prop in root.findall("property")}
+
+    required = {
+        "referenceslccroppedproduct": "reference_slc.xml",
+        "secondaryslccroppedproduct": "secondary_slc.xml",
+        "referenceslcproduct": "reference_slc.xml",
+        "secondaryslcproduct": "secondary_slc.xml",
+        "referencegeometrysystem": "Zero Doppler",
+        "secondarygeometrysystem": "Zero Doppler",
+    }
+    if bbox is not None:
+        required["estimatedboundingbox"] = str(bbox)
+
+    for name, value in required.items():
+        if name in props:
+            node = props[name].find("value")
+            if node is None:
+                node = ET.SubElement(props[name], "value")
+            node.text = value
+            continue
+
+        prop = ET.SubElement(root, "property", {"name": name})
+        ET.SubElement(prop, "value").text = value
+
+    dst_xml.write_text(ET.tostring(root, encoding="unicode"), encoding="utf-8")
+
+
+def prepare_geocode_resume(work_dir: Path) -> None:
+    pickle_dir = work_dir / "PICKLE"
+    unwrap = pickle_dir / "unwrap"
+    unwrap_xml = pickle_dir / "unwrap.xml"
+    ionosphere = pickle_dir / "ionosphere"
+    ionosphere_xml = pickle_dir / "ionosphere.xml"
+
+    if not unwrap.exists() or not unwrap_xml.exists():
+        raise FileNotFoundError("unwrap step output is missing; cannot prepare geocode resume state.")
+
+    shutil.copy2(unwrap, ionosphere)
+    shutil.copy2(unwrap_xml, ionosphere_xml)
+
+
+def print_summary(
+    task_dir: Path,
+    work_dir: Path,
+    output_dir: Path,
+    config: PipelineConfig,
+) -> None:
+    print(f"Task dir:     {task_dir}")
+    print(f"Task name:    {config.task_name}")
+    print(f"Output prefix:{config.output_prefix}")
+    print(f"Work dir:     {work_dir}")
+    print(f"Output dir:   {output_dir}")
+    print(f"DEM:          {config.dem_path}")
+    print(f"Reference:    {config.reference.tiff_path}")
+    print(f"Secondary:    {config.secondary.tiff_path}")
+    print(f"Ref orbit:    {config.reference.orbit_xml_path}")
+    print(f"Sec orbit:    {config.secondary.orbit_xml_path}")
+    print(f"BBox:         {config.bbox if config.bbox is not None else 'auto'}")
+    print(f"Target grid:  {config.target_grid_size_m} m")
+    print(f"Geo posting:  {config.geo_posting_deg:.12f} deg")
+
+
+def main() -> int:
+    args = parse_args()
+    task_dir = normalize_linux_path(args.task_dir).resolve()
+    if not task_dir.exists():
+        raise FileNotFoundError(f"Task directory not found: {task_dir}")
+
+    task_name = args.task_name or task_dir.name
+    output_prefix = args.output_prefix or task_name
+    work_root = normalize_linux_path(args.work_root).resolve()
+    work_dir = normalize_linux_path(args.work_dir).resolve() if args.work_dir else work_root / task_name
+    output_dir = normalize_linux_path(args.output_dir).resolve() if args.output_dir else work_dir
+    orbit_root = normalize_linux_path(args.orbit_root).resolve()
+    orbit_out_dir = (
+        normalize_linux_path(args.orbit_output_dir).resolve()
+        if args.orbit_output_dir
+        else work_dir / "orbits"
+    )
+
+    if work_dir.exists():
+        if not args.force:
+            raise FileExistsError(f"Work directory already exists: {work_dir}. Use --force to recreate it.")
+        shutil.rmtree(work_dir)
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    reference, secondary = resolve_task(
+        task_dir=task_dir,
+        orbit_root=orbit_root,
+        orbit_out_dir=orbit_out_dir,
+        margin_sec=args.orbit_margin_sec,
+        master_dir_name=args.master_dir_name,
+        slave_dir_name=args.slave_dir_name,
+        scene_glob=args.scene_glob,
+        prefer_scene_keyword=args.prefer_scene_keyword,
+    )
+    dem_path = resolve_dem(args.dem)
+    bbox = parse_bbox_arg(args.bbox)
+    geo_posting_deg = meters_to_geoposting_degrees(args.target_grid_size_m)
+
+    config = PipelineConfig(
+        task_name=task_name,
+        output_prefix=output_prefix,
+        dem_path=dem_path,
+        reference=reference,
+        secondary=secondary,
+        bbox=bbox,
+        target_grid_size_m=args.target_grid_size_m,
+        geo_posting_deg=geo_posting_deg,
+    )
+    print_summary(task_dir=task_dir, work_dir=work_dir, output_dir=output_dir, config=config)
+
+    xml_path = work_dir / f"{task_name}_stripmap.xml"
+    write_stripmap_xml(xml_path, config)
+
+    if args.dry_run:
+        print(f"Generated XML: {xml_path}")
+        return 0
+
+    app_py = locate_stripmap_app()
+
+    run_logged(
+        [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--end=filter"],
+        cwd=work_dir,
+        log_path=work_dir / "01_to_filter.log",
+    )
+
+    if config.bbox is None:
+        estimated_bbox = load_estimated_bbox(work_dir / "PICKLE" / "topo.xml")
+        config.bbox = expand_bbox(estimated_bbox, args.bbox_margin)
+        write_stripmap_xml(xml_path, config)
+        print(f"Auto bbox from topo: {estimated_bbox}")
+        print(f"Expanded bbox used for geocode: {config.bbox}")
+
+    prepare_snaphu_resume(work_dir, config.bbox)
+    run_logged(
+        [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--start=unwrap", "--end=unwrap"],
+        cwd=work_dir,
+        log_path=work_dir / "02_unwrap_snaphu.log",
+    )
+
+    prepare_geocode_resume(work_dir)
+    run_logged(
+        [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--start=geocode", "--end=geocode"],
+        cwd=work_dir,
+        log_path=work_dir / "03_geocode.log",
+    )
+
+    outputs = export_products(
+        work_dir=work_dir,
+        output_dir=output_dir,
+        prefix=output_prefix,
+        wavelength=args.wavelength,
+        coh_threshold=args.coh_threshold,
+        include_disp_full=args.include_disp_full,
+    )
+
+    print("Pipeline finished.")
+    for key, path in outputs.items():
+        print(f"{key}: {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

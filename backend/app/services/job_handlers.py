@@ -1,0 +1,2228 @@
+import asyncio
+import base64
+import glob
+import io
+import json
+import logging
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Callable, Awaitable, Optional, Dict, Any, List
+
+logger = logging.getLogger(__name__)
+
+from sqlalchemy import select
+
+from ..config import settings
+from ..database import AsyncSessionLocal
+from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskItemORM, PsTaskItemORM, SARSceneGeoORM, FloodDetectionORM, WaterDetectionORM, GF3ProcessingORM, AiDiagnosisORM
+from ..scheduler import scan_data_job
+from .data_service import data_service
+from .dinsar_compat_service import dinsar_compat_service
+from .dinsar_read_service import dinsar_read_service
+from .dinsar_scan_service import dinsar_scan_service
+from .psinsar_catalog_service import psinsar_catalog_service
+from .result_catalog_service import result_catalog_service
+from .task_service import task_service
+from .timeseries_service import (
+    JOB_TYPE_TIMESERIES_MATERIALIZE,
+    JOB_TYPE_TIMESERIES_PREPARE,
+    JOB_TYPE_TIMESERIES_REGISTER_PRODUCT,
+    JOB_TYPE_TIMESERIES_RUN_ISCE2_STACK,
+    JOB_TYPE_TIMESERIES_RUN_MINTPY_SBAS,
+    JOB_TYPE_TIMESERIES_STACK_PREP,
+    JOB_TYPE_TIMESERIES_EXPORT_PUBLISH,
+    timeseries_service,
+)
+from .unpack_service import run_unpack_task
+from ..copier import run_ps_copy_items, run_dinsar_copy_items
+from ..ai_service import (
+    train_quality_model,
+    predict_quality,
+    is_model_trained,
+    warm_up_vlm,
+    generate_dinsar_diagnosis,
+)
+
+
+JobHandler = Callable[[SystemJobORM], Awaitable[None]]
+
+
+JOB_TYPE_SCAN_DATA = "SCAN_DATA"
+JOB_TYPE_SCAN_DINSAR = "SCAN_DINSAR"
+JOB_TYPE_COPY_DATA = "COPY_DATA"
+JOB_TYPE_UNPACK = "UNPACK_ARCHIVES"
+JOB_TYPE_AI_TRAIN = "AI_TRAIN"
+JOB_TYPE_AI_PREDICT = "AI_PREDICT"
+JOB_TYPE_AI_ANALYZE = "AI_ANALYZE"
+JOB_TYPE_AI_WARMUP = "AI_WARMUP"
+JOB_TYPE_AI_DIAGNOSIS = "AI_DIAGNOSIS"
+JOB_TYPE_SCAN_HAZARD = "SCAN_HAZARD"
+JOB_TYPE_IDL_RUN_IMPORT = "IDL_RUN_IMPORT"
+JOB_TYPE_IDL_RUN_DINSAR = "IDL_RUN_DINSAR"
+JOB_TYPE_WATER_GEOCODE = "WATER_GEOCODE"
+JOB_TYPE_WATER_FLOOD = "WATER_FLOOD"
+JOB_TYPE_WATER_DETECT = "WATER_DETECT"
+JOB_TYPE_GF3_PROCESS = "GF3_PROCESS"
+JOB_TYPE_GF3_BATCH_PROCESS = "GF3_BATCH_PROCESS"
+JOB_TYPE_ISCE2_RUN = "ISCE2_RUN"
+JOB_TYPE_PUBLISH_DINSAR_PRODUCTS = "PUBLISH_DINSAR_PRODUCTS"
+JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
+JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
+
+COPY_ALLOWED_STATUSES = {"PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"}
+
+
+def _normalize_copy_statuses(raw_statuses: Any) -> List[str]:
+    if not raw_statuses:
+        return ["COMPLETED"]
+    if not isinstance(raw_statuses, list):
+        raise ValueError("COPY_DATA payload.copy_statuses must be a list.")
+
+    normalized: List[str] = []
+    for raw in raw_statuses:
+        status = str(raw or "").strip().upper()
+        if not status:
+            continue
+        if status not in COPY_ALLOWED_STATUSES:
+            raise ValueError(f"Invalid copy status: {status}")
+        if status not in normalized:
+            normalized.append(status)
+
+    return normalized or ["COMPLETED"]
+
+
+def _dedupe_existing_dirs(paths: Any) -> List[str]:
+    ordered: List[str] = []
+    for raw_path in paths or []:
+        path = os.path.normpath(os.path.abspath(str(raw_path or "").strip()))
+        if not path or not os.path.isdir(path):
+            continue
+        if path in ordered:
+            continue
+        ordered.append(path)
+    return ordered
+
+
+async def _run_scan_data_custom(task_id: str, payload: Dict[str, Any]) -> None:
+    from ..database import AsyncSessionLocal
+
+    radar_dirs = payload.get("radar_dirs") or []
+    orbit_dir = payload.get("orbit_dir") or None
+    dinsar_dirs = payload.get("dinsar_dirs") or []
+    has_radar_orbit = bool(radar_dirs or orbit_dir)
+    has_dinsar = bool(dinsar_dirs)
+    radar_progress_base = 0
+    radar_progress_span = 100
+    dinsar_progress_base = 0
+    dinsar_progress_span = 100
+
+    if has_radar_orbit and has_dinsar:
+        radar_progress_base = 0
+        radar_progress_span = 50
+        dinsar_progress_base = 50
+        dinsar_progress_span = 50
+
+    async with AsyncSessionLocal() as db:
+        await task_service.start_task(task_id, message="任务已启动")
+        try:
+            if radar_dirs or orbit_dir:
+                await task_service.update_task(task_id, message="正在扫描雷达和精轨数据...")
+                summary_radar = await data_service.scan_radar_data(
+                    db,
+                    radar_dirs,
+                    orbit_dir,
+                    task_id=task_id,
+                    progress_base=radar_progress_base,
+                    progress_span=radar_progress_span
+                )
+                msg_radar = summary_radar.get('message', '雷达扫描完成')
+                msg_radar = (
+                    f"{msg_radar}"
+                    f" (场景: {summary_radar.get('processed_scenes', 0)},"
+                    f" 纠正缓存新增: {summary_radar.get('cached_previews', 0)},"
+                    f" 纠正缓存跳过: {summary_radar.get('skipped_previews', 0)},"
+                    f" 原图缓存新增: {summary_radar.get('cached_raw_previews', 0)},"
+                    f" 原图缓存跳过: {summary_radar.get('skipped_raw_previews', 0)})"
+                )
+            else:
+                msg_radar = "跳过雷达扫描"
+
+            if dinsar_dirs:
+                await task_service.update_task(task_id, message="正在扫描 D-InSAR 结果...")
+                summary_dinsar = await dinsar_scan_service.run_scan(
+                    db,
+                    source_directories=dinsar_dirs,
+                    task_id=task_id,
+                )
+                rebuild_payload = summary_dinsar.get("rebuild") or {}
+                compat_payload = summary_dinsar.get("compat_sync") or {}
+                msg_dinsar = (
+                    f"{summary_dinsar.get('message', 'D-InSAR unified scan completed')}"
+                    f" (packages={rebuild_payload.get('manifest_count', 0)},"
+                    f" catalog={rebuild_payload.get('registered', 0)},"
+                    f" compat={compat_payload.get('compat_count', 0)})"
+                )
+            else:
+                msg_dinsar = "跳过 D-InSAR 扫描"
+
+            await task_service.update_task(
+                task_id,
+                status="COMPLETED",
+                message=f"扫描完成: {msg_radar}; {msg_dinsar}",
+                progress=100
+            )
+        except Exception as exc:
+            await task_service.update_task(task_id, status="FAILED", message=f"扫描失败: {exc}")
+
+
+async def _handle_scan_data(job: SystemJobORM) -> None:
+    payload = job.payload or {}
+    use_monitor = bool(payload.get("use_monitor_config", False))
+    target = payload.get("target")
+
+    if use_monitor:
+        if job.task_id:
+            await task_service.start_task(job.task_id, message="任务已启动")
+        await scan_data_job(target=target, task_id=job.task_id)
+    else:
+        if not job.task_id:
+            raise ValueError("SCAN_DATA requires task_id for progress tracking.")
+        await _run_scan_data_custom(job.task_id, payload)
+
+
+def _resolve_hazard_shp_path() -> str:
+    base_dir = settings.HAZARD_POINTS_DIR
+    filename = settings.HAZARD_POINTS_FILENAME
+    if not base_dir or not filename:
+        raise ValueError("HAZARD_POINTS_DIR and HAZARD_POINTS_FILENAME must be configured.")
+    if str(base_dir).lower().endswith(".shp"):
+        raise ValueError("HAZARD_POINTS_DIR must be a directory, not a .shp path.")
+    if not os.path.isdir(str(base_dir)):
+        raise FileNotFoundError(f"Hazard points directory not found: {base_dir}")
+    shp_path = os.path.join(str(base_dir), str(filename))
+    if not shp_path.lower().endswith(".shp"):
+        raise ValueError(f"HAZARD_POINTS_FILENAME must end with .shp: {filename}")
+    if not os.path.isfile(shp_path):
+        raise FileNotFoundError(f"Hazard points Shapefile not found: {shp_path}")
+    return shp_path
+
+
+async def _handle_scan_hazard(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("SCAN_HAZARD requires task_id for progress tracking.")
+    await task_service.start_task(job.task_id, message="任务已启动")
+    shp_path = _resolve_hazard_shp_path()
+    from ..database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        await task_service.update_task(job.task_id, message="正在读取灾害点 Shapefile...", progress=20)
+        summary = await data_service.scan_hazard_points(db, shp_path)
+        await task_service.update_task(
+            job.task_id,
+            status="COMPLETED",
+            message=f"同步成功: 发现 {summary.get('count', 0)} 个点",
+            progress=100
+        )
+
+
+async def _handle_scan_dinsar(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("SCAN_DINSAR requires task_id for progress tracking.")
+    await task_service.start_task(job.task_id, message="正在执行 D-InSAR 统一扫描...")
+    payload = job.payload or {}
+    dirs = payload.get("dirs") or payload.get("results_directories") or []
+    publish_root = payload.get("publish_root") or None
+    from ..database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        summary = await dinsar_scan_service.run_scan(
+            db,
+            source_directories=dirs,
+            publish_root=publish_root,
+            task_id=job.task_id,
+        )
+        rebuild_payload = summary.get("rebuild") or {}
+        compat_payload = summary.get("compat_sync") or {}
+        compat_error = summary.get("compat_error")
+        message = (
+            f"统一扫描完成: packages={rebuild_payload.get('manifest_count', 0)}, "
+            f"catalog={rebuild_payload.get('registered', 0)}, "
+            f"compat={compat_payload.get('compat_count', 0)}"
+        )
+        if compat_error:
+            message += f", compat_error={compat_error}"
+        await task_service.update_task(
+            job.task_id,
+            status="COMPLETED",
+            message=message,
+            progress=100
+        )
+
+async def _handle_copy_data(job: SystemJobORM) -> None:
+    payload = job.payload or {}
+    file_type = payload.get("file_type")
+    dest_dir = payload.get("dest_dir")
+    batch_id = payload.get("batch_id")
+    copy_statuses = _normalize_copy_statuses(payload.get("copy_statuses"))
+
+    if not batch_id:
+        raise ValueError("COPY_DATA requires batch_id payload.")
+
+    from ..database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        if file_type == "PS_STACK":
+            result = await db.execute(
+                select(PsTaskItemORM)
+                .where(PsTaskItemORM.batch_id == batch_id)
+                .where(PsTaskItemORM.status.in_(copy_statuses))
+                .order_by(PsTaskItemORM.id.asc())
+            )
+            items = [
+                {"file_path": item.file_path}
+                for item in result.scalars().all()
+            ]
+            if not items:
+                raise ValueError(
+                    f"No PS items matched copy statuses: {', '.join(copy_statuses)}"
+                )
+            await run_ps_copy_items(job.task_id, items, dest_dir)
+            return
+
+        if file_type == "DINSAR_PAIRS":
+            result = await db.execute(
+                select(DinsarTaskItemORM)
+                .where(DinsarTaskItemORM.batch_id == batch_id)
+                .where(DinsarTaskItemORM.status.in_(copy_statuses))
+                .order_by(DinsarTaskItemORM.id.asc())
+            )
+            items = [
+                {
+                    "task_name": item.task_name,
+                    "task_alias": item.task_alias or item.task_name,
+                    "pair_key": item.pair_key,
+                    "master_path": item.master_path,
+                    "slave_path": item.slave_path,
+                    "master_satellite": item.master_satellite,
+                    "slave_satellite": item.slave_satellite,
+                    "master_imaging_date": item.master_imaging_date,
+                    "slave_imaging_date": item.slave_imaging_date,
+                    "master_imaging_mode": item.master_imaging_mode,
+                    "slave_imaging_mode": item.slave_imaging_mode,
+                    "master_polarization": item.master_polarization,
+                    "slave_polarization": item.slave_polarization,
+                    "time_baseline_days": item.time_baseline_days,
+                    "spatial_baseline_meters": item.spatial_baseline_meters,
+                    "scene_pair_uid": item.scene_pair_uid,
+                    "pair_uid": item.scene_pair_uid,
+                    "network_run_id": item.network_run_id,
+                    "network_edge_id": item.network_edge_id,
+                    "policy_version": item.policy_version,
+                    "selection_strategy": item.selection_strategy,
+                }
+                for item in result.scalars().all()
+            ]
+            if not items:
+                raise ValueError(
+                    f"No D-InSAR items matched copy statuses: {', '.join(copy_statuses)}"
+                )
+            await run_dinsar_copy_items(job.task_id, items, dest_dir)
+            return
+
+    raise ValueError(f"Unknown COPY_DATA file_type: {file_type}")
+
+
+async def _handle_unpack_archives(job: SystemJobORM) -> None:
+    await run_unpack_task(job.task_id)
+
+
+async def _handle_ai_train(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("AI_TRAIN requires task_id for progress tracking.")
+    await task_service.start_task(job.task_id, message="任务已启动")
+
+    from ..database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        records = await dinsar_read_service.list_catalog_records(db, labeled_only=True)
+
+        if not records:
+            await task_service.update_task(job.task_id, status="FAILED", message="暂无标注数据，无法训练。")
+            return
+
+        labeled_data = []
+        for record in records:
+            if record.product.user_label is None or not record.image_path:
+                continue
+            labeled_data.append((record.image_path, record.product.user_label))
+
+        if not labeled_data:
+            await task_service.update_task(
+                job.task_id,
+                status="FAILED",
+                message="暂无可用于训练的已标注预览图像。",
+            )
+            return
+
+        loop = asyncio.get_running_loop()
+
+        def update_progress(p: int):
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(
+                    task_service.update_task(
+                        job.task_id,
+                        message=f"正在训练 AI 模型... ({p}%)",
+                        progress=p
+                    )
+                )
+            )
+
+        try:
+            train_result = await asyncio.to_thread(
+                train_quality_model,
+                labeled_data,
+                progress_callback=update_progress
+            )
+            accuracy = train_result.get("accuracy") if isinstance(train_result, dict) else None
+            sample_count = train_result.get("sample_count") if isinstance(train_result, dict) else None
+            if accuracy is not None:
+                summary = f"训练完成，准确率: {accuracy:.2f}"
+                if sample_count is not None:
+                    summary += f" (样本数: {sample_count})"
+            else:
+                summary = "训练完成"
+            await task_service.update_task(job.task_id, status="COMPLETED", message=summary, progress=100)
+        except Exception as exc:
+            await task_service.update_task(job.task_id, status="FAILED", message=f"训练失败: {exc}")
+
+
+async def _handle_ai_predict(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("AI_PREDICT requires task_id for progress tracking.")
+    await task_service.start_task(job.task_id, message="任务已启动")
+
+    if not is_model_trained():
+        await task_service.update_task(job.task_id, status="FAILED", message="模型尚未训练。")
+        return
+
+    from ..database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        await task_service.update_task(job.task_id, message="正在加载数据...", progress=5)
+        all_records = await dinsar_read_service.list_catalog_records(db)
+
+        paths_map: Dict[str, List[Any]] = {}
+        paths_to_predict = []
+        seen_paths = set()
+        for record in all_records:
+            img_path = record.image_path
+            if not img_path:
+                continue
+            paths_map.setdefault(img_path, []).append(record)
+            if img_path in seen_paths:
+                continue
+            seen_paths.add(img_path)
+            paths_to_predict.append(img_path)
+
+        if not paths_to_predict:
+            await task_service.update_task(
+                job.task_id,
+                status="FAILED",
+                message="没有可用于预测的预览图像。",
+            )
+            return
+
+        loop = asyncio.get_running_loop()
+
+        def update_progress(p: int):
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(
+                    task_service.update_task(
+                        job.task_id,
+                        message=f"正在进行 AI 质量预测 (样本数: {len(paths_to_predict)})...",
+                        progress=p
+                    )
+                )
+            )
+
+        predictions = await asyncio.to_thread(predict_quality, paths_to_predict, update_progress)
+
+        updated_count = 0
+        updated_product_ids: set[str] = set()
+        for path, score in predictions.items():
+            for record in paths_map.get(path, []):
+                record.product.ai_score = score
+                updated_count += 1
+                if record.product.product_id:
+                    updated_product_ids.add(record.product.product_id)
+
+        await db.commit()
+        compat_sync = await dinsar_compat_service.sync_result_annotations_from_products(
+            db,
+            product_ids=sorted(updated_product_ids),
+        )
+        await task_service.update_task(
+            job.task_id,
+            status="COMPLETED",
+            message=(
+                f"预测完成，更新了 {updated_count} 条目录记录，"
+                f"兼容视图同步 {compat_sync.get('synced', 0)} 条。"
+            ),
+            progress=100,
+        )
+
+
+async def _handle_ai_warmup(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("AI_WARMUP requires task_id for progress tracking.")
+    await task_service.start_task(job.task_id, message="任务已启动")
+    await task_service.update_task(job.task_id, message="正在预热 AI 模型 (加载至显存)...", progress=20)
+    success = await warm_up_vlm()
+    if success:
+        await task_service.update_task(job.task_id, status="COMPLETED", message="AI 模型预热成功，现在诊断将非常迅速。", progress=100)
+    else:
+        await task_service.update_task(job.task_id, status="FAILED", message="AI 模型预热失败，请检查 Ollama 服务。")
+
+
+async def _handle_ai_analyze(job: SystemJobORM) -> None:
+    payload = job.payload or {}
+    result_id = payload.get("result_id")
+    product_id = str(payload.get("product_id") or "").strip() or None
+    if result_id is None:
+        raise ValueError("AI_ANALYZE requires result_id payload.")
+    if not job.task_id:
+        raise ValueError("AI_ANALYZE requires task_id for progress tracking.")
+
+    await task_service.start_task(job.task_id, message="任务已启动")
+    from ..database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await task_service.update_task(job.task_id, message="正在检索空间上下文...", progress=10)
+            record = await dinsar_read_service.get_compat_record(
+                db,
+                compat_result_id=int(result_id),
+                include_geom=True,
+            )
+            if not record:
+                await task_service.update_task(job.task_id, status="FAILED", message="未找到该 D-InSAR 结果")
+                return
+
+            from geoalchemy2.functions import ST_Covers
+            hazard_res = await db.execute(
+                select(HazardPointORM).where(ST_Covers(record.product.geom, HazardPointORM.geom))
+            )
+            hazards = hazard_res.scalars().all()
+
+            hazard_info = "\n".join([f"- {h.hazard_name} ({h.hazard_type}): {h.city}{h.county}" for h in hazards])
+            if not hazard_info:
+                hazard_info = "该范围内暂无已知灾害点。"
+
+            await task_service.update_task(job.task_id, message="正在准备影像数据...", progress=30)
+            target_path = record.image_path
+
+            if not target_path or not os.path.exists(target_path):
+                await task_service.update_task(job.task_id, status="FAILED", message="未找到缓存图片，请先扫描。")
+                return
+
+            await task_service.update_task(job.task_id, message="正在准备影像数据 (PNG 格式)...", progress=35)
+            from PIL import Image
+            with Image.open(target_path) as img:
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                img_std_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+
+            import re
+            dates = re.findall(r'\d{8}', record.display_name or "")
+            date_str = f"{dates[0]} 至 {dates[1]}" if len(dates) >= 2 else "日期未知"
+
+            quality_context = "尚未评估"
+            if record.product.ai_score is not None:
+                score_pct = int(record.product.ai_score * 100)
+                if record.product.ai_score > 0.7:
+                    quality_context = f"高质量 ({score_pct}/100)"
+                elif record.product.ai_score > 0.4:
+                    quality_context = f"中等质量 ({score_pct}/100)"
+                else:
+                    quality_context = f"低质量 ({score_pct}/100)"
+
+            await task_service.update_task(job.task_id, message="正在调用 VLM 进行智能诊断 (请耐心等待报告生成)...", progress=50)
+
+            analysis = await generate_dinsar_diagnosis(
+                images_base64=[img_std_base64],
+                record_name=record.display_name,
+                date_str=date_str,
+                quality_context=quality_context,
+                hazard_info=hazard_info
+            )
+
+            result_msg = json.dumps({
+                "analysis": analysis,
+                "hazards_found": len(hazards),
+                "result_id": result_id,
+                "product_id": product_id or record.product.product_id,
+                "result_name": record.display_name,
+            })
+
+            await task_service.update_task(
+                job.task_id,
+                status="COMPLETED",
+                message=result_msg,
+                progress=100
+            )
+
+            await asyncio.sleep(5.0)
+        except Exception as exc:
+            error_msg = json.dumps({
+                "error": str(exc),
+                "result_id": result_id,
+                "result_name": "诊断失败"
+            })
+            await task_service.update_task(job.task_id, status="FAILED", message=error_msg)
+
+
+async def _handle_ai_diagnosis(job: SystemJobORM) -> None:
+    """
+    新版 AI 诊断 Handler（使用 ai_diagnosis 表）。
+
+    Payload 字段：
+    - result_id: D-InSAR 结果 ID
+    - model_name: 模型名称
+    - prompt_template: Prompt 模板名称
+    - prompt_text: Prompt 文本
+    """
+    payload = job.payload or {}
+    result_id = payload.get("result_id")
+    product_id = str(payload.get("product_id") or "").strip() or None
+    model_name = payload.get("model_name")
+    prompt_template = payload.get("prompt_template")
+    prompt_text = payload.get("prompt_text")
+
+    if not result_id:
+        raise ValueError("AI_DIAGNOSIS requires result_id payload.")
+    if not model_name:
+        raise ValueError("AI_DIAGNOSIS requires model_name payload.")
+    if not prompt_text:
+        raise ValueError("AI_DIAGNOSIS requires prompt_text payload.")
+    if not job.task_id:
+        raise ValueError("AI_DIAGNOSIS requires task_id for progress tracking.")
+
+    start_time = time.time()
+    diagnosis_id = None  # 初始化，避免异常处理时未定义
+
+    async with AsyncSessionLocal() as db:
+        try:
+            # 启动任务（传递 db 会话）
+            await task_service.start_task(job.task_id, message="任务已启动", db=db)
+
+            # 1. 加载 D-InSAR 结果
+            await task_service.update_task(job.task_id, message="正在检索 D-InSAR 结果...", progress=5, db=db)
+            record = await dinsar_read_service.get_compat_record(
+                db,
+                compat_result_id=int(result_id),
+                include_geom=True,
+            )
+            if not record:
+                await task_service.update_task(job.task_id, status="FAILED", message="D-InSAR 结果不存在", db=db)
+                return
+
+            # 提前提取所有需要的属性（避免在 commit 后访问导致延迟加载）
+            result_name = record.display_name
+            result_geom = record.product.geom
+            result_ai_score = record.product.ai_score
+            resolved_product_id = product_id or record.product.product_id
+
+            # 2. 创建诊断记录
+            await task_service.update_task(job.task_id, message="正在创建诊断记录...", progress=10, db=db)
+            diagnosis = AiDiagnosisORM(
+                result_id=int(result_id),
+                product_ref_id=record.product.id,
+                product_id=resolved_product_id,
+                task_id=job.task_id,
+                model_name=model_name,
+                prompt_template=prompt_template or "custom",
+                prompt_text=prompt_text,
+                result_name=result_name,
+            )
+            db.add(diagnosis)
+            await db.flush()
+            diagnosis_id = diagnosis.id
+            await db.commit()
+
+            # 3. 查询空间上下文（隐患点）
+            await task_service.update_task(job.task_id, message="正在检索空间上下文...", progress=20, db=db)
+
+            from geoalchemy2.functions import ST_Covers
+            hazard_res = await db.execute(
+                select(HazardPointORM).where(ST_Covers(result_geom, HazardPointORM.geom))
+            )
+            hazards = hazard_res.scalars().all()
+            hazards_found = len(hazards)
+
+            # 保存隐患点快照
+            hazards_snapshot = [
+                {
+                    "tybh": h.tybh,
+                    "hazard_name": h.hazard_name,
+                    "hazard_type": h.hazard_type,
+                    "city": h.city,
+                    "county": h.county,
+                    "longitude": h.longitude,
+                    "latitude": h.latitude,
+                }
+                for h in hazards
+            ]
+
+            # 4. 提取日期范围
+            import re
+            dates = re.findall(r'\d{8}', result_name or "")
+            date_range = f"{dates[0]} - {dates[1]}" if len(dates) >= 2 else "未知"
+
+            # 5. 准备影像数据
+            await task_service.update_task(job.task_id, message="正在准备影像数据...", progress=30, db=db)
+            target_path = record.image_path
+
+            if not target_path or not os.path.exists(target_path):
+                # 更新诊断记录错误信息
+                diag_res = await db.execute(
+                    select(AiDiagnosisORM).where(AiDiagnosisORM.id == diagnosis_id)
+                )
+                diag = diag_res.scalar_one()
+                diag.error_message = "未找到缓存图片，请先扫描"
+                diag.duration_seconds = time.time() - start_time
+                await db.commit()
+                await task_service.update_task(job.task_id, status="FAILED", message="未找到缓存图片", db=db)
+                return
+
+            from PIL import Image
+            with Image.open(target_path) as img:
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                img_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+
+            # 6. 构建完整 Prompt（注入上下文）
+            await task_service.update_task(job.task_id, message="正在构建分析上下文...", progress=40, db=db)
+
+            hazard_info = "\n".join([
+                f"- {h['hazard_name']} ({h['hazard_type']}): {h['city']}{h['county']}"
+                for h in hazards_snapshot
+            ])
+            if not hazard_info:
+                hazard_info = "该范围内暂无已知灾害点。"
+
+            quality_context = "尚未评估"
+            if result_ai_score is not None:
+                score_pct = int(result_ai_score * 100)
+                if result_ai_score > 0.7:
+                    quality_context = f"高质量 ({score_pct}/100)"
+                elif result_ai_score > 0.4:
+                    quality_context = f"中等质量 ({score_pct}/100)"
+                else:
+                    quality_context = f"低质量 ({score_pct}/100)"
+
+            full_prompt = f"""### 基础背景
+- **任务标识**: `{result_name}`
+- **监测周期**: {date_range}
+- **数据质量**: {quality_context}
+
+### 空间上下文（已知灾害点）
+影像覆盖范围内的已知灾害点信息如下：
+{hazard_info}
+
+### 影像说明
+提供的影像采用固定色标（±0.1m），绿色代表稳定，红色代表沉降，蓝色代表抬升。
+
+---
+
+{prompt_text}
+"""
+
+            # 7. 调用 VLM 进行分析
+            await task_service.update_task(
+                job.task_id,
+                message=f"正在调用 VLM ({model_name}) 进行智能诊断...",
+                progress=50,
+                db=db
+            )
+
+            from ..ai_service import analyze_map_with_vlm
+            diagnosis_markdown = await analyze_map_with_vlm(
+                images_base64=[img_base64],
+                prompt=full_prompt
+            )
+
+            # 8. 解析风险等级和置信度（简单正则匹配）
+            risk_level = None
+            confidence_score = None
+
+            risk_patterns = {
+                "critical": r"极高风险|critical",
+                "high": r"高风险|high risk",
+                "medium": r"中风险|中等风险|medium risk",
+                "low": r"低风险|low risk"
+            }
+            for level, pattern in risk_patterns.items():
+                if re.search(pattern, diagnosis_markdown, re.IGNORECASE):
+                    risk_level = level
+                    break
+
+            # 尝试提取置信度（如果 VLM 输出了）
+            confidence_match = re.search(r"置信度[：:]\s*(\d+)%", diagnosis_markdown)
+            if confidence_match:
+                confidence_score = float(confidence_match.group(1)) / 100.0
+
+            # 9. 评估数据质量（1-10 分）
+            quality_score = None
+            quality_match = re.search(r"质量评分[：:]\s*(\d+(?:\.\d+)?)\s*/\s*10", diagnosis_markdown)
+            if quality_match:
+                quality_score = float(quality_match.group(1))
+
+            # 10. 更新诊断记录
+            diag_res = await db.execute(
+                select(AiDiagnosisORM).where(AiDiagnosisORM.id == diagnosis_id)
+            )
+            diag = diag_res.scalar_one()
+            diag.diagnosis_markdown = diagnosis_markdown
+            diag.risk_level = risk_level
+            diag.confidence_score = confidence_score
+            diag.quality_score = quality_score
+            diag.hazards_found = hazards_found
+            diag.hazards_snapshot = hazards_snapshot
+            diag.date_range = date_range
+            diag.duration_seconds = time.time() - start_time
+
+            await db.commit()
+
+            # 11. 完成任务
+            await task_service.update_task(
+                job.task_id,
+                status="COMPLETED",
+                message=f"AI 诊断完成 (风险等级: {risk_level or '未识别'})",
+                progress=100,
+                db=db
+            )
+
+        except Exception as exc:
+            # 更新诊断记录错误信息（如果已创建）
+            if diagnosis_id is not None:
+                try:
+                    diag_res = await db.execute(
+                        select(AiDiagnosisORM).where(AiDiagnosisORM.id == diagnosis_id)
+                    )
+                    diag = diag_res.scalar_one_or_none()
+                    if diag:
+                        diag.error_message = str(exc)
+                        diag.duration_seconds = time.time() - start_time
+                        await db.commit()
+                except Exception:
+                    logger.exception("Failed to update AI diagnosis error state")
+
+            await task_service.update_task(
+                job.task_id,
+                status="FAILED",
+                message=f"AI 诊断失败: {str(exc)}",
+                db=db
+            )
+
+
+def _scan_latest_mtime(directory: str) -> Optional[float]:
+    """Scan a directory tree and return the most recent file mtime, or None."""
+    if not directory or not os.path.isdir(directory):
+        return None
+    latest = 0.0
+    try:
+        for root, _dirs, files in os.walk(directory):
+            for f in files:
+                try:
+                    mt = os.path.getmtime(os.path.join(root, f))
+                    if mt > latest:
+                        latest = mt
+                except OSError as exc:
+                    print(f"[WARN] _scan_latest_mtime getmtime: {exc}")
+    except Exception as exc:
+        print(f"[WARN] _scan_latest_mtime walk: {exc}")
+    return latest if latest > 0 else None
+
+
+def _read_progress_file(progress_path: str) -> Optional[Dict[str, Any]]:
+    """Read the progress JSON file written by the subprocess."""
+    try:
+        if os.path.isfile(progress_path):
+            with open(progress_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _get_envi_progress_file(job_id: str) -> str:
+    """Return the progress file path matching envi_service convention."""
+    runtime_dir = settings.IDL_WORKER_RUNTIME_DIR
+    return os.path.join(runtime_dir, f"job_{job_id}_progress.json")
+
+
+# Stale threshold: no progress file update AND no output file activity
+# for this many seconds -> consider the subprocess dead.
+_ENVI_FILE_STALE_SECONDS = int(settings.ENVI_FILE_STALE_SECONDS)
+_ENVI_MONITOR_INTERVAL = 30  # seconds between checks
+
+# File stability: after subprocess exits, wait until all output files
+# have unchanged sizes for this many consecutive checks before declaring done.
+# This handles ENVI writing large files in chunks after envipyengine returns.
+_ENVI_STABILITY_CHECK_INTERVAL = int(settings.ENVI_STABILITY_CHECK_INTERVAL)
+_ENVI_STABILITY_ROUNDS = int(settings.ENVI_STABILITY_ROUNDS)
+_ENVI_STABILITY_MAX_WAIT = int(settings.ENVI_STABILITY_MAX_WAIT)
+
+
+def _collect_file_sizes(directory: str) -> Dict[str, int]:
+    """Return {filepath: size} for all files in directory tree."""
+    sizes: Dict[str, int] = {}
+    if not directory or not os.path.isdir(directory):
+        return sizes
+    try:
+        for root, _dirs, files in os.walk(directory):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    sizes[fp] = os.path.getsize(fp)
+                except OSError as exc:
+                    print(f"[WARN] _collect_file_sizes getsize: {exc}")
+    except Exception as exc:
+        print(f"[WARN] _collect_file_sizes walk: {exc}")
+    return sizes
+
+
+# Per-task absolute timeout (default 6h). The total timeout for a batch is
+# calculated as task_count * this value in _run_envi_workflow_job.
+_ENVI_PER_TASK_TIMEOUT = int(settings.ENVI_PER_TASK_TIMEOUT)
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Kill a process and all its children. Best-effort, never raises."""
+    try:
+        import psutil
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        try:
+            parent.kill()
+        except psutil.NoSuchProcess:
+            pass
+        psutil.wait_procs(children + [parent], timeout=10)
+    except ImportError:
+        # psutil not available, fallback to Windows taskkill
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True, timeout=15,
+            )
+        except Exception as exc:
+            print(f"[WARN] _kill_process_tree fallback: {exc}")
+    except Exception as exc:
+        print(f"[WARN] _kill_process_tree: pid={pid} — {exc}")
+
+
+async def _run_envi_workflow_job(
+    job: SystemJobORM,
+    workflow: str,
+    start_message: str,
+) -> None:
+    """Run an ENVI workflow via subprocess with file-activity monitoring.
+
+    Uses Popen + a monitoring loop that checks both the progress file
+    and output directory file activity to determine subprocess liveness.
+    Only kills the process when BOTH signals are stale.
+    """
+    if not job.task_id:
+        raise ValueError(f"{job.job_type} requires task_id for progress tracking.")
+
+    payload = job.payload or {}
+    root_dir = payload.get("root_dir", "")
+    num_to_process = int(payload.get("num_to_process", 0) or 0)
+    timeout_seconds = payload.get("timeout_seconds")
+
+    # Count Task_* folders to calculate dynamic absolute timeout
+    task_folder_count = 0
+    if root_dir and os.path.isdir(root_dir):
+        task_folder_count = len(
+            [d for d in glob.glob(os.path.join(root_dir, "Task_*")) if os.path.isdir(d)]
+        )
+    if num_to_process > 0:
+        task_folder_count = min(task_folder_count, num_to_process)
+    effective_absolute_timeout = _ENVI_PER_TASK_TIMEOUT * max(1, task_folder_count)
+
+    await task_service.start_task(job.task_id, message=start_message)
+    await task_service.update_task(
+        job.task_id, progress=10,
+        message=f"Launching ENVI worker subprocess... (tasks={task_folder_count}, timeout={effective_absolute_timeout}s)",
+    )
+
+    runner_cmd = [
+        sys.executable,
+        "-m",
+        "backend.app.services.envi_runner_cli",
+        "--workflow",
+        workflow,
+        "--root-dir",
+        str(root_dir),
+        "--num-to-process",
+        str(num_to_process),
+        "--job-id",
+        str(job.job_id),
+    ]
+    if timeout_seconds is not None:
+        runner_cmd.extend(["--timeout-seconds", str(int(timeout_seconds))])
+
+    progress_file = _get_envi_progress_file(job.job_id)
+
+    async def _task_keepalive():
+        """Periodically update task updated_at so zombie detection doesn't kill it."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                prog = _read_progress_file(progress_file)
+                msg = "ENVI processing..."
+                pct = None
+                if prog:
+                    step = prog.get("step", 0)
+                    total = prog.get("total_steps", 6)
+                    step_msg = prog.get("message", "")
+                    pair_index = prog.get("pair_index", 0)
+                    total_pairs = prog.get("total_pairs", 0)
+                    pair_name = prog.get("pair_name", "")
+
+                    # Build human-readable message
+                    step_part = f"Step {step}/{total}: {step_msg}" if step_msg else f"Step {step}/{total}"
+                    if total_pairs > 0 and pair_index > 0:
+                        pair_part = f"对 {pair_index}/{total_pairs}"
+                        if pair_name:
+                            pair_part += f" ({pair_name})"
+                        msg = f"{pair_part} · {step_part}"
+                    else:
+                        msg = step_part
+
+                    # Map to overall progress:
+                    # pair contributes (pair_index-1)/total_pairs of the 10-90% range,
+                    # plus step/total_steps within that pair's slice.
+                    if isinstance(step, (int, float)) and isinstance(total, (int, float)) and total > 0:
+                        if total_pairs > 0 and pair_index > 0:
+                            pair_frac = (pair_index - 1 + step / total) / total_pairs
+                            pct = min(90, 10 + int(80 * pair_frac))
+                        else:
+                            pct = min(90, 10 + int(80 * step / total))
+                await task_service.update_task(job.task_id, message=msg, progress=pct)
+            except Exception as _ka_exc:
+                print(f"[keepalive] WARNING: failed to update task {job.task_id}: {_ka_exc}")
+
+    def _run_with_monitoring() -> Dict[str, Any]:
+        # Use named temp files instead of PIPE to avoid buffer-full deadlock.
+        # TemporaryFile on Windows creates non-inheritable handles, so we use
+        # mkstemp + manual cleanup instead.
+        stdout_path = None
+        stderr_path = None
+        try:
+            stdout_fd, stdout_path = tempfile.mkstemp(suffix="_stdout.txt")
+            stderr_fd, stderr_path = tempfile.mkstemp(suffix="_stderr.txt")
+
+            proc = subprocess.Popen(
+                runner_cmd,
+                stdout=stdout_fd,
+                stderr=stderr_fd,
+                cwd=type(settings).PROJECT_ROOT,
+            )
+            # Close our copy of the fds; the child process has its own.
+            os.close(stdout_fd)
+            os.close(stderr_fd)
+
+            absolute_start = time.time()
+            last_activity = time.time()
+            last_step_msg = ""
+
+            while proc.poll() is None:
+                time.sleep(_ENVI_MONITOR_INTERVAL)
+
+                now = time.time()
+
+                # --- Signal 1: progress file ---
+                progress = _read_progress_file(progress_file)
+                if progress:
+                    ts = progress.get("timestamp", 0)
+                    if ts > last_activity:
+                        last_activity = ts
+                    msg = progress.get("message", "")
+                    if msg and msg != last_step_msg:
+                        last_step_msg = msg
+
+                # --- Signal 2: output directory file mtime ---
+                output_dir = ""
+                if progress and progress.get("output_dir"):
+                    output_dir = progress["output_dir"]
+                elif root_dir:
+                    output_dir = root_dir
+
+                if output_dir:
+                    dir_mtime = _scan_latest_mtime(output_dir)
+                    if dir_mtime and dir_mtime > last_activity:
+                        last_activity = dir_mtime
+
+                # --- Stale check ---
+                if (now - last_activity) > _ENVI_FILE_STALE_SECONDS:
+                    _kill_process_tree(proc.pid)
+                    try:
+                        proc.wait(timeout=15)
+                    except Exception as exc:
+                        print(f"[WARN] stale kill: proc.wait timeout — {exc}")
+                    raise RuntimeError(
+                        f"ENVI subprocess stale: no file activity for "
+                        f"{int(now - last_activity)}s "
+                        f"(threshold={_ENVI_FILE_STALE_SECONDS}s). "
+                        f"Last step: {last_step_msg}"
+                    )
+
+                # --- Absolute timeout ---
+                if (now - absolute_start) > effective_absolute_timeout:
+                    _kill_process_tree(proc.pid)
+                    try:
+                        proc.wait(timeout=15)
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"ENVI subprocess exceeded absolute timeout: "
+                        f"{int(now - absolute_start)}s > {effective_absolute_timeout}s. "
+                        f"Last step: {last_step_msg}"
+                    )
+
+            # --- Post-exit file stability check ---
+            # envipyengine may return before ENVI finishes writing large
+            # output files. Wait until all file sizes are stable.
+            output_dir = ""
+            progress = _read_progress_file(progress_file)
+            if progress and progress.get("output_dir"):
+                output_dir = progress["output_dir"]
+            elif root_dir:
+                output_dir = root_dir
+
+            if output_dir:
+                stable_count = 0
+                prev_sizes: Dict[str, int] = {}
+                wait_start = time.time()
+                while stable_count < _ENVI_STABILITY_ROUNDS:
+                    if (time.time() - wait_start) > _ENVI_STABILITY_MAX_WAIT:
+                        break  # safety cap
+                    time.sleep(_ENVI_STABILITY_CHECK_INTERVAL)
+                    cur_sizes = _collect_file_sizes(output_dir)
+                    if cur_sizes == prev_sizes:
+                        stable_count += 1
+                    else:
+                        stable_count = 0
+                        prev_sizes = cur_sizes
+
+            # Process finished - read output from temp files
+            with open(stdout_path, "r", encoding="utf-8", errors="replace") as f:
+                stdout = f.read()
+            with open(stderr_path, "r", encoding="utf-8", errors="replace") as f:
+                stderr = f.read()
+        finally:
+            for p in (stdout_path, stderr_path):
+                if p:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "ENVI runner subprocess failed. "
+                f"rc={proc.returncode} "
+                f"stderr={(stderr or '').strip()[:1200]!r}"
+            )
+        output = (stdout or "").strip()
+        if not output:
+            raise RuntimeError("ENVI runner subprocess returned empty output.")
+        try:
+            return json.loads(output.splitlines()[-1])
+        except Exception as exc:
+            raise RuntimeError(
+                f"ENVI runner returned non-JSON output: {output[:1200]!r}"
+            ) from exc
+
+    keepalive_task = asyncio.create_task(_task_keepalive())
+    try:
+        run_meta = await asyncio.to_thread(_run_with_monitoring)
+    finally:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+    await task_service.add_log(
+        job.task_id,
+        "INFO",
+        (
+            f"ENVI workflow completed. workflow={run_meta.get('workflow')} "
+            f"duration={run_meta.get('duration_seconds')}s "
+            f"summary={run_meta.get('summary')}"
+        ),
+    )
+    publish_note = ""
+    if workflow in {"dinsar", "dinsar_custom"}:
+        output_dirs = _dedupe_existing_dirs(run_meta.get("output_dirs"))
+        if output_dirs:
+            await task_service.update_task(
+                job.task_id,
+                progress=92,
+                message=f"ENVI {workflow} completed, publishing result catalog...",
+            )
+            try:
+                async with AsyncSessionLocal() as db:
+                    publish_result = await result_catalog_service.publish_from_sources(
+                        db,
+                        output_dirs,
+                    )
+                    rebuild_result = None
+                    if int(publish_result.get("processed", 0) or 0) > 0:
+                        rebuild_result = await result_catalog_service.rebuild_catalog(
+                            db,
+                            full_rebuild=True,
+                        )
+                publish_note = (
+                    f"; catalog published {publish_result.get('processed', 0)}"
+                    f" package(s), issues {rebuild_result.get('issue_count', 0) if rebuild_result else 0}"
+                )
+                await task_service.add_log(
+                    job.task_id,
+                    "INFO",
+                    f"Auto-published ENVI results from {len(output_dirs)} directory(s).",
+                )
+            except Exception as exc:
+                publish_note = f"; catalog publish failed: {exc}"
+                await task_service.add_log(
+                    job.task_id,
+                    "WARNING",
+                    f"Auto-publish ENVI results failed: {exc}",
+                )
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            f"ENVI {workflow} completed. "
+            f"run_id={run_meta.get('run_id')} "
+            f"log={run_meta.get('log_path')}{publish_note}"
+        ),
+    )
+
+
+async def _handle_idl_run_import(job: SystemJobORM) -> None:
+    await _run_envi_workflow_job(
+        job,
+        workflow="import",
+        start_message="Starting ENVI Import workflow...",
+    )
+
+
+async def _handle_idl_run_dinsar(job: SystemJobORM) -> None:
+    payload = job.payload or {}
+    mode = payload.get("mode", "metatask")
+    workflow = "dinsar_custom" if mode == "custom" else "dinsar"
+    await _run_envi_workflow_job(
+        job,
+        workflow=workflow,
+        start_message=f"Starting ENVI D-InSAR workflow (mode={mode})...",
+    )
+
+
+async def _handle_isce2_run(job: SystemJobORM) -> None:
+    """ISCE2 生产任务 handler — 通过 WSL 执行 run_lt1_dinsar_pipeline.py。"""
+    payload = job.payload or {}
+    engine_code = payload.get("engine_code", "isce2")
+    profile = payload.get("profile", "lt1_stripmap")
+    root_dir = payload.get("root_dir", "")
+    num_to_process = payload.get("num_to_process", 0)
+    timeout_seconds = payload.get("timeout_seconds")
+    extra = payload.get("extra", {})
+
+    await task_service.start_task(
+        job.task_id,
+        message=f"[{engine_code}/{profile}] 启动 ISCE2 处理...",
+    )
+    await task_service.add_log(
+        job.task_id,
+        "INFO",
+        f"ISCE2 job accepted. root_dir={root_dir}, profile={profile}, timeout={timeout_seconds or 21600}s, extra={extra}",
+    )
+
+    from ..dinsar_engines.base import RunRequest
+    from ..dinsar_engines import registry
+
+    engine = registry.get_engine(engine_code)
+    if not engine:
+        raise RuntimeError(f"引擎 '{engine_code}' 未注册")
+
+    request = RunRequest(
+        engine_code=engine_code,
+        profile=profile,
+        root_dir=root_dir,
+        job_id=job.job_id,
+        num_to_process=num_to_process,
+        timeout_seconds=timeout_seconds,
+        extra=extra,
+    )
+
+    await task_service.update_task(
+        job.task_id,
+        progress=5,
+        message=f"[{engine_code}/{profile}] 正在执行，请等待...",
+    )
+
+    async def _task_keepalive():
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await task_service.update_task(
+                    job.task_id,
+                    progress=5,
+                    message=f"[{engine_code}/{profile}] Running in WSL...",
+                )
+            except Exception as exc:
+                print(f"[keepalive] WARNING: failed to update task {job.task_id}: {exc}")
+
+    keepalive_task = asyncio.create_task(_task_keepalive())
+    try:
+        result = await asyncio.to_thread(engine.run, request)
+    finally:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+
+    detail = result.detail or {}
+
+    if detail.get("mode") or detail.get("task_count") is not None:
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"ISCE2 run mode={detail.get('mode', 'unknown')}, task_count={detail.get('task_count', 0)}",
+        )
+
+    for invalid in detail.get("invalid_candidates", []) or []:
+        await task_service.add_log(
+            job.task_id,
+            "WARNING",
+            f"Skipped invalid task candidate: {invalid.get('name')} missing {invalid.get('missing_subdirs')}",
+        )
+
+    for item in detail.get("task_results", []) or []:
+        level = "INFO" if item.get("success") else "WARNING"
+        await task_service.add_log(
+            job.task_id,
+            level,
+            (
+                f"Task {item.get('task_name')} "
+                f"{'completed' if item.get('success') else 'failed'} "
+                f"(rc={item.get('returncode')}, dir={item.get('task_dir')})"
+            ),
+        )
+        if item.get("command"):
+            await task_service.add_log(
+                job.task_id,
+                "INFO",
+                f"WSL command [{item.get('task_name')}]: {item.get('command')}",
+            )
+        if item.get("stdout_tail"):
+            await task_service.add_log(
+                job.task_id,
+                "INFO",
+                f"WSL stdout tail [{item.get('task_name')}]:\n{item.get('stdout_tail')}",
+            )
+        if item.get("stderr_tail"):
+            await task_service.add_log(
+                job.task_id,
+                "WARNING",
+                f"WSL stderr tail [{item.get('task_name')}]:\n{item.get('stderr_tail')}",
+            )
+
+    if detail.get("wsl_task_dir"):
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"WSL task dir: {detail['wsl_task_dir']}",
+        )
+    if detail.get("wsl_work_root"):
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"WSL work root: {detail['wsl_work_root']}",
+        )
+    if detail.get("wsl_output_root"):
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"WSL output root: {detail['wsl_output_root']}",
+        )
+    if detail.get("wsl_orbit_pool"):
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"WSL orbit pool: {detail['wsl_orbit_pool']}",
+        )
+    if detail.get("wsl_dem"):
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"WSL DEM: {detail['wsl_dem']}",
+        )
+    if detail.get("command"):
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"WSL command: {detail['command']}",
+        )
+    if detail.get("stdout_tail"):
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"WSL stdout tail:\n{detail['stdout_tail']}",
+        )
+    if detail.get("stderr_tail"):
+        await task_service.add_log(
+            job.task_id,
+            "WARNING",
+            f"WSL stderr tail:\n{detail['stderr_tail']}",
+        )
+
+    if result.success:
+        output_dirs = _dedupe_existing_dirs(result.output_dirs)
+        if output_dirs:
+            await task_service.update_task(
+                job.task_id,
+                progress=92,
+                message=f"[{engine_code}/{profile}] Production finished, publishing result catalog...",
+            )
+            try:
+                async with AsyncSessionLocal() as db:
+                    publish_result = await result_catalog_service.publish_from_sources(
+                        db,
+                        output_dirs,
+                    )
+                    rebuild_result = None
+                    if int(publish_result.get("processed", 0) or 0) > 0:
+                        rebuild_result = await result_catalog_service.rebuild_catalog(
+                            db,
+                            full_rebuild=True,
+                        )
+                await task_service.add_log(
+                    job.task_id,
+                    "INFO",
+                    (
+                        f"Auto-published ISCE2 results from {len(output_dirs)} directory(s). "
+                        f"processed={publish_result.get('processed', 0)} "
+                        f"issues={rebuild_result.get('issue_count', 0) if rebuild_result else 0}"
+                    ),
+                )
+            except Exception as exc:
+                await task_service.add_log(
+                    job.task_id,
+                    "WARNING",
+                    f"Auto-publish ISCE2 results failed: {exc}",
+                )
+
+    if result.success:
+        await task_service.update_task(
+            job.task_id,
+            status="COMPLETED",
+            progress=100,
+            message=(
+                f"[{engine_code}/{profile}] 完成 — "
+                f"成功 {result.pairs_processed} 对，失败 {result.pairs_failed} 对"
+            ),
+        )
+    else:
+        error_text = (result.error or "未知错误").strip()
+        error_summary_lines = [line.strip() for line in error_text.splitlines() if line.strip()]
+        error_summary = error_summary_lines[-1] if error_summary_lines else "未知错误"
+        if "Work directory already exists" in error_text:
+            error_summary += "；请重试并启用 force 以重建工作目录"
+        raise RuntimeError(
+            f"[{engine_code}/{profile}] 执行失败：{error_summary}"
+        )
+
+
+async def _handle_water_geocode(job: SystemJobORM) -> None:
+    """单景 SAR 地理编码 job handler（多视 + 地理编码 + 辐射定标）。"""
+    from .water_service import run_geocoding_workflow, WATER_RESULTS_DIR
+
+    payload = job.payload or {}
+    scene_id = payload.get("scene_id")
+    if not scene_id:
+        raise ValueError("WATER_GEOCODE job 缺少 scene_id")
+
+    await task_service.start_task(job.task_id, message="查询雷达数据...")
+
+    async with AsyncSessionLocal() as db:
+        scene = await db.get(SARSceneGeoORM, int(scene_id))
+        if not scene:
+            raise ValueError(f"SARSceneGeoORM id={scene_id} 不存在")
+        from ..models import RadarDataORM
+        radar = await db.get(RadarDataORM, scene.radar_data_id)
+        if not radar:
+            raise ValueError(f"RadarDataORM id={scene.radar_data_id} 不存在")
+        file_path = radar.file_path
+        unique_id = radar.unique_id
+
+    output_dir = os.path.join(WATER_RESULTS_DIR, f"scene_{unique_id}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    await task_service.update_task(job.task_id, progress=10, message="启动地理编码子进程...")
+
+    def _run() -> Dict[str, Any]:
+        return run_geocoding_workflow(
+            file_path=file_path,
+            output_dir=output_dir,
+            job_id=job.job_id,
+        )
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except Exception as exc:
+        async with AsyncSessionLocal() as db:
+            scene = await db.get(SARSceneGeoORM, int(scene_id))
+            if scene:
+                scene.status = "FAILED"
+                scene.error_msg = str(exc)
+                await db.commit()
+        raise
+
+    async with AsyncSessionLocal() as db:
+        scene = await db.get(SARSceneGeoORM, int(scene_id))
+        if scene:
+            if result.get("ok"):
+                scene.geo_path = result.get("geo_path")
+                scene.pixel_size_m = result.get("pixel_size_m")
+                scene.status = "DONE"
+                scene.error_msg = None
+            else:
+                scene.status = "FAILED"
+                scene.error_msg = result.get("error", "Unknown error")
+            await db.commit()
+
+    if not result.get("ok"):
+        raise RuntimeError(f"地理编码失败: {result.get('error')}")
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=f"地理编码完成: {result.get('geo_path')}",
+    )
+
+
+async def _handle_water_flood(job: SystemJobORM) -> None:
+    """洪涝检测 job handler（灾前 + 灾后配对分类）。"""
+    from .water_service import run_flood_detection, WATER_RESULTS_DIR
+
+    payload = job.payload or {}
+    detection_id = payload.get("detection_id")
+    if not detection_id:
+        raise ValueError("WATER_FLOOD job 缺少 detection_id")
+    refine = bool(payload.get("refine", False))
+
+    await task_service.start_task(job.task_id, message="查询洪涝检测记录...")
+
+    async with AsyncSessionLocal() as db:
+        det = await db.get(FloodDetectionORM, int(detection_id))
+        if not det:
+            raise ValueError(f"FloodDetectionORM id={detection_id} 不存在")
+        pre_scene = await db.get(SARSceneGeoORM, det.pre_scene_id)
+        post_scene = await db.get(SARSceneGeoORM, det.post_scene_id)
+        if not pre_scene or not post_scene:
+            raise ValueError("灾前或灾后场景记录不存在")
+        if pre_scene.status != "DONE" or post_scene.status != "DONE":
+            raise ValueError("灾前或灾后场景尚未完成地理编码")
+        pre_geo = pre_scene.geo_path
+        post_geo = post_scene.geo_path
+
+    output_dir = os.path.join(WATER_RESULTS_DIR, f"flood_{detection_id}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    await task_service.update_task(job.task_id, progress=10, message="启动洪涝检测子进程...")
+
+    def _run() -> Dict[str, Any]:
+        return run_flood_detection(
+            pre_geo_path=pre_geo,
+            post_geo_path=post_geo,
+            output_dir=output_dir,
+            job_id=job.job_id,
+            refine=refine,
+        )
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except Exception as exc:
+        async with AsyncSessionLocal() as db:
+            det = await db.get(FloodDetectionORM, int(detection_id))
+            if det:
+                det.status = "FAILED"
+                det.error_msg = str(exc)
+                await db.commit()
+        raise
+
+    async with AsyncSessionLocal() as db:
+        det = await db.get(FloodDetectionORM, int(detection_id))
+        if det:
+            if result.get("ok"):
+                det.classified_path = result.get("classified_path")
+                det.flood_area_km2 = result.get("flood_area_km2")
+                det.stable_water_area_km2 = result.get("stable_water_area_km2")
+                det.output_dir = output_dir
+                det.status = "DONE"
+                det.error_msg = None
+            else:
+                det.status = "FAILED"
+                det.error_msg = result.get("error", "Unknown error")
+            await db.commit()
+
+    if not result.get("ok"):
+        raise RuntimeError(f"洪涝检测失败: {result.get('error')}")
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            f"洪涝检测完成: 洪涝面积={result.get('flood_area_km2')} km², "
+            f"稳定水体={result.get('stable_water_area_km2')} km²"
+        ),
+    )
+
+
+async def _handle_water_detect(job: SystemJobORM) -> None:
+    """水体检测 job handler（Otsu + DEM + 形态学 + 连通分量）。"""
+    from .water_detect_service import run_water_detection
+
+    payload = job.payload or {}
+    detection_id = payload.get("detection_id")
+    if not detection_id:
+        raise ValueError("WATER_DETECT job 缺少 detection_id")
+
+    await task_service.start_task(job.task_id, message="读取检测任务信息...")
+
+    async with AsyncSessionLocal() as db:
+        det = await db.get(WaterDetectionORM, int(detection_id))
+        if not det:
+            raise ValueError(f"WaterDetectionORM id={detection_id} 不存在")
+        input_path = det.input_path
+        det.status = "RUNNING"
+        await db.commit()
+
+    if not input_path:
+        raise ValueError("水体检测缺少输入路径 input_path")
+
+    output_dir = os.path.join(os.path.dirname(input_path), f"water_detect_{detection_id}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    await task_service.update_task(job.task_id, progress=10, message="启动水体检测算法...")
+
+    def _run() -> Dict[str, Any]:
+        return run_water_detection(
+            geo_tiff_path=input_path,
+            output_dir=output_dir,
+            job_id=job.job_id,
+        )
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except Exception as exc:
+        async with AsyncSessionLocal() as db:
+            det = await db.get(WaterDetectionORM, int(detection_id))
+            if det:
+                det.status = "FAILED"
+                det.error_msg = str(exc)
+                await db.commit()
+        raise
+
+    async with AsyncSessionLocal() as db:
+        det = await db.get(WaterDetectionORM, int(detection_id))
+        if det:
+            if result.get("ok"):
+                det.output_path = result.get("output_path")
+                det.water_area_km2 = result.get("water_area_km2")
+                det.water_pixel_count = result.get("water_pixel_count")
+                det.otsu_threshold_db = result.get("otsu_threshold_db")
+                det.status = "DONE"
+                det.error_msg = None
+            else:
+                det.status = "FAILED"
+                det.error_msg = result.get("error", "Unknown error")
+            await db.commit()
+
+    if not result.get("ok"):
+        raise RuntimeError(f"水体检测失败: {result.get('error')}")
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            f"水体检测完成: 水体面积={result.get('water_area_km2')} km², "
+            f"水体像素={result.get('water_pixel_count')}, "
+            f"Otsu阈值={result.get('otsu_threshold_db')}"
+        ),
+    )
+
+
+async def _handle_gf3_process(job: SystemJobORM) -> None:
+    """GF3 L1A→L2 处理 job handler（辐射定标 + RPC 几何校正）。"""
+    from .gf3_service import run_gf3_l1a_to_l2
+
+    payload = job.payload or {}
+    processing_id = payload.get("processing_id")
+    if not processing_id:
+        raise ValueError("GF3_PROCESS job 缺少 processing_id")
+
+    await task_service.start_task(job.task_id, message="读取 GF3 处理任务信息...")
+
+    async with AsyncSessionLocal() as db:
+        proc = await db.get(GF3ProcessingORM, int(processing_id))
+        if not proc:
+            raise ValueError(f"GF3ProcessingORM id={processing_id} 不存在")
+        input_dir = proc.input_dir
+        resolution = proc.resolution or 0.0002
+        output_dir = proc.output_dir
+        proc.status = "RUNNING"
+        await db.commit()
+
+    if not output_dir:
+        output_dir = os.path.join(settings.GF3_STORAGE_DIRS, f"gf3_{processing_id}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    await task_service.update_task(job.task_id, progress=10, message="启动 GF3 L1A→L2 处理...")
+
+    def _run() -> Dict[str, Any]:
+        return run_gf3_l1a_to_l2(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            resolution=resolution,
+            job_id=job.job_id,
+        )
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except Exception as exc:
+        async with AsyncSessionLocal() as db:
+            proc = await db.get(GF3ProcessingORM, int(processing_id))
+            if proc:
+                proc.status = "FAILED"
+                proc.error_msg = str(exc)
+                await db.commit()
+        raise
+
+    async with AsyncSessionLocal() as db:
+        proc = await db.get(GF3ProcessingORM, int(processing_id))
+        if proc:
+            if result.get("ok"):
+                import json as _json
+                proc.output_dir = result.get("output_dir", output_dir)
+                proc.polarizations = _json.dumps(result.get("polarizations", []))
+                proc.l2_paths = _json.dumps(result.get("l2_paths", []))
+                proc.status = "DONE"
+                proc.error_msg = None
+            else:
+                proc.status = "FAILED"
+                proc.error_msg = result.get("error", "Unknown error")
+            await db.commit()
+
+    if not result.get("ok"):
+        raise RuntimeError(f"GF3 处理失败: {result.get('error')}")
+
+    pols = result.get("polarizations", [])
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=f"GF3 处理完成: 极化={pols}, L2产品={len(result.get('l2_paths', []))}个",
+    )
+
+
+async def _handle_gf3_batch_process(job: SystemJobORM) -> None:
+    """批量 GF3 L1A→L2：扫描来源目录，逐个处理并自动入库到 radar_data。"""
+    from .gf3_service import run_gf3_l1a_to_l2, register_l2_to_radar_data
+
+    payload = job.payload or {}
+    source_dirs = payload.get("source_dirs") or []
+    if not source_dirs:
+        raise ValueError("GF3_BATCH_PROCESS: source_dirs 为空")
+
+    await task_service.start_task(job.task_id, message="扫描 GF3 L1A 来源目录...")
+
+    # Collect all L1A subdirectories
+    l1a_dirs: List[str] = []
+    for src in source_dirs:
+        if not os.path.isdir(src):
+            logger.warning("[GF3 Batch] source dir not found: %s", src)
+            continue
+        for entry in os.scandir(src):
+            if entry.is_dir(follow_symlinks=False):
+                l1a_dirs.append(entry.path)
+
+    if not l1a_dirs:
+        await task_service.update_task(
+            job.task_id, status="COMPLETED", progress=100,
+            message="未在来源目录中找到 L1A 子目录",
+        )
+        return
+
+    # Filter out already processed (check GF3_STORAGE_DIRS for output)
+    gf3_storage = settings.GF3_STORAGE_DIRS
+    os.makedirs(gf3_storage, exist_ok=True)
+
+    pending_dirs: List[str] = []
+    for d in l1a_dirs:
+        out_name = f"gf3_{os.path.basename(d)}"
+        out_path = os.path.join(gf3_storage, out_name)
+        if os.path.isdir(out_path):
+            # Check if any L2 TIFF exists
+            has_l2 = any(f.lower().endswith((".tif", ".tiff")) for f in os.listdir(out_path))
+            if has_l2:
+                continue
+        pending_dirs.append(d)
+
+    if not pending_dirs:
+        await task_service.update_task(
+            job.task_id, status="COMPLETED", progress=100,
+            message=f"所有 {len(l1a_dirs)} 个 L1A 目录已处理过",
+        )
+        return
+
+    total = len(pending_dirs)
+    success_count = 0
+    fail_count = 0
+
+    await task_service.update_task(
+        job.task_id, progress=5,
+        message=f"待处理 {total} 个 L1A 目录（共 {len(l1a_dirs)} 个，已跳过 {len(l1a_dirs) - total} 个）",
+    )
+
+    for idx, input_dir in enumerate(pending_dirs):
+        dir_name = os.path.basename(input_dir)
+        output_dir = os.path.join(gf3_storage, f"gf3_{dir_name}")
+        pct = int(5 + (idx / total) * 90)
+
+        await task_service.update_task(
+            job.task_id, progress=pct,
+            message=f"处理 {idx + 1}/{total}: {dir_name}",
+        )
+
+        try:
+            result = await asyncio.to_thread(
+                run_gf3_l1a_to_l2,
+                input_dir=input_dir,
+                output_dir=output_dir,
+                resolution=0.0002,
+                job_id=job.job_id,
+            )
+            if result.get("ok"):
+                success_count += 1
+                # Auto-register to radar_data
+                try:
+                    async with AsyncSessionLocal() as db:
+                        await register_l2_to_radar_data(
+                            l2_dir=result.get("output_dir", output_dir),
+                            input_dir_name=dir_name,
+                            polarizations=result.get("polarizations", []),
+                            db=db,
+                        )
+                except Exception as reg_err:
+                    logger.warning("[GF3 Batch] Auto-register failed for %s: %s", dir_name, reg_err)
+            else:
+                fail_count += 1
+                logger.warning("[GF3 Batch] Failed: %s — %s", dir_name, result.get("error"))
+        except Exception as exc:
+            fail_count += 1
+            logger.error("[GF3 Batch] Exception for %s: %s", dir_name, exc)
+
+    await task_service.update_task(
+        job.task_id, status="COMPLETED", progress=100,
+        message=f"GF3 批量处理完成: 成功 {success_count}/{total}, 失败 {fail_count}",
+    )
+
+
+async def _handle_publish_dinsar_products_clean(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("PUBLISH_DINSAR_PRODUCTS requires task_id for progress tracking.")
+    payload = job.payload or {}
+    source_directories = payload.get("source_directories") or []
+    publish_root = payload.get("publish_root") or None
+    rebuild_catalog = bool(payload.get("rebuild_catalog", True))
+
+    await task_service.start_task(job.task_id, message="正在发布 D-InSAR 结果包...")
+    async with AsyncSessionLocal() as db:
+        publish_result = await result_catalog_service.publish_from_sources(
+            db,
+            source_directories,
+            publish_root=publish_root,
+        )
+        message = (
+            f"结果发布完成: 处理 {publish_result.get('processed', 0)} 个，"
+            f"失败 {publish_result.get('failed', 0)} 个。"
+        )
+        if rebuild_catalog:
+            await task_service.update_task(
+                job.task_id,
+                message="正在重建 D-InSAR 结果目录索引...",
+                progress=70,
+            )
+            rebuild_result = await result_catalog_service.rebuild_catalog(
+                db,
+                publish_root=publish_root,
+                full_rebuild=True,
+            )
+            message += (
+                f" 目录索引已更新 {rebuild_result.get('registered', 0)} 条，"
+                f"问题 {rebuild_result.get('issue_count', 0)} 条。"
+            )
+            compat_payload = rebuild_result.get("compat_sync") or {}
+            compat_error = rebuild_result.get("compat_error")
+            message += f" 兼容视图同步 {compat_payload.get('compat_count', 0)} 条。"
+            if compat_error:
+                message += f" compat_error={compat_error}。"
+
+        await task_service.update_task(
+            job.task_id,
+            status="COMPLETED",
+            progress=100,
+            message=message,
+        )
+
+
+async def _handle_rebuild_dinsar_catalog_clean(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("REBUILD_DINSAR_CATALOG requires task_id for progress tracking.")
+    payload = job.payload or {}
+    publish_root = payload.get("publish_root") or None
+    full_rebuild = bool(payload.get("full_rebuild", True))
+
+    await task_service.start_task(job.task_id, message="正在重建 D-InSAR 结果目录索引...")
+    async with AsyncSessionLocal() as db:
+        result = await result_catalog_service.rebuild_catalog(
+            db,
+            publish_root=publish_root,
+            full_rebuild=full_rebuild,
+        )
+        compat_payload = result.get("compat_sync") or {}
+        compat_error = result.get("compat_error")
+        message = (
+            f"结果目录索引已重建: 发现 {result.get('manifest_count', 0)} 个包，"
+            f"入库 {result.get('registered', 0)} 条，失败 {result.get('failed', 0)} 条，"
+            f"兼容视图 {compat_payload.get('compat_count', 0)} 条。"
+        )
+        if compat_error:
+            message += f" compat_error={compat_error}。"
+        await task_service.update_task(
+            job.task_id,
+            status="COMPLETED",
+            progress=100,
+            message=message,
+        )
+
+
+async def _handle_timeseries_prepare(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("TIMESERIES_PREPARE requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("TIMESERIES_PREPARE requires run_id payload.")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await task_service.start_task(
+                job.task_id,
+                message="Preparing SBAS stack selection manifest...",
+                db=db,
+            )
+            result = await timeseries_service.prepare_run(run_id, db=db)
+            await task_service.update_task(
+                job.task_id,
+                progress=25,
+                message=(
+                    f"SBAS prepare complete: scenes={result.get('scene_count', 0)} "
+                    f"manifest={result.get('manifest_path')}"
+                ),
+                db=db,
+            )
+        except Exception as exc:
+            await timeseries_service.mark_run_failed(run_id, str(exc), db=db)
+            raise
+
+
+async def _handle_timeseries_stack_prep(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("TIMESERIES_STACK_PREP requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    refresh = bool(payload.get("refresh", False))
+    if not run_id:
+        raise ValueError("TIMESERIES_STACK_PREP requires run_id payload.")
+
+    progress = 90 if refresh else 50
+    message = (
+        "Refreshing SBAS stack readiness after materialization..."
+        if refresh
+        else "Building LT-1 stack-prep workspace..."
+    )
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await task_service.update_task(
+                job.task_id,
+                progress=progress,
+                message=message,
+                db=db,
+            )
+            result = await timeseries_service.build_stack_prep(run_id, refresh=refresh, db=db)
+            if refresh:
+                await task_service.update_task(
+                    job.task_id,
+                    progress=85,
+                    message=(
+                        f"SBAS stack ready: scenes={result.get('scene_count', 0)} "
+                        f"manifest={result.get('manifest_path')}"
+                    ),
+                    db=db,
+                )
+            else:
+                ready_text = "ready" if result.get("ready") else "waiting_for_materialization"
+                await task_service.update_task(
+                    job.task_id,
+                    progress=55,
+                    message=(
+                        f"Initial stack-prep complete: state={ready_text} "
+                        f"manifest={result.get('manifest_path')}"
+                    ),
+                    db=db,
+                )
+        except Exception as exc:
+            await timeseries_service.mark_run_failed(run_id, str(exc), db=db)
+            raise
+
+
+async def _handle_timeseries_materialize(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("TIMESERIES_MATERIALIZE requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    force = bool(payload.get("force", False))
+    if not run_id:
+        raise ValueError("TIMESERIES_MATERIALIZE requires run_id payload.")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await task_service.update_task(
+                job.task_id,
+                progress=75,
+                message="Materializing LT-1 SLC scenes in WSL...",
+                db=db,
+            )
+            result = await timeseries_service.materialize_run(run_id, force=force, db=db)
+            await task_service.update_task(
+                job.task_id,
+                progress=80,
+                message=(
+                    f"Materialization complete: scenes={result.get('scene_count', 0)} "
+                    f"summary={result.get('summary_path')}"
+                ),
+                db=db,
+            )
+        except Exception as exc:
+            await timeseries_service.mark_run_failed(run_id, str(exc), db=db)
+            raise
+
+
+async def _handle_timeseries_run_isce2_stack(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("TIMESERIES_RUN_ISCE2_STACK requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("TIMESERIES_RUN_ISCE2_STACK requires run_id payload.")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await task_service.update_task(
+                job.task_id,
+                progress=88,
+                message="Running ISCE2 stripmap stack workflow in WSL...",
+                db=db,
+            )
+            result = await timeseries_service.run_isce2_stack(run_id, db=db)
+            await task_service.update_task(
+                job.task_id,
+                progress=91,
+                message=(
+                    f"ISCE2 stack complete: run_steps={len(result.get('run_sequence') or [])} "
+                    f"work_dir={result.get('stack_work_dir')}"
+                ),
+                db=db,
+            )
+        except Exception as exc:
+            await timeseries_service.mark_run_failed(run_id, str(exc), db=db)
+            raise
+
+
+async def _handle_timeseries_run_mintpy_sbas(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("TIMESERIES_RUN_MINTPY_SBAS requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("TIMESERIES_RUN_MINTPY_SBAS requires run_id payload.")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await task_service.update_task(
+                job.task_id,
+                progress=93,
+                message="Running MintPy SBAS inversion...",
+                db=db,
+            )
+            result = await timeseries_service.run_mintpy_sbas(run_id, db=db)
+            await task_service.update_task(
+                job.task_id,
+                progress=95,
+                message=(
+                    f"MintPy SBAS complete: work_dir={result.get('mintpy_work_dir')} "
+                    f"cfg={result.get('config_path')}"
+                ),
+                db=db,
+            )
+        except Exception as exc:
+            await timeseries_service.mark_run_failed(run_id, str(exc), db=db)
+            raise
+
+
+async def _handle_timeseries_export_publish(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("TIMESERIES_EXPORT_PUBLISH requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("TIMESERIES_EXPORT_PUBLISH requires run_id payload.")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await task_service.update_task(
+                job.task_id,
+                progress=96,
+                message="Exporting PS-InSAR publish bundle...",
+                db=db,
+            )
+            result = await timeseries_service.export_publish_bundle(run_id, db=db)
+            await task_service.update_task(
+                job.task_id,
+                progress=98,
+                message=(
+                    f"Publish bundle exported: manifest={result.get('manifest_path')} "
+                    f"publish_dir={result.get('publish_dir')}"
+                ),
+                db=db,
+            )
+        except Exception as exc:
+            await timeseries_service.mark_run_failed(run_id, str(exc), db=db)
+            raise
+
+
+async def _handle_timeseries_register_product(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("TIMESERIES_REGISTER_PRODUCT requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("TIMESERIES_REGISTER_PRODUCT requires run_id payload.")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await task_service.update_task(
+                job.task_id,
+                progress=99,
+                message="Registering PS-InSAR product into catalog...",
+                db=db,
+            )
+            result = await timeseries_service.register_psinsar_product(run_id, db=db)
+            await task_service.update_task(
+                job.task_id,
+                status="COMPLETED",
+                progress=100,
+                message=(
+                    f"PS-InSAR run published: run_id={result.get('run_id')} "
+                    f"product_id={result.get('product_id')}"
+                ),
+                db=db,
+            )
+        except Exception as exc:
+            await timeseries_service.mark_run_failed(run_id, str(exc), db=db)
+            raise
+
+
+async def _handle_rebuild_psinsar_catalog(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("REBUILD_PSINSAR_CATALOG requires task_id for progress tracking.")
+    payload = job.payload or {}
+    publish_root = payload.get("publish_root") or None
+    full_rebuild = bool(payload.get("full_rebuild", True))
+
+    await task_service.start_task(job.task_id, message="正在重建 PS-InSAR 结果目录索引...")
+    async with AsyncSessionLocal() as db:
+        result = await psinsar_catalog_service.rebuild_catalog(
+            db,
+            publish_root=publish_root,
+            full_rebuild=full_rebuild,
+        )
+        await task_service.update_task(
+            job.task_id,
+            status="COMPLETED",
+            progress=100,
+            message=(
+                f"PS-InSAR 结果目录已重建: 发现 {result.get('manifest_count', 0)} 个包, "
+                f"入库 {result.get('registered', 0)} 条, 失败 {result.get('failed', 0)} 条。"
+            ),
+        )
+
+
+_HANDLERS = {
+    JOB_TYPE_SCAN_DATA: _handle_scan_data,
+    JOB_TYPE_SCAN_DINSAR: _handle_scan_dinsar,
+    JOB_TYPE_PUBLISH_DINSAR_PRODUCTS: _handle_publish_dinsar_products_clean,
+    JOB_TYPE_REBUILD_DINSAR_CATALOG: _handle_rebuild_dinsar_catalog_clean,
+    JOB_TYPE_TIMESERIES_PREPARE: _handle_timeseries_prepare,
+    JOB_TYPE_TIMESERIES_STACK_PREP: _handle_timeseries_stack_prep,
+    JOB_TYPE_TIMESERIES_MATERIALIZE: _handle_timeseries_materialize,
+    JOB_TYPE_TIMESERIES_RUN_ISCE2_STACK: _handle_timeseries_run_isce2_stack,
+    JOB_TYPE_TIMESERIES_RUN_MINTPY_SBAS: _handle_timeseries_run_mintpy_sbas,
+    JOB_TYPE_TIMESERIES_EXPORT_PUBLISH: _handle_timeseries_export_publish,
+    JOB_TYPE_TIMESERIES_REGISTER_PRODUCT: _handle_timeseries_register_product,
+    JOB_TYPE_REBUILD_PSINSAR_CATALOG: _handle_rebuild_psinsar_catalog,
+    JOB_TYPE_COPY_DATA: _handle_copy_data,
+    JOB_TYPE_UNPACK: _handle_unpack_archives,
+    JOB_TYPE_AI_TRAIN: _handle_ai_train,
+    JOB_TYPE_AI_PREDICT: _handle_ai_predict,
+    JOB_TYPE_AI_ANALYZE: _handle_ai_analyze,
+    JOB_TYPE_AI_WARMUP: _handle_ai_warmup,
+    JOB_TYPE_AI_DIAGNOSIS: _handle_ai_diagnosis,
+    JOB_TYPE_SCAN_HAZARD: _handle_scan_hazard,
+    JOB_TYPE_IDL_RUN_IMPORT: _handle_idl_run_import,
+    JOB_TYPE_IDL_RUN_DINSAR: _handle_idl_run_dinsar,
+    JOB_TYPE_ISCE2_RUN: _handle_isce2_run,
+    JOB_TYPE_WATER_GEOCODE: _handle_water_geocode,
+    JOB_TYPE_WATER_FLOOD: _handle_water_flood,
+    JOB_TYPE_WATER_DETECT: _handle_water_detect,
+    JOB_TYPE_GF3_PROCESS: _handle_gf3_process,
+    JOB_TYPE_GF3_BATCH_PROCESS: _handle_gf3_batch_process,
+}
+
+
+def get_job_handler(job_type: str) -> Optional[JobHandler]:
+    return _HANDLERS.get(job_type)

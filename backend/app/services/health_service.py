@@ -1,0 +1,857 @@
+import os
+import asyncio
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional
+
+import httpx
+from sqlalchemy import and_, func, literal, or_, select, text
+
+from .. import database
+from ..config import read_int_env, settings, split_env_paths
+from ..db_maintenance import inspect_database_structure
+from ..models import (
+    AiDiagnosisORM,
+    DinsarResultORM,
+    ResultCatalogStateORM,
+    ResultProductORM,
+    SystemWorkerHeartbeatORM,
+)
+from ..idl_service import get_idl_status
+from .pairing_state_service import pairing_state_service
+
+
+DEFAULT_WORKER_TIMEOUT_SECONDS = 60
+DEFAULT_SCHEMA_CACHE_SECONDS = 120
+_SCHEMA_CACHE_LOCK = asyncio.Lock()
+_SCHEMA_CACHE: Dict[str, Any] = {
+    "payload": None,
+    "expires_at": None,
+}
+
+
+def _get_session_factory():
+    if database.AsyncSessionLocal is None:
+        database.init_db()
+    if database.AsyncSessionLocal is None:
+        raise RuntimeError("Database session factory is not initialized.")
+    return database.AsyncSessionLocal
+
+
+def _default_schema_status() -> Dict[str, Any]:
+    return {
+        "schema_ok": False,
+        "missing_tables": [],
+        "required_tables": [],
+        "extra_tables": [],
+        "required_table_count": 0,
+        "current_table_count": 0,
+        "missing_columns": {},
+        "extra_columns": {},
+        "type_mismatches": [],
+        "nullable_mismatches": [],
+        "schema_reasons": [],
+        "schema_issue_count": 0,
+    }
+
+
+def _apply_schema_details(status: Dict[str, Any], schema_details: Dict[str, Any]) -> None:
+    status["required_tables"] = schema_details.get("required_tables", [])
+    status["required_table_count"] = int(schema_details.get("required_table_count") or 0)
+    status["current_table_count"] = int(schema_details.get("current_table_count") or 0)
+    status["missing_tables"] = schema_details.get("missing_tables", [])
+    status["extra_tables"] = schema_details.get("extra_tables", [])
+    status["missing_columns"] = schema_details.get("missing_columns", {})
+    status["extra_columns"] = schema_details.get("extra_columns", {})
+    status["type_mismatches"] = schema_details.get("type_mismatches", [])
+    status["nullable_mismatches"] = schema_details.get("nullable_mismatches", [])
+    status["schema_reasons"] = schema_details.get("reasons", [])
+    status["schema_issue_count"] = int(schema_details.get("reason_count") or 0)
+    status["schema_ok"] = not bool(schema_details.get("mismatch"))
+
+
+async def _get_cached_schema_details(force_refresh: bool = False) -> Dict[str, Any]:
+    ttl_seconds = read_int_env(
+        "HEALTH_SCHEMA_CACHE_SECONDS",
+        DEFAULT_SCHEMA_CACHE_SECONDS,
+        minimum=5,
+        maximum=3600,
+    )
+    now = datetime.utcnow()
+    cached_payload = _SCHEMA_CACHE.get("payload")
+    expires_at = _SCHEMA_CACHE.get("expires_at")
+    if (
+        not force_refresh
+        and cached_payload is not None
+        and expires_at is not None
+        and expires_at > now
+    ):
+        return cached_payload
+
+    async with _SCHEMA_CACHE_LOCK:
+        cached_payload = _SCHEMA_CACHE.get("payload")
+        expires_at = _SCHEMA_CACHE.get("expires_at")
+        now = datetime.utcnow()
+        if (
+            not force_refresh
+            and cached_payload is not None
+            and expires_at is not None
+            and expires_at > now
+        ):
+            return cached_payload
+
+        try:
+            session_factory = _get_session_factory()
+            async with session_factory() as db:
+                schema_details = await db.run_sync(
+                    lambda sync_session: inspect_database_structure(sync_session.connection())
+                )
+        except Exception:
+            if cached_payload is not None:
+                return cached_payload
+            raise
+
+        _SCHEMA_CACHE["payload"] = schema_details
+        _SCHEMA_CACHE["expires_at"] = now + timedelta(seconds=ttl_seconds)
+        return schema_details
+
+
+async def _check_database(force_schema_refresh: bool = False) -> Dict[str, Any]:
+    status = {
+        "ok": False,
+        "postgis_ok": False,
+        **_default_schema_status(),
+        "error": None,
+    }
+    try:
+        session_factory = _get_session_factory()
+        async with session_factory() as db:
+            await db.execute(text("SELECT 1"))
+            status["ok"] = True
+
+            ext = await db.execute(
+                text("SELECT 1 FROM pg_extension WHERE extname = 'postgis'")
+            )
+            status["postgis_ok"] = ext.first() is not None
+        schema_details = await _get_cached_schema_details(force_refresh=force_schema_refresh)
+        _apply_schema_details(status, schema_details)
+    except Exception as exc:
+        status["error"] = str(exc)
+
+    return status
+
+
+async def _check_worker(timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS) -> Dict[str, Any]:
+    status = {
+        "ok": False,
+        "worker_count": 0,
+        "workers": [],
+        "timeout_seconds": timeout_seconds,
+    }
+    try:
+        session_factory = _get_session_factory()
+        async with session_factory() as db:
+            threshold = datetime.utcnow() - timedelta(seconds=timeout_seconds)
+            result = await db.execute(
+                select(SystemWorkerHeartbeatORM)
+                .where(SystemWorkerHeartbeatORM.last_seen >= threshold)
+                .order_by(SystemWorkerHeartbeatORM.last_seen.desc())
+            )
+            rows = result.scalars().all()
+            status["worker_count"] = len(rows)
+            status["workers"] = [
+                {
+                    "worker_id": r.worker_id,
+                    "hostname": r.hostname,
+                    "pid": r.pid,
+                    "last_seen": r.last_seen,
+                }
+                for r in rows
+            ]
+            status["ok"] = len(rows) > 0
+    except Exception as exc:
+        status["error"] = str(exc)
+    return status
+
+
+async def _check_ollama() -> Dict[str, Any]:
+    status = {"ok": False, "error": None, "status_code": None, "models": []}
+    ollama_base_url = settings.OLLAMA_BASE_URL
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            resp = await client.get(f"{ollama_base_url}/api/tags")
+            status["status_code"] = resp.status_code
+            if resp.status_code == 200:
+                data = resp.json()
+                status["models"] = [m.get("name") for m in data.get("models", [])]
+                status["ok"] = True
+    except Exception as exc:
+        status["error"] = str(exc)
+    return status
+
+
+def _build_catalog_status(
+    *,
+    catalog_name: str,
+    storage_root: str,
+    enabled: bool = True,
+) -> Dict[str, Any]:
+    return {
+        "ok": False,
+        "catalog_name": catalog_name,
+        "enabled": enabled,
+        "storage_root": storage_root,
+        "storage_root_exists": os.path.isdir(storage_root),
+        "state_present": False,
+        "catalog_status": None,
+        "needs_rebuild": None,
+        "manifest_count": 0,
+        "db_count": 0,
+        "issue_count": 0,
+        "last_boot_check_at": None,
+        "last_full_rebuild_at": None,
+        "last_incremental_scan_at": None,
+        "last_message": None,
+        "error": None,
+    }
+
+
+async def _check_catalog(
+    *,
+    catalog_name: str,
+    storage_root: str,
+    enabled: bool = True,
+) -> Dict[str, Any]:
+    status = _build_catalog_status(
+        catalog_name=catalog_name,
+        storage_root=storage_root,
+        enabled=enabled,
+    )
+    if not enabled:
+        status["ok"] = True
+        status["catalog_status"] = "DISABLED"
+        status["needs_rebuild"] = False
+        status["last_message"] = "catalog disabled by config"
+        return status
+
+    try:
+        session_factory = _get_session_factory()
+        async with session_factory() as db:
+            result = await db.execute(
+                select(ResultCatalogStateORM).where(
+                    ResultCatalogStateORM.catalog_name == catalog_name
+                )
+            )
+            state = result.scalar_one_or_none()
+            if state is not None:
+                status["state_present"] = True
+                status["catalog_status"] = state.status
+                status["needs_rebuild"] = bool(state.needs_rebuild)
+                status["manifest_count"] = int(state.manifest_count or 0)
+                status["issue_count"] = int(state.issue_count or 0)
+                status["last_boot_check_at"] = state.last_boot_check_at
+                status["last_full_rebuild_at"] = state.last_full_rebuild_at
+                status["last_incremental_scan_at"] = state.last_incremental_scan_at
+                status["last_message"] = state.last_message
+                if state.storage_root:
+                    status["storage_root"] = state.storage_root
+                    status["storage_root_exists"] = os.path.isdir(state.storage_root)
+
+            count_result = await db.execute(
+                select(func.count(ResultProductORM.id)).where(
+                    ResultProductORM.catalog_name == catalog_name
+                )
+            )
+            status["db_count"] = int(count_result.scalar_one() or 0)
+
+            manifest_count = int(status["manifest_count"] or 0)
+            needs_rebuild = bool(status["needs_rebuild"])
+            status["ok"] = bool(status["storage_root_exists"]) and not (
+                manifest_count > 0 and needs_rebuild
+            )
+    except Exception as exc:
+        status["error"] = str(exc)
+
+    return status
+
+
+async def _check_result_catalog() -> Dict[str, Any]:
+    return await _check_catalog(
+        catalog_name="dinsar",
+        storage_root=settings.DINSAR_PRODUCT_DIR,
+        enabled=True,
+    )
+
+
+async def _check_psinsar_result_catalog() -> Dict[str, Any]:
+    return await _check_catalog(
+        catalog_name="psinsar",
+        storage_root=settings.PSINSAR_PRODUCT_DIR,
+        enabled=bool(settings.TIMESERIES_ENABLED),
+    )
+
+
+async def _check_nginx() -> Dict[str, Any]:
+    status = {"ok": False, "error": None, "status_code": None}
+    nginx_health_url = settings.NGINX_HEALTH_URL
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            resp = await client.get(nginx_health_url)
+            status["status_code"] = resp.status_code
+            status["ok"] = True
+    except Exception as exc:
+        status["error"] = str(exc)
+    return status
+
+
+def _as_optional_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _sanitize_catalog_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "catalog_name": payload.get("catalog_name"),
+        "enabled": _as_optional_bool(payload.get("enabled")),
+        "ok": bool(payload.get("ok")),
+        "needs_rebuild": _as_optional_bool(payload.get("needs_rebuild")),
+        "catalog_status": payload.get("catalog_status"),
+        "manifest_count": int(payload.get("manifest_count") or 0),
+        "db_count": int(payload.get("db_count") or 0),
+        "issue_count": int(payload.get("issue_count") or 0),
+    }
+
+
+def _sanitize_bridge_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ok": bool(payload.get("ok")),
+        "catalog_count": int(payload.get("catalog_count") or 0),
+        "compat_count": int(payload.get("compat_count") or 0),
+        "matched_count": int(payload.get("matched_count") or 0),
+        "missing_compat_count": int(payload.get("missing_compat_count") or 0),
+        "orphan_compat_count": int(payload.get("orphan_compat_count") or 0),
+        "duplicate_compat_product_count": int(payload.get("duplicate_compat_product_count") or 0),
+        "annotation_drift_count": int(payload.get("annotation_drift_count") or 0),
+        "diagnosis_total_count": int(payload.get("diagnosis_total_count") or 0),
+        "diagnosis_missing_product_row_count": int(payload.get("diagnosis_missing_product_row_count") or 0),
+        "diagnosis_product_identity_mismatch_count": int(payload.get("diagnosis_product_identity_mismatch_count") or 0),
+        "diagnosis_result_product_mismatch_count": int(payload.get("diagnosis_result_product_mismatch_count") or 0),
+        "result_trace_missing_count": int(payload.get("result_trace_missing_count") or 0),
+        "result_trace_orphan_count": int(payload.get("result_trace_orphan_count") or 0),
+        "result_trace_pair_mismatch_count": int(payload.get("result_trace_pair_mismatch_count") or 0),
+    }
+
+
+def _sanitize_source_roots_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ok": bool(payload.get("ok")),
+        "configured_count": int(payload.get("configured_count") or 0),
+        "accessible_count": int(payload.get("accessible_count") or 0),
+        "inaccessible_count": int(payload.get("inaccessible_count") or 0),
+    }
+
+
+def _sanitize_pairing_system_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ok": bool(payload.get("ok")),
+        "state_present": bool(payload.get("state_present")),
+        "status": payload.get("status"),
+        "metric_version": payload.get("metric_version"),
+        "scene_count": int(payload.get("scene_count") or 0),
+        "pair_count": int(payload.get("pair_count") or 0),
+        "dirty_scene_count": int(payload.get("dirty_scene_count") or 0),
+        "needs_rebuild": bool(payload.get("needs_rebuild")),
+        "cache_ready": bool(payload.get("cache_ready")),
+        "network_run_count": int(payload.get("network_run_count") or 0),
+        "network_edge_count": int(payload.get("network_edge_count") or 0),
+        "duplicate_reverse_pair_count": int(payload.get("duplicate_reverse_pair_count") or 0),
+        "orphan_edge_count": int(payload.get("orphan_edge_count") or 0),
+    }
+
+
+def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    database = payload.get("database", {}) or {}
+    worker = payload.get("worker", {}) or {}
+    result_catalog = payload.get("result_catalog", {}) or {}
+    dinsar_result_catalog = payload.get("dinsar_result_catalog", {}) or result_catalog
+    psinsar_result_catalog = payload.get("psinsar_result_catalog", {}) or {}
+    dinsar_bridge = payload.get("dinsar_bridge", {}) or {}
+    source_roots = payload.get("source_roots", {}) or {}
+    pairing_system = payload.get("pairing_system", {}) or {}
+    idl = payload.get("idl", {}) or {}
+    idl_status = idl.get("status", {}) or {}
+    ollama = payload.get("ollama", {}) or {}
+    nginx = payload.get("nginx", {}) or {}
+    sanitized_dinsar_catalog = _sanitize_catalog_status(dinsar_result_catalog)
+    sanitized_psinsar_catalog = _sanitize_catalog_status(psinsar_result_catalog)
+    sanitized_dinsar_bridge = _sanitize_bridge_status(dinsar_bridge)
+    sanitized_source_roots = _sanitize_source_roots_status(source_roots)
+    sanitized_pairing_system = _sanitize_pairing_system_status(pairing_system)
+
+    return {
+        "ok": bool(payload.get("ok")),
+        "timestamp": payload.get("timestamp"),
+        "database": {
+            "ok": bool(database.get("ok")),
+            "postgis_ok": bool(database.get("postgis_ok")),
+            "schema_ok": bool(database.get("schema_ok")),
+        },
+        "worker": {
+            "ok": bool(worker.get("ok")),
+            "worker_count": int(worker.get("worker_count") or 0),
+            "timeout_seconds": int(worker.get("timeout_seconds") or DEFAULT_WORKER_TIMEOUT_SECONDS),
+        },
+        "result_catalog": sanitized_dinsar_catalog,
+        "dinsar_result_catalog": sanitized_dinsar_catalog,
+        "psinsar_result_catalog": sanitized_psinsar_catalog,
+        "catalogs": {
+            "dinsar": sanitized_dinsar_catalog,
+            "psinsar": sanitized_psinsar_catalog,
+        },
+        "dinsar_bridge": sanitized_dinsar_bridge,
+        "source_roots": sanitized_source_roots,
+        "pairing_system": sanitized_pairing_system,
+        "idl": {
+            "ok": bool(idl.get("ok")),
+            "status": {
+                "is_running": bool(idl_status.get("is_running")),
+            },
+        },
+        "ollama": {
+            "ok": _as_optional_bool(ollama.get("ok")),
+        },
+        "nginx": {
+            "ok": _as_optional_bool(nginx.get("ok")),
+        },
+    }
+
+
+async def _check_dinsar_engines() -> Dict[str, Any]:
+    """检查所有 D-InSAR 引擎可用性（快速，不做 WSL 深度校验）。"""
+    try:
+        from ..dinsar_engines import registry
+
+        engines = registry.list_engines()
+        results = []
+        any_available = False
+
+        for engine in engines:
+            avail = await asyncio.to_thread(engine.check_available)
+            results.append({
+                "engine_code": avail.engine_code,
+                "status": avail.status,
+                "available": avail.available,
+                "message": avail.message,
+            })
+            if avail.available:
+                any_available = True
+
+        # 整体状态：至少一个引擎可用即为 ok/degraded
+        non_placeholder = [r for r in results if r["status"] != "not_implemented"]
+        all_available = all(r["available"] for r in non_placeholder)
+        if all_available and any_available:
+            overall = "ok"
+        elif any_available:
+            overall = "degraded"
+        else:
+            overall = "unavailable"
+
+        return {
+            "ok": any_available,
+            "overall": overall,
+            "engines": results,
+        }
+    except Exception as exc:
+        return {"ok": False, "overall": "error", "engines": [], "error": str(exc)}
+
+
+async def _check_dinsar_bridge() -> Dict[str, Any]:
+    status = {
+        "ok": False,
+        "catalog_count": 0,
+        "compat_count": 0,
+        "matched_count": 0,
+        "missing_compat_count": 0,
+        "orphan_compat_count": 0,
+        "duplicate_compat_product_count": 0,
+        "annotation_drift_count": 0,
+        "diagnosis_total_count": 0,
+        "diagnosis_with_product_ref_count": 0,
+        "diagnosis_missing_product_ref_count": 0,
+        "diagnosis_with_product_id_count": 0,
+        "diagnosis_missing_product_id_count": 0,
+        "diagnosis_missing_product_row_count": 0,
+        "diagnosis_product_identity_mismatch_count": 0,
+        "diagnosis_result_product_mismatch_count": 0,
+        "result_trace_missing_count": 0,
+        "result_trace_orphan_count": 0,
+        "result_trace_pair_mismatch_count": 0,
+        "error": None,
+    }
+    try:
+        session_factory = _get_session_factory()
+        async with session_factory() as db:
+            catalog_count_result = await db.execute(
+                select(func.count(ResultProductORM.id)).where(
+                    ResultProductORM.catalog_name == "dinsar"
+                )
+            )
+            status["catalog_count"] = int(catalog_count_result.scalar_one() or 0)
+
+            compat_count_result = await db.execute(
+                select(func.count(DinsarResultORM.id)).where(
+                    DinsarResultORM.compat_product_id.is_not(None)
+                )
+            )
+            status["compat_count"] = int(compat_count_result.scalar_one() or 0)
+
+            matched_count_result = await db.execute(
+                select(func.count(DinsarResultORM.id))
+                .select_from(DinsarResultORM)
+                .join(
+                    ResultProductORM,
+                    and_(
+                        ResultProductORM.product_id == DinsarResultORM.compat_product_id,
+                        ResultProductORM.catalog_name == "dinsar",
+                    ),
+                )
+            )
+            status["matched_count"] = int(matched_count_result.scalar_one() or 0)
+
+            missing_compat_count_result = await db.execute(
+                select(func.count(ResultProductORM.id))
+                .select_from(ResultProductORM)
+                .outerjoin(
+                    DinsarResultORM,
+                    DinsarResultORM.compat_product_id == ResultProductORM.product_id,
+                )
+                .where(
+                    ResultProductORM.catalog_name == "dinsar",
+                    DinsarResultORM.id.is_(None),
+                )
+            )
+            status["missing_compat_count"] = int(missing_compat_count_result.scalar_one() or 0)
+
+            orphan_compat_count_result = await db.execute(
+                select(func.count(DinsarResultORM.id))
+                .select_from(DinsarResultORM)
+                .outerjoin(
+                    ResultProductORM,
+                    and_(
+                        ResultProductORM.product_id == DinsarResultORM.compat_product_id,
+                        ResultProductORM.catalog_name == "dinsar",
+                    ),
+                )
+                .where(
+                    DinsarResultORM.compat_product_id.is_not(None),
+                    ResultProductORM.id.is_(None),
+                )
+            )
+            status["orphan_compat_count"] = int(orphan_compat_count_result.scalar_one() or 0)
+
+            duplicate_subquery = (
+                select(DinsarResultORM.compat_product_id)
+                .where(DinsarResultORM.compat_product_id.is_not(None))
+                .group_by(DinsarResultORM.compat_product_id)
+                .having(func.count(DinsarResultORM.id) > 1)
+                .subquery()
+            )
+            duplicate_count_result = await db.execute(
+                select(func.count()).select_from(duplicate_subquery)
+            )
+            status["duplicate_compat_product_count"] = int(duplicate_count_result.scalar_one() or 0)
+
+            annotation_drift_result = await db.execute(
+                select(func.count(DinsarResultORM.id))
+                .select_from(DinsarResultORM)
+                .join(
+                    ResultProductORM,
+                    and_(
+                        ResultProductORM.product_id == DinsarResultORM.compat_product_id,
+                        ResultProductORM.catalog_name == "dinsar",
+                    ),
+                )
+                .where(
+                    or_(
+                        func.coalesce(ResultProductORM.ai_score, literal(-1.0))
+                        != func.coalesce(DinsarResultORM.ai_score, literal(-1.0)),
+                        func.coalesce(ResultProductORM.user_label, literal(-999999))
+                        != func.coalesce(DinsarResultORM.user_label, literal(-999999)),
+                    )
+                )
+            )
+            status["annotation_drift_count"] = int(annotation_drift_result.scalar_one() or 0)
+
+            diagnosis_total_result = await db.execute(
+                select(func.count(AiDiagnosisORM.id))
+            )
+            status["diagnosis_total_count"] = int(diagnosis_total_result.scalar_one() or 0)
+
+            diagnosis_with_product_ref_result = await db.execute(
+                select(func.count(AiDiagnosisORM.id)).where(AiDiagnosisORM.product_ref_id.is_not(None))
+            )
+            status["diagnosis_with_product_ref_count"] = int(diagnosis_with_product_ref_result.scalar_one() or 0)
+            status["diagnosis_missing_product_ref_count"] = (
+                status["diagnosis_total_count"] - status["diagnosis_with_product_ref_count"]
+            )
+
+            diagnosis_with_product_id_result = await db.execute(
+                select(func.count(AiDiagnosisORM.id)).where(AiDiagnosisORM.product_id.is_not(None))
+            )
+            status["diagnosis_with_product_id_count"] = int(diagnosis_with_product_id_result.scalar_one() or 0)
+            status["diagnosis_missing_product_id_count"] = (
+                status["diagnosis_total_count"] - status["diagnosis_with_product_id_count"]
+            )
+
+            diagnosis_missing_product_row_result = await db.execute(
+                select(func.count(AiDiagnosisORM.id))
+                .select_from(AiDiagnosisORM)
+                .outerjoin(ResultProductORM, ResultProductORM.id == AiDiagnosisORM.product_ref_id)
+                .where(
+                    AiDiagnosisORM.product_ref_id.is_not(None),
+                    ResultProductORM.id.is_(None),
+                )
+            )
+            status["diagnosis_missing_product_row_count"] = int(
+                diagnosis_missing_product_row_result.scalar_one() or 0
+            )
+
+            diagnosis_product_identity_mismatch_result = await db.execute(
+                select(func.count(AiDiagnosisORM.id))
+                .select_from(AiDiagnosisORM)
+                .join(ResultProductORM, ResultProductORM.id == AiDiagnosisORM.product_ref_id)
+                .where(
+                    AiDiagnosisORM.product_id.is_not(None),
+                    AiDiagnosisORM.product_id != ResultProductORM.product_id,
+                )
+            )
+            status["diagnosis_product_identity_mismatch_count"] = int(
+                diagnosis_product_identity_mismatch_result.scalar_one() or 0
+            )
+
+            diagnosis_result_product_mismatch_result = await db.execute(
+                select(func.count(AiDiagnosisORM.id))
+                .select_from(AiDiagnosisORM)
+                .join(DinsarResultORM, DinsarResultORM.id == AiDiagnosisORM.result_id)
+                .where(
+                    or_(
+                        DinsarResultORM.compat_product_id.is_(None),
+                        and_(
+                            AiDiagnosisORM.product_id.is_not(None),
+                            DinsarResultORM.compat_product_id != AiDiagnosisORM.product_id,
+                        ),
+                    )
+                )
+            )
+            status["diagnosis_result_product_mismatch_count"] = int(
+                diagnosis_result_product_mismatch_result.scalar_one() or 0
+            )
+
+            result_trace_missing_result = await db.execute(
+                select(func.count(ResultProductORM.id)).where(
+                    ResultProductORM.catalog_name == "dinsar",
+                    or_(
+                        ResultProductORM.pair_uid.is_(None),
+                        ResultProductORM.network_run_id.is_(None),
+                        ResultProductORM.network_edge_id.is_(None),
+                        ResultProductORM.policy_version.is_(None),
+                    ),
+                )
+            )
+            status["result_trace_missing_count"] = int(
+                result_trace_missing_result.scalar_one() or 0
+            )
+
+            result_trace_orphan_result = await db.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM result_products rp
+                    LEFT JOIN pairing_network_runs pnr
+                        ON pnr.network_run_id = rp.network_run_id
+                    LEFT JOIN pairing_network_edges pne
+                        ON pne.id = rp.network_edge_id
+                        AND pne.network_run_ref_id = pnr.id
+                    WHERE rp.catalog_name = 'dinsar'
+                      AND COALESCE(rp.pair_uid, '') <> ''
+                      AND COALESCE(rp.network_run_id, '') <> ''
+                      AND rp.network_edge_id IS NOT NULL
+                      AND (pnr.id IS NULL OR pne.id IS NULL)
+                    """
+                )
+            )
+            status["result_trace_orphan_count"] = int(
+                result_trace_orphan_result.scalar_one() or 0
+            )
+
+            result_trace_pair_mismatch_result = await db.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM result_products rp
+                    JOIN pairing_network_runs pnr
+                        ON pnr.network_run_id = rp.network_run_id
+                    JOIN pairing_network_edges pne
+                        ON pne.id = rp.network_edge_id
+                        AND pne.network_run_ref_id = pnr.id
+                    JOIN pairing_metric_cache pmc
+                        ON pmc.id = pne.metric_cache_ref_id
+                    WHERE rp.catalog_name = 'dinsar'
+                      AND COALESCE(rp.pair_uid, '') <> ''
+                      AND COALESCE(pmc.pair_uid, '') <> ''
+                      AND rp.pair_uid <> pmc.pair_uid
+                    """
+                )
+            )
+            status["result_trace_pair_mismatch_count"] = int(
+                result_trace_pair_mismatch_result.scalar_one() or 0
+            )
+
+            status["ok"] = all(
+                [
+                    status["missing_compat_count"] == 0,
+                    status["orphan_compat_count"] == 0,
+                    status["duplicate_compat_product_count"] == 0,
+                    status["annotation_drift_count"] == 0,
+                    status["diagnosis_missing_product_row_count"] == 0,
+                    status["diagnosis_product_identity_mismatch_count"] == 0,
+                    status["diagnosis_result_product_mismatch_count"] == 0,
+                    status["result_trace_orphan_count"] == 0,
+                    status["result_trace_pair_mismatch_count"] == 0,
+                ]
+            )
+    except Exception as exc:
+        status["error"] = str(exc)
+    return status
+
+
+def _probe_directory_status(path: str) -> Dict[str, Any]:
+    normalized = str(path or "").strip()
+    payload = {
+        "path": normalized,
+        "exists": False,
+        "accessible": False,
+        "error": None,
+    }
+    if not normalized:
+        payload["error"] = "empty path"
+        return payload
+
+    try:
+        if os.path.isdir(normalized):
+            payload["exists"] = True
+            try:
+                with os.scandir(normalized) as iterator:
+                    next(iterator, None)
+                payload["accessible"] = True
+            except Exception as exc:
+                payload["error"] = str(exc)
+            return payload
+
+        os.stat(normalized)
+        payload["error"] = "path exists but is not a directory"
+    except Exception as exc:
+        payload["error"] = str(exc)
+    return payload
+
+
+async def _check_source_roots() -> Dict[str, Any]:
+    items = []
+
+    for path in split_env_paths(settings.MONITOR_RADAR_DIRS):
+        status = _probe_directory_status(path)
+        status["role"] = "radar_source"
+        items.append(status)
+
+    orbit_dir = str(settings.MONITOR_ORBIT_DIR or "").strip()
+    if orbit_dir:
+        status = _probe_directory_status(orbit_dir)
+        status["role"] = "orbit_source"
+        items.append(status)
+
+    for path in split_env_paths(settings.MONITOR_DINSAR_DIRS):
+        status = _probe_directory_status(path)
+        status["role"] = "dinsar_source"
+        items.append(status)
+
+    configured_count = len(items)
+    accessible_count = sum(1 for item in items if item.get("accessible"))
+    inaccessible_count = configured_count - accessible_count
+
+    return {
+        "ok": inaccessible_count == 0,
+        "configured_count": configured_count,
+        "accessible_count": accessible_count,
+        "inaccessible_count": inaccessible_count,
+        "items": items,
+    }
+
+
+async def get_health_status(
+    include_external: bool = True,
+    include_details: bool = False,
+    full: bool = False,
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    db_status = await _check_database(force_schema_refresh=refresh)
+    worker_timeout = read_int_env("JOB_WORKER_HEALTH_TIMEOUT", DEFAULT_WORKER_TIMEOUT_SECONDS, minimum=5, maximum=86400)
+    worker_status = await _check_worker(worker_timeout)
+
+    idl_status = get_idl_status()
+    idl_ok = bool(idl_status.get("is_installed"))
+
+    nginx_status = {"ok": None}
+    ollama_status = {"ok": None}
+    if include_external:
+        nginx_status = await _check_nginx()
+        ollama_status = await _check_ollama()
+
+    result_catalog_status = await _check_result_catalog()
+    psinsar_result_catalog_status = await _check_psinsar_result_catalog()
+    dinsar_bridge_status = await _check_dinsar_bridge()
+    source_roots_status = await _check_source_roots()
+    pairing_system_status = await pairing_state_service.get_pairing_system_status()
+    engines_status = {"ok": None, "overall": None, "engines": []}
+    if full or include_details:
+        engines_status = await _check_dinsar_engines()
+
+    overall_ok = all(
+        [
+            db_status.get("ok"),
+            db_status.get("schema_ok"),
+            db_status.get("postgis_ok"),
+            worker_status.get("ok"),
+            result_catalog_status.get("ok"),
+            dinsar_bridge_status.get("ok"),
+            source_roots_status.get("ok"),
+            pairing_system_status.get("ok"),
+            (not settings.TIMESERIES_ENABLED) or psinsar_result_catalog_status.get("ok"),
+        ]
+    )
+
+    full_payload = {
+        "ok": overall_ok,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "database": db_status,
+        "worker": worker_status,
+        "result_catalog": result_catalog_status,
+        "dinsar_result_catalog": result_catalog_status,
+        "psinsar_result_catalog": psinsar_result_catalog_status,
+        "catalogs": {
+            "dinsar": result_catalog_status,
+            "psinsar": psinsar_result_catalog_status,
+        },
+        "dinsar_bridge": dinsar_bridge_status,
+        "source_roots": source_roots_status,
+        "pairing_system": pairing_system_status,
+        "idl": {
+            "ok": idl_ok,
+            "status": idl_status,
+        },
+        "ollama": ollama_status,
+        "nginx": nginx_status,
+        "dinsar_engines": engines_status,
+    }
+    if include_details:
+        return full_payload
+    return _sanitize_health_status(full_payload)
