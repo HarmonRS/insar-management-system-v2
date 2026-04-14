@@ -27,7 +27,7 @@ from .config import settings
 
 # ── 公钥（硬编码，与 license-issuer/public_key.b64 对应） ─────────────────────
 # 私钥丢失后，用新密钥对重新签发授权，并将此处更新为新公钥。
-_PUBLIC_KEY_B64 = "nlrJTGv+6iPE5J3X6KTXb23Jw5MWdFO9meUJVNp/cRc="
+_PUBLIC_KEY_B64 = "QOpR1c3bONDwOzrj3IVTogE1ZHIphpwxJY8nhWa09yw="
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 _BACKEND_DIR = os.path.dirname(_APP_DIR)

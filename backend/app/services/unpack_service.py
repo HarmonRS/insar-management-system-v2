@@ -14,10 +14,10 @@ def _load_unpack_module():
     if _UNPACK_MODULE is not None:
         return _UNPACK_MODULE
 
-    script_path = os.path.join(settings.PROJECT_ROOT, "scripts", "unpack_archives.py")
+    script_path = os.path.join(settings.PROJECT_ROOT, "scripts", "unpack_archives_parallel.py")
     spec = importlib.util.spec_from_file_location("unpack_archives", script_path)
     if spec is None or spec.loader is None:
-        raise RuntimeError("Failed to load unpack_archives.py module.")
+        raise RuntimeError("Failed to load unpack_archives_parallel.py module.")
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -42,6 +42,18 @@ def get_unpack_config() -> Dict[str, Any]:
         "delete_archive": module.parse_bool(env.get("UNPACK_DELETE_ARCHIVE", "true")),
         "tmp_suffix": env.get("UNPACK_TMP_SUFFIX", ".unpack_tmp"),
         "archive_exts": archive_exts,
+        "scan_workers": module.parse_int(
+            env.get("UNPACK_SCAN_WORKERS"),
+            default=module._default_scan_workers(source_dirs),
+            minimum=1,
+            maximum=max(1, len(source_dirs) or 1),
+        ),
+        "extract_workers": module.parse_int(
+            env.get("UNPACK_EXTRACT_WORKERS"),
+            default=module._default_extract_workers(),
+            minimum=1,
+            maximum=32,
+        ),
     }
 
 

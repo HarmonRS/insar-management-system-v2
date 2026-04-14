@@ -198,6 +198,12 @@ INSAR_STORAGE_DIRS=\\\\server\\share\\storage
 # 最小剩余空间（GB）
 UNPACK_MIN_DISK_SPACE_GB=50
 
+# 扫描压缩包时的并发数
+UNPACK_SCAN_WORKERS=4
+
+# 多压缩包并行解包数（单包仍为单线程）
+UNPACK_EXTRACT_WORKERS=4
+
 # 解包后是否删除压缩包
 UNPACK_DELETE_ARCHIVE=true
 ```
