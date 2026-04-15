@@ -103,7 +103,6 @@ export default function usePairingLogic({
     const findPairs = async (e, externalRequireOrbitRef) => {
         e.preventDefault();
         if (!ensureCanOperate()) return;
-        setShowPairingModal(false);
         setIsLoading(true);
         addLog('info', '开始寻找干涉对...');
         setPairingAlert({ warnings: [], fallbackUsed: false });
@@ -182,13 +181,14 @@ export default function usePairingLogic({
                 addLog('warn', '当前配对结果来自降级缓存状态，建议尽快执行缓存修复。');
             }
             addLog('success', `成功找到 ${pairs.length} 个干涉对（候选 ${candidateCount}，入选 ${selectedEdgeCount}）。`);
+            setShowPairingModal(false);
+            setPairingFiles(null);
             setLeftPanelTab('pairs');
         } catch (error) {
             const errorMessage = error.response?.data?.detail || error.message;
             addLog('error', `寻找干涉对失败: ${errorMessage}`);
         } finally {
             setIsLoading(false);
-            setPairingFiles(null);
         }
     };
 

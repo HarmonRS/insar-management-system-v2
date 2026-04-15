@@ -218,6 +218,8 @@ async def find_pairs_endpoint(
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
+        if isinstance(e, RuntimeError):
+            raise HTTPException(status_code=409, detail=str(e))
         logger.exception("处理 AOI 或查找干涉对时发生错误")
         raise HTTPException(status_code=500, detail="处理 AOI 或查找干涉对时发生错误，请查看后端日志")
 

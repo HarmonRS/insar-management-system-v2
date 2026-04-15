@@ -101,6 +101,16 @@ function PairingModal({
         }
     }, [showPairingModal]);
 
+    useEffect(() => {
+        if (!showPairingModal || availableSatellites.length === 0) {
+            return;
+        }
+        setSelectedSatellites((prev) => {
+            const normalized = prev.filter((satellite) => availableSatellites.includes(satellite));
+            return normalized.length === prev.length ? prev : normalized;
+        });
+    }, [availableSatellites, showPairingModal]);
+
     // 同步 selectedSatellites 到 pairingParams
     useEffect(() => {
         if (selectedSatellites.length > 0) {

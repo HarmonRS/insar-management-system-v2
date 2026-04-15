@@ -25,7 +25,7 @@ const LazyUserAdminPanel = lazy(() => import('../../UserAdminPanel'));
 const LazyAuditLogPanel = lazy(() => import('../../AuditLogPanel'));
 const LazyAiQualityPanel = lazy(() => import('../../panels/AiQualityPanel'));
 const LazyAiAnalysisPanel = lazy(() => import('../../AiAnalysisPanel'));
-const LazyPairingPanel = lazy(() => import('../../panels/PairingPanel'));
+const LazyPairingPanel = lazy(() => import('../../panels/PairPlanningPanel'));
 const LazyDinsarResultPanel = lazy(() => import('../../panels/DinsarResultPanel'));
 const LazyBatchPanel = lazy(() => import('../../panels/BatchPanel'));
 const LazyPairsListPanel = lazy(() => import('../../panels/PairsListPanel'));

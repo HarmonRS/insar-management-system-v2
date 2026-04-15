@@ -74,12 +74,12 @@ class SpatialService:
 
         if cache_status in {"FAILED", "UNINITIALIZED", "ERROR"} or (scene_count > 1 and pair_count == 0):
             raise RuntimeError(
-                "配对候选缓存当前不可用，请先在系统自检中执行“全量重建配对缓存”或“增量修复”。"
+                "配对候选缓存当前不可用，请先在生产规划页执行“修复配对基础”或“强制全量重建”。"
             )
 
         if degraded:
             warnings.append(
-                f"配对候选缓存当前状态为 {cache_status}，本次结果基于现有缓存生成，建议尽快执行增量修复或全量重建。"
+                f"配对候选缓存当前状态为 {cache_status}，本次结果基于现有缓存生成，建议尽快在生产规划页执行缓存修复。"
             )
 
         candidate_pool = await self._query_pairing_metric_cache(
