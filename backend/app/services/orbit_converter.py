@@ -161,23 +161,53 @@ def _inspect_orbit_txt_health(path: str) -> Dict[str, Any]:
         "contains_nul_bytes": False,
         "nul_byte_count": 0,
         "tail_has_nul_bytes": False,
+        "first_nul_offset": -1,
     }
     try:
         nul_byte_count = 0
         tail = b""
+        offset = 0
+        first_nul_offset = -1
         with open(path, "rb") as stream:
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
                     break
+                if first_nul_offset < 0:
+                    chunk_nul_index = chunk.find(b"\x00")
+                    if chunk_nul_index >= 0:
+                        first_nul_offset = offset + chunk_nul_index
                 nul_byte_count += chunk.count(b"\x00")
                 tail = (tail + chunk)[-4096:]
+                offset += len(chunk)
         info["nul_byte_count"] = nul_byte_count
         info["contains_nul_bytes"] = nul_byte_count > 0
         info["tail_has_nul_bytes"] = b"\x00" in tail
+        info["first_nul_offset"] = first_nul_offset
     except OSError as exc:
         info["read_error"] = str(exc)
     return info
+
+
+def _truncate_message(text: str, limit: int = 1200) -> str:
+    value = str(text or "").replace("\x00", "[NUL]").strip()
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "...<truncated>"
+
+
+def _compact_error_message(text: str, limit: int = 1200) -> str:
+    value = str(text or "").replace("\x00", "[NUL]").strip()
+    if not value:
+        return ""
+
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if len(lines) > 1:
+        for line in reversed(lines):
+            if re.match(r"^[A-Za-z_][\w.]*:\s", line):
+                return _truncate_message(line, limit=limit)
+
+    return _truncate_message(value, limit=limit)
 
 
 def _convert_to_isce2_xml_file(txt_path: str, xml_path: str) -> None:
@@ -209,14 +239,55 @@ def _build_invalid_source_record(
     record: Dict[str, Any] = {
         "name": stem,
         "source": txt_path,
-        "error": str(error),
+        "error": _compact_error_message(error),
     }
     if envi_path:
         record["envi_path"] = envi_path
     if isce2_path:
         record["isce2_path"] = isce2_path
     record.update(_inspect_orbit_txt_health(txt_path))
+    record["has_corruption_signal"] = _has_orbit_corruption_signal(record)
     return record
+
+
+def _has_orbit_corruption_signal(item: Dict[str, Any]) -> bool:
+    first_nul_offset = item.get("first_nul_offset", -1)
+    return bool(
+        item.get("read_error")
+        or item.get("contains_nul_bytes")
+        or item.get("tail_has_nul_bytes")
+        or int(item.get("nul_byte_count") or 0) > 0
+        or (
+            isinstance(first_nul_offset, (int, float))
+            and int(first_nul_offset) >= 0
+        )
+    )
+
+
+def _build_source_gap_sample(
+    stem: str,
+    source_entry: Optional[Dict[str, Any]] = None,
+    envi_entry: Optional[Dict[str, Any]] = None,
+    isce2_entry: Optional[Dict[str, Any]] = None,
+    inspect_source: bool = False,
+) -> Dict[str, Any]:
+    source_path = (source_entry or {}).get("path", "")
+    sample: Dict[str, Any] = {
+        "name": stem,
+        "source": source_path,
+        "source_path": source_path,
+        "envi_path": (envi_entry or {}).get("path", ""),
+        "isce2_path": (isce2_entry or {}).get("path", ""),
+        "has_corruption_signal": False,
+    }
+    if inspect_source and source_path:
+        sample.update(_inspect_orbit_txt_health(source_path))
+        sample["has_corruption_signal"] = _has_orbit_corruption_signal(sample)
+        if sample.get("read_error"):
+            sample["error"] = f"Source health scan failed: {sample['read_error']}"
+        elif sample["has_corruption_signal"]:
+            sample["error"] = "Source TXT contains NUL bytes and appears corrupted"
+    return sample
 
 
 def validate_orbit_source(txt_path: str, stem: str = "", scratch_root: str = "") -> Dict[str, Any]:
@@ -259,28 +330,42 @@ def summarize_source_orbit_gaps(
     source_without_envi = sorted(source_stems - envi_stems)
     envi_without_source = sorted(envi_stems - source_stems)
     isce2_without_source = sorted(isce2_stems - source_stems)
+    sample_limit = 20
 
-    def _make_samples(stems: List[str]) -> List[Dict[str, str]]:
-        samples: List[Dict[str, str]] = []
-        for stem in stems[:20]:
+    def _make_samples(
+        stems: List[str],
+        inspect_source: bool = False,
+    ) -> List[Dict[str, Any]]:
+        samples: List[Dict[str, Any]] = []
+        for stem in stems[:sample_limit]:
             samples.append(
-                {
-                    "name": stem,
-                    "source_path": source_files.get(stem, {}).get("path", ""),
-                    "envi_path": envi_files.get(stem, {}).get("path", ""),
-                    "isce2_path": isce2_files.get(stem, {}).get("path", ""),
-                }
+                _build_source_gap_sample(
+                    stem,
+                    source_files.get(stem),
+                    envi_files.get(stem),
+                    isce2_files.get(stem),
+                    inspect_source=inspect_source,
+                )
             )
         return samples
 
+    suspect_bad_samples = _make_samples(source_without_isce2, inspect_source=True)
+    bad_source_samples = [
+        item for item in suspect_bad_samples
+        if item.get("has_corruption_signal")
+    ]
+
     return {
+        "sample_limit": sample_limit,
         "quarantine_path": _default_quarantine_root(source_dir, quarantine_root),
         "source_without_isce2_count": len(source_without_isce2),
         "source_without_envi_count": len(source_without_envi),
         "envi_without_source_count": len(envi_without_source),
         "isce2_without_source_count": len(isce2_without_source),
         "suspect_bad_count": len(source_without_isce2),
-        "suspect_bad_samples": _make_samples(source_without_isce2),
+        "suspect_bad_samples": suspect_bad_samples,
+        "bad_source_sample_count": len(bad_source_samples),
+        "bad_source_samples": bad_source_samples,
         "source_without_envi_samples": _make_samples(source_without_envi),
         "envi_without_source_samples": _make_samples(envi_without_source),
         "isce2_without_source_samples": _make_samples(isce2_without_source),
@@ -558,7 +643,8 @@ def _convert_to_isce2_xml(
         timeout=60,
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr or result.stdout or "Orbit conversion failed without output")
+        detail = result.stderr or result.stdout or "Orbit conversion failed without output"
+        raise RuntimeError(_compact_error_message(detail))
 
 
 # ---------------------------------------------------------------------------
@@ -857,14 +943,9 @@ def repair_orbit_pools(
                 _convert_to_isce2_xml_file(txt_path, xml_path)
                 repaired_from_envi.append(stem)
             except Exception as exc:
-                repair_errors.append(
-                    {
-                        "name": stem,
-                        "source": txt_path,
-                        "target": xml_path,
-                        "error": str(exc),
-                    }
-                )
+                item = _build_invalid_source_record(stem, txt_path, exc, envi_path=txt_path, isce2_path=xml_path)
+                item["target"] = xml_path
+                repair_errors.append(item)
 
     after = check_orbit_consistency(envi_pool, isce2_pool)
     return {

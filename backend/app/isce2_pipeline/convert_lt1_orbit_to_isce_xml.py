@@ -23,6 +23,38 @@ class StateVector:
     vz: float
 
 
+def _guess_text_encoding(input_txt: Path) -> str:
+    with input_txt.open("rb") as handle:
+        sample = handle.read(4096)
+
+    if sample.startswith(b"\xff\xfe"):
+        return "utf-16-le"
+    if sample.startswith(b"\xfe\xff"):
+        return "utf-16-be"
+
+    # Handle UTF-16-style wide-char text without BOM.
+    if sample and sample.count(b"\x00") * 4 >= len(sample):
+        even_nuls = sample[0::2].count(b"\x00")
+        odd_nuls = sample[1::2].count(b"\x00")
+        return "utf-16-le" if odd_nuls >= even_nuls else "utf-16-be"
+
+    return "utf-8"
+
+
+def _preview_line(value: str, limit: int = 200) -> str:
+    text = value.replace("\x00", "").replace("\t", " ").strip()
+    if len(text) > limit:
+        text = text[:limit] + "..."
+    return text or "<empty>"
+
+
+def _parse_error(input_txt: Path, line_no: int, message: str, raw_line: str = "") -> ValueError:
+    detail = f"{message} (file={input_txt}, line={line_no})"
+    if raw_line:
+        detail += f". snippet={_preview_line(raw_line)!r}"
+    return ValueError(detail)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Convert LT-1 GpsData .txt orbit files to ISCE2 LUTAN1 orbit XML."
@@ -98,40 +130,67 @@ def find_text(root: ET.Element, path: str) -> str:
 def parse_orbit_file(input_txt: Path) -> list[StateVector]:
     vectors: list[StateVector] = []
 
-    with input_txt.open("r", encoding="utf-8") as handle:
-        for line in handle:
+    encoding = _guess_text_encoding(input_txt)
+    with input_txt.open("rb") as handle:
+        for line_no, raw_line in enumerate(handle, start=1):
+            line = raw_line.decode(encoding, errors="replace").replace("\ufeff", "")
             if not line.strip() or line.startswith("#"):
                 continue
 
+            if "\x00" in line:
+                nul_count = line.count("\x00")
+                raise _parse_error(
+                    input_txt,
+                    line_no,
+                    (
+                        "Orbit TXT contains NUL bytes and appears truncated or corrupted"
+                        f" (nul_count={nul_count})"
+                    ),
+                    raw_line=line,
+                )
+
             parts = line.split()
             if len(parts) < 12:
-                continue
-
-            sec_float = float(parts[5])
-            sec_int = int(sec_float)
-            microsecond = int(round((sec_float - sec_int) * 1_000_000))
-
-            timestamp = datetime(
-                int(parts[0]),
-                int(parts[1]),
-                int(parts[2]),
-                int(parts[3]),
-                int(parts[4]),
-                sec_int,
-                microsecond,
-            )
-
-            vectors.append(
-                StateVector(
-                    time=timestamp,
-                    x=float(parts[6]),
-                    y=float(parts[7]),
-                    z=float(parts[8]),
-                    vx=float(parts[9]),
-                    vy=float(parts[10]),
-                    vz=float(parts[11]),
+                raise _parse_error(
+                    input_txt,
+                    line_no,
+                    f"Malformed orbit record: expected at least 12 columns, got {len(parts)}",
+                    raw_line=line,
                 )
-            )
+
+            try:
+                sec_float = float(parts[5])
+                sec_int = int(sec_float)
+                microsecond = int(round((sec_float - sec_int) * 1_000_000))
+
+                timestamp = datetime(
+                    int(parts[0]),
+                    int(parts[1]),
+                    int(parts[2]),
+                    int(parts[3]),
+                    int(parts[4]),
+                    sec_int,
+                    microsecond,
+                )
+
+                vectors.append(
+                    StateVector(
+                        time=timestamp,
+                        x=float(parts[6]),
+                        y=float(parts[7]),
+                        z=float(parts[8]),
+                        vx=float(parts[9]),
+                        vy=float(parts[10]),
+                        vz=float(parts[11]),
+                    )
+                )
+            except ValueError as exc:
+                raise _parse_error(
+                    input_txt,
+                    line_no,
+                    f"Malformed orbit record: {exc}",
+                    raw_line=line,
+                ) from exc
 
     if not vectors:
         raise ValueError(f"No orbit records parsed from {input_txt}")

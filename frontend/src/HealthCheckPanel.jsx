@@ -34,6 +34,67 @@ const formatMismatchList = (items, formatter) => (
   asArray(items).map(formatter).join('; ')
 );
 
+const formatIntegerText = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed.toLocaleString() : '0';
+};
+
+const getOrbitSourcePath = (item) => item?.source || item?.source_path || '';
+
+const hasOrbitCorruptionSignal = (item) => Boolean(
+  item && (
+    item.has_corruption_signal ||
+    item.contains_nul_bytes ||
+    toNumber(item.nul_byte_count) > 0 ||
+    item.tail_has_nul_bytes ||
+    Number(item.first_nul_offset) >= 0 ||
+    item.read_error
+  )
+);
+
+const renderOrbitSourceIssueDetails = (item, en, formatPathText) => {
+  const sourcePath = getOrbitSourcePath(item);
+  const nulCount = toNumber(item?.nul_byte_count);
+  const firstNulOffset = Number(item?.first_nul_offset);
+  const hasNulDetails =
+    item?.contains_nul_bytes ||
+    nulCount > 0 ||
+    item?.tail_has_nul_bytes ||
+    firstNulOffset >= 0;
+
+  return (
+    <>
+      {sourcePath && (
+        <div style={{ color: '#64748b' }}>
+          {en ? 'Source: ' : '源文件：'}{formatPathText(sourcePath)}
+        </div>
+      )}
+      {item?.envi_path && (
+        <div style={{ color: '#64748b' }}>
+          {en ? 'ENVI: ' : 'ENVI：'}{formatPathText(item.envi_path)}
+        </div>
+      )}
+      {item?.isce2_path && (
+        <div style={{ color: '#64748b' }}>
+          {en ? 'ISCE2: ' : 'ISCE2：'}{formatPathText(item.isce2_path)}
+        </div>
+      )}
+      {hasNulDetails && (
+        <div style={{ color: '#64748b' }}>
+          {en ? 'NUL bytes: ' : 'NUL 字节：'}{formatIntegerText(nulCount)}
+          {firstNulOffset >= 0 ? `${en ? ', first offset: ' : '，首个偏移：'}${formatIntegerText(firstNulOffset)}` : ''}
+          {item?.tail_has_nul_bytes ? (en ? ' (tail contains NUL)' : '（文件尾含 NUL）') : ''}
+        </div>
+      )}
+      {item?.read_error && (
+        <div style={{ color: '#64748b' }}>
+          {en ? 'Health scan error: ' : '文件健康扫描异常：'}{item.read_error}
+        </div>
+      )}
+    </>
+  );
+};
+
 const formatSourceRootRole = (role, en = false) => {
   switch (role) {
     case 'radar_source':
@@ -302,6 +363,12 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   const orbitEnviWithoutSourceCount = toNumber(orbitSource.envi_without_source_count);
   const orbitIsce2WithoutSourceCount = toNumber(orbitSource.isce2_without_source_count);
   const orbitQuarantinePath = orbitSource.quarantine_path || orbitStatus?.source_gaps?.quarantine_path;
+  const orbitBadSourceSamples = asArray(orbitSource.bad_source_samples).filter(hasOrbitCorruptionSignal);
+  const orbitSuspectBadSamples = asArray(orbitSource.suspect_bad_samples);
+  const orbitSuspectWithoutCorruptionSamples = orbitSuspectBadSamples.filter(
+    (item) => !orbitBadSourceSamples.some((badItem) => badItem.name === item.name)
+  );
+  const orbitBadSourceSampleCount = toNumber(orbitSource.bad_source_sample_count || orbitBadSourceSamples.length);
   const orbitOverallHealthy = Boolean(
     orbitStatus &&
     orbitMismatchCount === 0 &&
@@ -951,6 +1018,13 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                     : `疑似坏源 TXT（源文件存在但 ISCE2 XML 缺失）：${orbitSuspectBadCount}`}
                 </div>
               )}
+              {orbitBadSourceSampleCount > 0 && (
+                <div className="health-card-note error">
+                  {en
+                    ? `Sampled source TXT with corruption signals: ${orbitBadSourceSampleCount}`
+                    : `抽样检测到损坏信号的源 TXT：${orbitBadSourceSampleCount}`}
+                </div>
+              )}
               {orbitDatabase.sample_missing_in_envi?.length > 0 && (
                 <div className="health-card-note error">
                   {en ? 'DB expected but ENVI pool missing: ' : '数据库期望但 ENVI 池缺失：'}
@@ -963,19 +1037,16 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                   {orbitDatabase.sample_missing_in_isce2.slice(0, 5).join(', ')}
                 </div>
               )}
-              {(orbitSource.suspect_bad_samples || []).slice(0, 5).map((item) => (
+              {orbitBadSourceSamples.slice(0, 5).map((item) => (
+                <div key={`orbit-bad-source-${item.name}`} className="health-card-note error">
+                  {item.name} - {item.error || (en ? 'Corruption signal detected' : '检测到损坏信号')}
+                  {renderOrbitSourceIssueDetails(item, en, formatPathText)}
+                </div>
+              ))}
+              {orbitSuspectWithoutCorruptionSamples.slice(0, 5).map((item) => (
                 <div key={`orbit-suspect-bad-${item.name}`} className="health-card-note warn">
                   {item.name}
-                  {item.source_path && (
-                    <div style={{ color: '#64748b' }}>
-                      {en ? 'Source: ' : '源文件：'}{formatPathText(item.source_path)}
-                    </div>
-                  )}
-                  {item.envi_path && (
-                    <div style={{ color: '#64748b' }}>
-                      {en ? 'ENVI: ' : 'ENVI：'}{formatPathText(item.envi_path)}
-                    </div>
-                  )}
+                  {renderOrbitSourceIssueDetails(item, en, formatPathText)}
                 </div>
               ))}
               {(orbitConsistency.mismatches || []).slice(0, 5).map((item) => (
@@ -1102,13 +1173,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                           {(orbitSyncResult.confirmed_bad || []).slice(0, 5).map((item, index) => (
                             <div key={`orbit-quarantine-bad-${index}`} className="health-card-note error">
                               {item.name} - {item.error}
-                              <div style={{ color: '#64748b' }}>
-                                {en ? 'Source: ' : '源文件：'}{formatPathText(item.source)}
-                              </div>
-                              <div style={{ color: '#64748b' }}>
-                                {en ? 'NUL bytes: ' : 'NUL 字节：'}{toNumber(item.nul_byte_count)}
-                                {item.tail_has_nul_bytes ? (en ? ' (tail contains NUL)' : '（文件尾含 NUL）') : ''}
-                              </div>
+                              {renderOrbitSourceIssueDetails(item, en, formatPathText)}
                               {item.quarantined_source && (
                                 <div style={{ color: '#64748b' }}>
                                   {en ? 'Moved source to: ' : '源文件已移至：'}{formatPathText(item.quarantined_source)}
@@ -1163,9 +1228,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                           {(orbitSyncResult.repair_errors || []).slice(0, 3).map((item, index) => (
                             <div key={`orbit-repair-error-${index}`} className="health-card-note error">
                               {item.name} - {item.error}
-                              <div style={{ color: '#64748b' }}>
-                                {en ? 'Source: ' : '源文件：'}{formatPathText(item.source)}
-                              </div>
+                              {renderOrbitSourceIssueDetails(item, en, formatPathText)}
                             </div>
                           ))}
                           {(orbitSyncResult.sync_result?.source?.errors || []).slice(0, 3).map((item, index) => (
@@ -1176,9 +1239,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                           {(orbitSyncResult.sync_result?.invalid_sources || []).slice(0, 5).map((item, index) => (
                             <div key={`orbit-repair-invalid-${index}`} className="health-card-note error">
                               {item.name} - {item.error}
-                              <div style={{ color: '#64748b' }}>
-                                {en ? 'Source: ' : '源文件：'}{formatPathText(item.source)}
-                              </div>
+                              {renderOrbitSourceIssueDetails(item, en, formatPathText)}
                             </div>
                           ))}
                           {(orbitSyncResult.sync_result?.isce2?.errors || []).slice(0, 3).map((item, index) => (
