@@ -6,7 +6,6 @@ import { cleanupSessions } from './api/auth';
 import { syncWaterScenesFromDisk } from './api/water';
 import { listEngines, runWslCheck } from './api/dinsarProduction';
 import { getOrbitStatus, syncOrbitPools } from './api/orbit';
-import { rebuildPairingCache, reconcileDirtyPairingCache } from './api/pairing';
 import LogManagementPanel from './LogManagementPanel';
 import DinsarCatalogPanel from './components/DinsarCatalogPanel';
 
@@ -121,19 +120,6 @@ const buildConsistencySummary = (stats, en = false) => {
 
 const HEALTH_PANEL_POLL_INTERVAL_MS = 30000;
 
-const formatPairingActionMode = (mode, en = false) => {
-  switch (mode) {
-    case 'full_rebuild':
-      return en ? 'Full rebuild' : '全量重建';
-    case 'incremental_reconcile':
-      return en ? 'Incremental reconcile' : '增量修复';
-    case 'noop':
-      return en ? 'No-op reconcile' : '无需修复';
-    default:
-      return en ? 'Pairing cache action' : '配对缓存操作';
-  }
-};
-
 const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   const en = language === 'en';
   const isAdmin = currentUser?.role === 'admin';
@@ -156,9 +142,6 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   const [orbitRepairing, setOrbitRepairing] = useState(false);
   const [orbitQuarantining, setOrbitQuarantining] = useState(false);
   const [orbitSyncResult, setOrbitSyncResult] = useState(null);
-  const [pairingRebuilding, setPairingRebuilding] = useState(false);
-  const [pairingReconciling, setPairingReconciling] = useState(false);
-  const [pairingActionResult, setPairingActionResult] = useState(null);
   const statusFetchInFlightRef = useRef(false);
 
   const refreshOrbitStatus = useCallback(async () => {
@@ -182,31 +165,6 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
       setEnginesLoading(false);
     }
   }, []);
-
-  const handlePairingCacheAction = useCallback(async (mode) => {
-    if (!isAdmin) {
-      return;
-    }
-
-    const setBusyState = mode === 'rebuild' ? setPairingRebuilding : setPairingReconciling;
-    setBusyState(true);
-    setPairingActionResult(null);
-
-    try {
-      const result = mode === 'rebuild'
-        ? await rebuildPairingCache()
-        : await reconcileDirtyPairingCache();
-      setPairingActionResult(result);
-      await fetchStatus({ force: true });
-    } catch (err) {
-      setPairingActionResult({
-        mode,
-        error: err.response?.data?.detail || err.message || (en ? 'Pairing cache action failed' : '配对缓存操作失败'),
-      });
-    } finally {
-      setBusyState(false);
-    }
-  }, [en, fetchStatus, isAdmin]);
 
   const fetchStatus = useCallback(async (options = {}) => {
     const { force = false } = options;
@@ -258,9 +216,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
         wslChecking ||
         orbitSyncing ||
         orbitRepairing ||
-        orbitQuarantining ||
-        pairingRebuilding ||
-        pairingReconciling
+        orbitQuarantining
       ) {
         return;
       }
@@ -273,8 +229,6 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
     orbitQuarantining,
     orbitRepairing,
     orbitSyncing,
-    pairingRebuilding,
-    pairingReconciling,
     syncLoading,
     wslChecking,
   ]);
@@ -348,7 +302,6 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   const orbitEnviWithoutSourceCount = toNumber(orbitSource.envi_without_source_count);
   const orbitIsce2WithoutSourceCount = toNumber(orbitSource.isce2_without_source_count);
   const orbitQuarantinePath = orbitSource.quarantine_path || orbitStatus?.source_gaps?.quarantine_path;
-  const pairingActionBusy = pairingRebuilding || pairingReconciling;
   const orbitOverallHealthy = Boolean(
     orbitStatus &&
     orbitMismatchCount === 0 &&
@@ -602,63 +555,11 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                   {pairingSystem.error}
                 </div>
               )}
-              {false && (
-                <div className="health-card-note">
-                  {en
-                    ? 'Repair operations require an admin account. Open this panel as admin to rebuild or reconcile the pairing cache.'
-                    : '配对缓存修复需要管理员账号。请使用管理员登录后，在此面板执行“全量重建配对缓存”或“增量修复”。'}
-                </div>
-              )}
               {pairingSystem.needs_rebuild && (
                 <div className="health-card-note">
                   {en
                     ? 'Repair entry has moved to Pair Planning. Use the production planning page to repair or rebuild the pairing foundation.'
                     : '配对缓存修复入口已移到“生产规划 -> 配对规划”。请在生产规划页执行配对基础修复或强制全量重建。'}
-                </div>
-              )}
-              {false && (
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-                  <button
-                    onClick={() => void handlePairingCacheAction('rebuild')}
-                    disabled={pairingActionBusy}
-                    style={{ padding: '4px 12px', background: '#b45309', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
-                  >
-                    {pairingRebuilding
-                      ? (en ? 'Rebuilding...' : '重建中...')
-                      : (en ? 'Full Pairing Rebuild' : '全量重建配对缓存')}
-                  </button>
-                  <button
-                    onClick={() => void handlePairingCacheAction('reconcile')}
-                    disabled={pairingActionBusy}
-                    style={{ padding: '4px 12px', background: '#0f766e', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
-                  >
-                    {pairingReconciling
-                      ? (en ? 'Reconciling...' : '修复中...')
-                      : (en ? 'Incremental Reconcile' : '增量修复')}
-                  </button>
-                </div>
-              )}
-              {false && (
-                <div style={{ marginTop: 8, fontSize: 11, color: '#475569', padding: '8px 10px', background: '#f8fafc', borderRadius: 6 }}>
-                  {pairingActionResult.error ? (
-                    <div className="health-card-note error">{pairingActionResult.error}</div>
-                  ) : (
-                    <>
-                      <div className={`health-card-note ${pairingActionResult.ok ? 'ok' : 'warn'}`}>
-                        {`${formatPairingActionMode(pairingActionResult.mode, en)}${en ? ' finished.' : '已完成。'}`}
-                      </div>
-                      <div className="health-card-note">
-                        {en
-                          ? `Scenes / pairs / dirty: ${toNumber(pairingActionResult.scene_count)} / ${toNumber(pairingActionResult.pair_count)} / ${toNumber(pairingActionResult.dirty_scene_count)}`
-                          : `场景 / 候选对 / dirty：${toNumber(pairingActionResult.scene_count)} / ${toNumber(pairingActionResult.pair_count)} / ${toNumber(pairingActionResult.dirty_scene_count)}`}
-                      </div>
-                      <div className="health-card-note">
-                        {en
-                          ? `Resolved dirty rows: ${toNumber(pairingActionResult.resolved_dirty_rows)}, deleted pair rows: ${toNumber(pairingActionResult.deleted_pair_rows)}`
-                          : `已解决 dirty 记录：${toNumber(pairingActionResult.resolved_dirty_rows)}，删除旧候选对：${toNumber(pairingActionResult.deleted_pair_rows)}`}
-                      </div>
-                    </>
-                  )}
                 </div>
               )}
             </div>
