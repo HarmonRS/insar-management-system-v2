@@ -17,6 +17,12 @@ from ..services.task_service import task_service
 
 router = APIRouter(prefix="/dinsar-production", tags=["dinsar-production"])
 
+DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
+    "DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS",
+    1,
+    minimum=1,
+    maximum=20,
+)
 ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
     "ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS",
     1,
