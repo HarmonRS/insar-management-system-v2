@@ -18,7 +18,7 @@ router = APIRouter(prefix="/dinsar-production", tags=["dinsar-production"])
 
 DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
     "DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS",
-    6,
+    1,
     minimum=1,
     maximum=20,
 )
