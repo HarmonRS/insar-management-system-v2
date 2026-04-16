@@ -276,9 +276,9 @@ NGINX_PATH=C:\nginx-1.29.4\nginx.exe
 # IDL / ENVI 路径与 worker 管理目录
 IDL_EXECUTABLE=C:\Program Files\Harris\ENVI56\IDL88\bin\bin.x86_64\idl.exe
 IDL_WORKBENCH_PATH=C:\Program Files\Harris\ENVI56\IDL88\bin\bin.x86_64\idlde.exe
-IDL_WORKER_SCRIPT_SOURCE_DIR=Z:\Code\Insar_management_system_v2\IDL\origin
-IDL_WORKER_SCRIPT_DIR=Z:\Code\Insar_management_system_v2\IDL\worker_managed
-IDL_WORKER_RUNTIME_DIR=Z:\Code\Insar_management_system_v2\backend\runtime\idl_worker
+IDL_WORKER_SCRIPT_SOURCE_DIR=<项目根目录>\IDL\origin
+IDL_WORKER_SCRIPT_DIR=<项目根目录>\IDL\worker_managed
+IDL_WORKER_RUNTIME_DIR=<项目根目录>\backend\runtime\idl_worker
 IDL_WORKER_DEFAULT_TIMEOUT_SECONDS=14400
 IDL_WORKER_MAX_TIMEOUT_SECONDS=43200
 IDL_WORKER_TEMP_DIRECTORY=D:\Sarscape_IDL_Area

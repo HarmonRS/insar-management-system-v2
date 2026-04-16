@@ -26,6 +26,38 @@ def _windows_path_to_wsl_mount(path: str) -> str:
     return f"/mnt/{drive_letter}/{normalized_tail}"
 
 
+def _clean_path_text(value: str | None) -> str:
+    return str(value or "").strip().strip('"').strip("'")
+
+
+def _default_idl_runtime_dir() -> str:
+    return os.path.join(_BACKEND_DIR, "runtime", "idl_worker")
+
+
+def _resolve_idl_runtime_dir(value: str | None) -> str:
+    fallback_dir = os.path.normpath(_default_idl_runtime_dir())
+    text = _clean_path_text(value)
+    if not text:
+        return fallback_dir
+
+    normalized = os.path.normpath(text)
+    if normalized.startswith("\\\\"):
+        return normalized
+
+    drive, _tail = os.path.splitdrive(normalized)
+    if drive:
+        drive_root = drive + os.sep
+        if not os.path.exists(drive_root):
+            print(
+                ">>> [Config] IDL_WORKER_RUNTIME_DIR root unavailable; "
+                f"fallback to {fallback_dir} (configured: {normalized})"
+            )
+            return fallback_dir
+        return normalized
+
+    return os.path.normpath(os.path.abspath(normalized))
+
+
 def _read_env_pairs(env_path: str) -> dict[str, str]:
     env_map: dict[str, str] = {}
     if not os.path.isfile(env_path):
@@ -256,12 +288,11 @@ class Settings(BaseSettings):
                 "ORBIT_QUARANTINE_DIR",
                 os.path.join(self.MONITOR_ORBIT_DIR, "_quarantine"),
             )
-        if not self.IDL_WORKER_RUNTIME_DIR:
-            object.__setattr__(
-                self,
-                "IDL_WORKER_RUNTIME_DIR",
-                os.path.join(backend_dir, "runtime", "idl_worker"),
-            )
+        object.__setattr__(
+            self,
+            "IDL_WORKER_RUNTIME_DIR",
+            _resolve_idl_runtime_dir(self.IDL_WORKER_RUNTIME_DIR),
+        )
         if not self.RESULT_PUBLISH_ROOT:
             object.__setattr__(
                 self,
@@ -395,6 +426,7 @@ class Settings(BaseSettings):
         os.makedirs(Settings.RADAR_RAW_CACHE_DIR, exist_ok=True)
         os.makedirs(Settings.RADAR_GEO_CACHE_DIR, exist_ok=True)
         os.makedirs(Settings.COLORMAPS_DIR, exist_ok=True)
+        os.makedirs(settings.IDL_WORKER_RUNTIME_DIR, exist_ok=True)
         os.makedirs(settings.RESULT_PUBLISH_ROOT, exist_ok=True)
         os.makedirs(settings.DINSAR_PRODUCT_DIR, exist_ok=True)
         os.makedirs(settings.PSINSAR_PRODUCT_DIR, exist_ok=True)

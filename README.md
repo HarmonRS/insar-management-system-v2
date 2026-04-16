@@ -178,7 +178,7 @@ IDL_WORKBENCH_PATH=C:\\Program Files\\Harris\\ENVI56\\IDL88\\bin\\bin.x86_64\\id
 IDL_DINSAR_DEM_BASE_FILE=D:\\SRTM30m\\SRTMDEM_RSP_SARscape
 
 # 工作目录
-IDL_WORKER_RUNTIME_DIR=Z:\\Code\\Insar_management_system_v2\\backend\\runtime\\idl_worker
+IDL_WORKER_RUNTIME_DIR=<项目根目录>\\backend\\runtime\\idl_worker
 
 # 超时配置
 IDL_WORKER_DEFAULT_TIMEOUT_SECONDS=14400
