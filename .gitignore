@@ -55,6 +55,7 @@ backend/result_products/
 nginx/temp/
 experiments/**/scratch/
 backend/quality_model.pkl
+/_par_win_*.xls
 
 # Large local datasets / installers
 Data/

@@ -873,6 +873,12 @@ def _get_envi_progress_file(job_id: str) -> str:
     return os.path.join(runtime_dir, f"job_{job_id}_progress.json")
 
 
+def _get_envi_runtime_cwd() -> str:
+    runtime_dir = os.path.normpath(os.path.abspath(settings.IDL_WORKER_RUNTIME_DIR))
+    os.makedirs(runtime_dir, exist_ok=True)
+    return runtime_dir
+
+
 # Stale threshold: no progress file update AND no output file activity
 # for this many seconds -> consider the subprocess dead.
 _ENVI_FILE_STALE_SECONDS = int(settings.ENVI_FILE_STALE_SECONDS)
@@ -1057,7 +1063,7 @@ async def _run_envi_runner_command(
                 runner_cmd,
                 stdout=stdout_fd,
                 stderr=stderr_fd,
-                cwd=type(settings).PROJECT_ROOT,
+                cwd=_get_envi_runtime_cwd(),
             )
             proc_state["pid"] = proc.pid
             loop.call_soon_threadsafe(pid_ready.set)
@@ -1296,7 +1302,7 @@ async def _run_envi_workflow_job(
                 runner_cmd,
                 stdout=stdout_fd,
                 stderr=stderr_fd,
-                cwd=type(settings).PROJECT_ROOT,
+                cwd=_get_envi_runtime_cwd(),
             )
             # Close our copy of the fds; the child process has its own.
             os.close(stdout_fd)
