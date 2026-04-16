@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 from sqlalchemy import select
 
+from .. import database
 from ..config import settings
-from ..database import AsyncSessionLocal
 from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskItemORM, PsTaskItemORM, SARSceneGeoORM, FloodDetectionORM, WaterDetectionORM, GF3ProcessingORM, AiDiagnosisORM
 from ..scheduler import scan_data_job
 from .data_service import data_service
@@ -78,6 +78,14 @@ JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
 
 COPY_ALLOWED_STATUSES = {"PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"}
+
+
+def AsyncSessionLocal():
+    if database.AsyncSessionLocal is None:
+        database.init_db()
+    if database.AsyncSessionLocal is None:
+        raise RuntimeError("Database session factory is not initialized.")
+    return database.AsyncSessionLocal()
 
 
 def _normalize_copy_statuses(raw_statuses: Any) -> List[str]:

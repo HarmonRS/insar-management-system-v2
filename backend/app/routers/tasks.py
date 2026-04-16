@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from .. import database
 from ..auth_utils import verify_password
 from ..models import AuthUserORM, TaskInfo
 from ..services.dinsar_production_service import dinsar_production_service
@@ -20,7 +21,6 @@ from ..services.task_service import (
     task_service,
 )
 from ..auth_service import SESSION_COOKIE_NAME, get_user_by_session_token
-from ..database import AsyncSessionLocal
 from .dependencies import _require_admin
 
 router = APIRouter()
@@ -28,6 +28,14 @@ router = APIRouter()
 
 class ForceCancelRequest(BaseModel):
     password: str
+
+
+def _new_session():
+    if database.AsyncSessionLocal is None:
+        database.init_db()
+    if database.AsyncSessionLocal is None:
+        raise RuntimeError("Database session factory is not initialized.")
+    return database.AsyncSessionLocal()
 
 
 @router.get("/tasks/active", response_model=List[TaskInfo])
@@ -44,12 +52,12 @@ async def stream_active_tasks(request: Request):
     """SSE 端点：每 3s 推送一次活跃任务列表，替代前端轮询。"""
     # Authenticate via Cookie at connection establishment
     token = request.cookies.get(SESSION_COOKIE_NAME)
-    if token and AsyncSessionLocal:
-        async with AsyncSessionLocal() as db:
+    if token:
+        async with _new_session() as db:
             user = await get_user_by_session_token(db, token)
         if not user:
             raise HTTPException(status_code=401, detail="Authentication required.")
-    elif not token:
+    else:
         raise HTTPException(status_code=401, detail="Authentication required.")
 
     async def event_generator():
@@ -127,14 +135,13 @@ async def force_cancel_task(
     if task.status not in ("PENDING", "RUNNING"):
         raise HTTPException(status_code=400, detail="任务已结束，无需取消")
     killed_pid = None
-    if AsyncSessionLocal is not None:
-        async with AsyncSessionLocal() as db:
-            run = await dinsar_production_service.request_cancel(task_id, db=db)
-            if run is not None:
-                killed_pid = await dinsar_production_service.kill_active_execution_by_task_id(
-                    task_id,
-                    db=db,
-                )
+    async with _new_session() as db:
+        run = await dinsar_production_service.request_cancel(task_id, db=db)
+        if run is not None:
+            killed_pid = await dinsar_production_service.kill_active_execution_by_task_id(
+                task_id,
+                db=db,
+            )
     await task_service.update_task(task_id, status="CANCELLED", message="管理员强制取消")
     return {
         "message": "任务已强制取消",

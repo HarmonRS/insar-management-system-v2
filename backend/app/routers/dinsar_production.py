@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .dependencies import _get_current_user, _require_admin
+from .. import database
 from ..config import read_int_env, settings
-from ..database import AsyncSessionLocal
 from ..models import AuthUserORM
 from ..services.dinsar_production_service import dinsar_production_service
 from ..services.job_queue_service import job_queue_service
@@ -49,6 +49,14 @@ def _get_registry():
     from ..dinsar_engines import registry
 
     return registry
+
+
+def _new_session():
+    if database.AsyncSessionLocal is None:
+        database.init_db()
+    if database.AsyncSessionLocal is None:
+        raise RuntimeError("Database session factory is not initialized.")
+    return database.AsyncSessionLocal()
 
 
 @router.get("/engines")
@@ -184,9 +192,7 @@ async def submit_run(
 
     try:
         if req.engine_code == "sarscape":
-            if AsyncSessionLocal is None:
-                raise RuntimeError("Database session factory is not initialized.")
-            async with AsyncSessionLocal() as db:
+            async with _new_session() as db:
                 result = await dinsar_production_service.create_run(
                     engine_code=req.engine_code,
                     profile_code=req.profile,
@@ -239,8 +245,6 @@ async def submit_run(
 
 @router.get("/runs")
 async def list_runs(limit: int = 20):
-    if AsyncSessionLocal is None:
-        raise HTTPException(status_code=500, detail="Database session factory is not initialized.")
-    async with AsyncSessionLocal() as db:
+    async with _new_session() as db:
         result = await dinsar_production_service.list_runs(db, limit=limit)
     return result
