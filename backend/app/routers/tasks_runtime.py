@@ -4,7 +4,7 @@ import asyncio
 import json
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -38,11 +38,38 @@ def _new_session():
     return database.AsyncSessionLocal()
 
 
+def _split_csv_param(raw: Optional[str]) -> List[str]:
+    values: List[str] = []
+    for chunk in str(raw or "").split(","):
+        text = chunk.strip()
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
 @router.get("/tasks/active", response_model=List[TaskInfo])
 async def get_active_tasks(limit: int = TASK_ACTIVE_DEFAULT_LIMIT, offset: int = 0):
     safe_limit = min(TASK_ACTIVE_MAX_LIMIT, max(1, int(limit or TASK_ACTIVE_DEFAULT_LIMIT)))
     safe_offset = min(TASK_QUERY_MAX_OFFSET, max(0, int(offset or 0)))
     orm_tasks = await task_service.get_active_tasks(limit=safe_limit, offset=safe_offset)
+    return [TaskInfo.model_validate(task) for task in orm_tasks]
+
+
+@router.get("/tasks/recent", response_model=List[TaskInfo])
+async def get_recent_tasks(
+    task_types: Optional[str] = Query(None, description="Comma-separated task types."),
+    statuses: Optional[str] = Query(None, description="Comma-separated task statuses."),
+    limit: int = TASK_ACTIVE_DEFAULT_LIMIT,
+    offset: int = 0,
+):
+    safe_limit = min(TASK_ACTIVE_MAX_LIMIT, max(1, int(limit or TASK_ACTIVE_DEFAULT_LIMIT)))
+    safe_offset = min(TASK_QUERY_MAX_OFFSET, max(0, int(offset or 0)))
+    orm_tasks = await task_service.list_tasks(
+        task_types=_split_csv_param(task_types),
+        statuses=_split_csv_param(statuses),
+        limit=safe_limit,
+        offset=safe_offset,
+    )
     return [TaskInfo.model_validate(task) for task in orm_tasks]
 
 

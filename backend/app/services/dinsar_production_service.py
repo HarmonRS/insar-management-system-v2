@@ -16,6 +16,7 @@ from ..models import (
     DinsarProductionExecutionORM,
     DinsarProductionRunItemORM,
     DinsarProductionRunORM,
+    SystemTaskORM,
 )
 from .envi_service import RUNTIME_DIR, _collect_task_folders, _resolve_dinsar_pair_identity, _to_local_path
 from .task_service import task_service
@@ -206,6 +207,41 @@ def _public_run_status(value: str) -> str:
 
 
 class DinsarProductionService:
+    async def reconcile_run_with_task(
+        self,
+        run: DinsarProductionRunORM,
+        task: Optional[SystemTaskORM],
+        *,
+        db: AsyncSession,
+    ) -> bool:
+        if task is None:
+            return False
+
+        run_status = str(run.status or "").strip().upper()
+        task_status = str(task.status or "").strip().upper()
+        if run_status in TERMINAL_RUN_STATUSES:
+            return False
+        if task_status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+            return False
+
+        if task_status == "COMPLETED":
+            next_status = RUN_STATUS_COMPLETED
+        elif task_status == "CANCELLED":
+            next_status = RUN_STATUS_CANCELLED
+            run.cancel_requested = True
+        else:
+            next_status = RUN_STATUS_FAILED
+
+        summary_payload = dict(run.summary_json or {})
+        summary_payload["reconciled_from_task_status"] = task_status
+        latest_message = str(task.message or "").strip() or f"Reconciled from task status {task_status}"
+        run.status = next_status
+        run.summary_json = summary_payload
+        run.latest_message = latest_message
+        run.ended_at = run.ended_at or _utcnow()
+        await self.refresh_run_counters(run, db=db, latest_message=latest_message)
+        return True
+
     async def create_run(
         self,
         *,
@@ -374,6 +410,26 @@ class DinsarProductionService:
         )
         result = await db.execute(stmt)
         runs = result.scalars().all()
+        pending_reconcile = [
+            run
+            for run in runs
+            if run.task_id and str(run.status or "").strip().upper() not in TERMINAL_RUN_STATUSES
+        ]
+        if pending_reconcile:
+            task_ids = [run.task_id for run in pending_reconcile if run.task_id]
+            task_result = await db.execute(
+                select(SystemTaskORM).where(SystemTaskORM.task_id.in_(task_ids))
+            )
+            tasks_by_id = {task.task_id: task for task in task_result.scalars().all()}
+            changed = False
+            for run in pending_reconcile:
+                changed = await self.reconcile_run_with_task(
+                    run,
+                    tasks_by_id.get(run.task_id),
+                    db=db,
+                ) or changed
+            if changed:
+                await db.commit()
         return {
             "runs": [
                 {

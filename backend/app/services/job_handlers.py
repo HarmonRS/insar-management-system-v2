@@ -1823,7 +1823,43 @@ async def _handle_idl_run_dinsar(job: SystemJobORM) -> None:
     payload = job.payload or {}
     production_run_id = str(payload.get("production_run_id") or "").strip()
     if production_run_id:
-        await _run_dinsar_production_controller(job)
+        try:
+            await _run_dinsar_production_controller(job)
+        except Exception as exc:
+            latest_message = f"D-InSAR production controller failed: {exc}"
+            try:
+                async with AsyncSessionLocal() as db:
+                    run = await dinsar_production_service.get_run(production_run_id, db)
+                    if run is not None and str(run.status or "").strip().upper() not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                        summary_payload = dict(run.summary_json or {})
+                        summary_payload["controller_error"] = str(exc)
+                        await dinsar_production_service.finalize_run(
+                            run,
+                            db=db,
+                            status="FAILED",
+                            summary_payload=summary_payload,
+                            latest_message=latest_message,
+                        )
+                        dinsar_production_service.append_run_log(
+                            run.run_id,
+                            f"[controller-failed] {exc}",
+                        )
+            except Exception:
+                pass
+
+            try:
+                current_task = await task_service.get_task(job.task_id)
+                if current_task and current_task.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                    await task_service.add_log(job.task_id, "ERROR", latest_message)
+                    await task_service.update_task(
+                        job.task_id,
+                        status="FAILED",
+                        progress=100,
+                        message=latest_message,
+                    )
+            except Exception:
+                pass
+            raise
         return
 
     mode = payload.get("mode", "metatask")

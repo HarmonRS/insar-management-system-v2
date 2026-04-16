@@ -2,7 +2,7 @@
 
 import { scanDinsarResults } from './api/dinsar';
 import { extractDispResults } from './api/idl';
-import { clearTaskLogs, deleteTaskLog, getActiveTasks, getTaskLogs } from './api/tasks';
+import { clearTaskLogs, deleteTaskLog, getActiveTasks, getRecentTasks, getTaskLogs } from './api/tasks';
 import DinsarCatalogPanel from './components/DinsarCatalogPanel';
 
 const card = {
@@ -52,10 +52,14 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
   const [scanning, setScanning] = useState(false);
 
   const [activeTask, setActiveTask] = useState(null);
+  const [recentTask, setRecentTask] = useState(null);
   const [taskLogs, setTaskLogs] = useState([]);
   const [taskLogsLoading, setTaskLogsLoading] = useState(false);
   const [taskLogActionLoading, setTaskLogActionLoading] = useState(false);
   const [taskLogDeletingId, setTaskLogDeletingId] = useState(null);
+  const monitoredTask = activeTask || recentTask;
+  const logTaskId = monitoredTask?.task_id || '';
+  const showingRecentTask = !activeTask && !!recentTask;
 
   const loadActiveTask = useCallback(async () => {
     try {
@@ -65,6 +69,15 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
       setActiveTask(relevantTask);
     } catch {
       setActiveTask(null);
+    }
+  }, []);
+
+  const loadRecentTask = useCallback(async () => {
+    try {
+      const tasks = await getRecentTasks(PRODUCT_TASK_TYPES, [], 1, 0);
+      setRecentTask(Array.isArray(tasks) ? (tasks[0] || null) : null);
+    } catch {
+      setRecentTask(null);
     }
   }, []);
 
@@ -85,7 +98,7 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
   }, []);
 
   const handleDeleteTaskLog = useCallback(async logId => {
-    const taskId = activeTask?.task_id;
+    const taskId = logTaskId;
     if (!taskId || !logId || taskLogActionLoading) return;
     if (!window.confirm('确定要删除这条任务日志吗？')) return;
 
@@ -101,12 +114,12 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
       setTaskLogDeletingId(null);
       setTaskLogActionLoading(false);
     }
-  }, [activeTask?.task_id, loadTaskLogs, taskLogActionLoading]);
+  }, [logTaskId, loadTaskLogs, taskLogActionLoading]);
 
   const handleClearTaskLogs = useCallback(async () => {
-    const taskId = activeTask?.task_id;
+    const taskId = logTaskId;
     if (!taskId || taskLogActionLoading || taskLogs.length === 0) return;
-    if (!window.confirm('确定要清空当前任务的全部日志吗？')) return;
+    if (!window.confirm(`确定要清空任务 ${taskId} 的全部日志吗？`)) return;
 
     setTaskLogActionLoading(true);
     try {
@@ -118,24 +131,28 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
     } finally {
       setTaskLogActionLoading(false);
     }
-  }, [activeTask?.task_id, loadTaskLogs, taskLogActionLoading, taskLogs.length]);
+  }, [logTaskId, loadTaskLogs, taskLogActionLoading, taskLogs.length]);
 
   useEffect(() => {
     loadActiveTask();
-  }, [loadActiveTask]);
+    loadRecentTask();
+  }, [loadActiveTask, loadRecentTask]);
 
   useEffect(() => {
-    const timer = setInterval(loadActiveTask, 5000);
+    const timer = setInterval(() => {
+      loadActiveTask();
+      loadRecentTask();
+    }, 5000);
     return () => clearInterval(timer);
-  }, [loadActiveTask]);
+  }, [loadActiveTask, loadRecentTask]);
 
   useEffect(() => {
-    const taskId = activeTask?.task_id || '';
+    const taskId = logTaskId;
     loadTaskLogs(taskId);
     if (!taskId) return undefined;
     const timer = setInterval(() => loadTaskLogs(taskId), 5000);
     return () => clearInterval(timer);
-  }, [activeTask?.task_id, loadTaskLogs]);
+  }, [logTaskId, loadTaskLogs]);
 
   const handleExtract = async () => {
     if (!extractRootDir.trim()) return;
@@ -165,6 +182,7 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
         onJobQueued?.(result.task_id);
       }
       loadActiveTask();
+      loadRecentTask();
     } catch (err) {
       setActionError(true);
       setActionMessage(err?.response?.data?.detail || err.message || 'D-InSAR结果扫描失败');
@@ -271,7 +289,10 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <strong style={{ fontSize: 14 }}>产物任务监控</strong>
           <button
-            onClick={loadActiveTask}
+            onClick={() => {
+              loadActiveTask();
+              loadRecentTask();
+            }}
             style={{
               fontSize: 12,
               padding: '3px 10px',
@@ -285,33 +306,66 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
           </button>
         </div>
 
-        {!activeTask ? (
+        {!monitoredTask ? (
           <div style={{ fontSize: 12, color: '#94a3b8' }}>当前没有正在执行的产物处理任务。</div>
         ) : (
-          <div style={{ padding: '8px 10px', background: '#fefce8', borderRadius: 6, border: '1px solid #fde68a' }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: '#92400e', marginBottom: 4 }}>当前任务</div>
-            <div style={{ fontSize: 12, color: '#78350f', wordBreak: 'break-all' }}>
-              {activeTask.task_id} - {formatTaskType(activeTask.task_type)} - {formatStatus(activeTask.status)} - {activeTask.message}
+          <div
+            style={{
+              padding: '8px 10px',
+              background: showingRecentTask ? '#eff6ff' : '#fefce8',
+              borderRadius: 6,
+              border: `1px solid ${showingRecentTask ? '#bfdbfe' : '#fde68a'}`,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: showingRecentTask ? '#1d4ed8' : '#92400e',
+                marginBottom: 4,
+              }}
+            >
+              {showingRecentTask ? '最近一次任务' : '当前任务'}
             </div>
-            {activeTask.progress != null && (
+            <div style={{ fontSize: 12, color: showingRecentTask ? '#1e40af' : '#78350f', wordBreak: 'break-all' }}>
+              {monitoredTask.task_id} - {formatTaskType(monitoredTask.task_type)} - {formatStatus(monitoredTask.status)} - {monitoredTask.message}
+            </div>
+            {monitoredTask.progress != null && (
               <div style={{ marginTop: 6 }}>
-                <div style={{ height: 6, background: '#fde68a', borderRadius: 3, overflow: 'hidden' }}>
+                <div
+                  style={{
+                    height: 6,
+                    background: showingRecentTask ? '#dbeafe' : '#fde68a',
+                    borderRadius: 3,
+                    overflow: 'hidden',
+                  }}
+                >
                   <div
                     style={{
                       height: '100%',
-                      width: `${activeTask.progress}%`,
-                      background: '#f59e0b',
+                      width: `${monitoredTask.progress}%`,
+                      background: showingRecentTask ? '#3b82f6' : '#f59e0b',
                       transition: 'width 0.3s',
                     }}
                   />
                 </div>
-                <div style={{ fontSize: 11, color: '#92400e', marginTop: 2 }}>{activeTask.progress}%</div>
+                <div style={{ fontSize: 11, color: showingRecentTask ? '#1d4ed8' : '#92400e', marginTop: 2 }}>{monitoredTask.progress}%</div>
               </div>
             )}
 
-            <div style={{ marginTop: 8, background: '#fff', border: '1px solid #fde68a', borderRadius: 6, padding: '8px 10px' }}>
+            <div
+              style={{
+                marginTop: 8,
+                background: '#fff',
+                border: `1px solid ${showingRecentTask ? '#bfdbfe' : '#fde68a'}`,
+                borderRadius: 6,
+                padding: '8px 10px',
+              }}
+            >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: '#92400e' }}>任务日志</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: showingRecentTask ? '#1d4ed8' : '#92400e' }}>
+                  {showingRecentTask ? '最近一次任务日志' : '当前任务日志'}
+                </div>
                 {!readOnly && (
                   <button
                     onClick={handleClearTaskLogs}
@@ -331,9 +385,9 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
                 )}
               </div>
               {taskLogsLoading ? (
-                <div style={{ fontSize: 11, color: '#a16207' }}>加载中...</div>
+                <div style={{ fontSize: 11, color: showingRecentTask ? '#1d4ed8' : '#a16207' }}>加载中...</div>
               ) : taskLogs.length === 0 ? (
-                <div style={{ fontSize: 11, color: '#a16207' }}>暂无日志。</div>
+                <div style={{ fontSize: 11, color: showingRecentTask ? '#1d4ed8' : '#a16207' }}>暂无日志。</div>
               ) : (
                 <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {taskLogs.map((log, index) => (
@@ -346,7 +400,15 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
                         alignItems: 'flex-start',
                       }}
                     >
-                      <div style={{ flex: 1, minWidth: 0, fontSize: 11, lineHeight: 1.45, color: log.level === 'WARNING' ? '#b45309' : '#334155' }}>
+                      <div
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          fontSize: 11,
+                          lineHeight: 1.45,
+                          color: log.level === 'ERROR' ? '#b91c1c' : log.level === 'WARNING' ? '#b45309' : '#334155',
+                        }}
+                      >
                         <div style={{ color: '#64748b' }}>
                           {(log.timestamp || '').replace('T', ' ').replace('Z', '')} [{log.level}]
                         </div>

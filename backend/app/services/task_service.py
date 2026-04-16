@@ -65,6 +65,19 @@ def _clamp_pagination(limit: int, offset: int, *, default_limit: int, max_limit:
     return safe_limit, safe_offset
 
 
+def _normalize_string_list(values: Optional[List[str]], *, uppercase: bool = False) -> List[str]:
+    normalized: List[str] = []
+    for raw in values or []:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if uppercase:
+            text = text.upper()
+        if text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
 def _task_type_lock_key(task_type: str) -> int:
     normalized = (task_type or "").strip().lower().encode("utf-8")
     digest = hashlib.sha256(normalized).digest()
@@ -109,6 +122,27 @@ class TaskService:
 
     def __init__(self):
         pass
+
+    async def _expire_zombie_tasks(self, db: AsyncSession) -> None:
+        timeout_threshold = datetime.now() - timedelta(minutes=TASK_TIMEOUT_MINUTES)
+        result = await db.execute(
+            select(SystemTaskORM).where(
+                and_(
+                    SystemTaskORM.status == "RUNNING",
+                    SystemTaskORM.updated_at < timeout_threshold
+                )
+            )
+        )
+        zombie_tasks = result.scalars().all()
+
+        for task in zombie_tasks:
+            task.status = "FAILED"
+            task.message = "系统检测超时: 任务被认为已失效 (心跳超时)"
+            log = TaskLogORM(task_id=task.task_id, log_level="WARNING", message="任务因超时被自动标记为失败")
+            db.add(log)
+
+        if zombie_tasks:
+            await db.commit()
 
     async def create_task(
         self,
@@ -269,26 +303,7 @@ class TaskService:
                 max_limit=TASK_ACTIVE_MAX_LIMIT,
             )
 
-            # 1. 查找僵尸任务并标记为失败
-            timeout_threshold = datetime.now() - timedelta(minutes=TASK_TIMEOUT_MINUTES)
-            result = await db.execute(
-                select(SystemTaskORM).where(
-                    and_(
-                        SystemTaskORM.status == "RUNNING",
-                        SystemTaskORM.updated_at < timeout_threshold
-                    )
-                )
-            )
-            zombie_tasks = result.scalars().all()
-
-            for task in zombie_tasks:
-                task.status = "FAILED"
-                task.message = "系统检测超时: 任务被认为已失效 (心跳超时)"
-                log = TaskLogORM(task_id=task.task_id, log_level="WARNING", message="任务因超时被自动标记为失败")
-                db.add(log)
-
-            if zombie_tasks:
-                await db.commit()
+            await self._expire_zombie_tasks(db)
 
             # 2. 获取活跃任务
             active_result = await db.execute(
@@ -300,6 +315,48 @@ class TaskService:
             )
             return active_result.scalars().all()
 
+        finally:
+            if gen_db:
+                await db.close()
+
+    async def list_tasks(
+        self,
+        task_types: Optional[List[str]] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = TASK_ACTIVE_DEFAULT_LIMIT,
+        offset: int = 0,
+        db: Optional[AsyncSession] = None,
+    ) -> List[SystemTaskORM]:
+        gen_db = db is None
+        if gen_db:
+            db = get_db_session()
+
+        try:
+            safe_limit, safe_offset = _clamp_pagination(
+                limit,
+                offset,
+                default_limit=TASK_ACTIVE_DEFAULT_LIMIT,
+                max_limit=TASK_ACTIVE_MAX_LIMIT,
+            )
+            await self._expire_zombie_tasks(db)
+
+            normalized_task_types = _normalize_string_list(task_types)
+            normalized_statuses = _normalize_string_list(statuses, uppercase=True)
+
+            stmt = select(SystemTaskORM)
+            if normalized_task_types:
+                stmt = stmt.where(SystemTaskORM.task_type.in_(normalized_task_types))
+            if normalized_statuses:
+                stmt = stmt.where(SystemTaskORM.status.in_(normalized_statuses))
+
+            stmt = (
+                stmt
+                .order_by(SystemTaskORM.created_at.desc(), SystemTaskORM.id.desc())
+                .offset(safe_offset)
+                .limit(safe_limit)
+            )
+            result = await db.execute(stmt)
+            return result.scalars().all()
         finally:
             if gen_db:
                 await db.close()
