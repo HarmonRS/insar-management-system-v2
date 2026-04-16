@@ -22,7 +22,7 @@ from . import (
     root_registry,
     stats,
     task_batches,
-    tasks,
+    tasks_runtime,
     timeseries_production,
     tools,
     unpack,
@@ -36,7 +36,7 @@ def include_all_routers(router: APIRouter) -> None:
     router.include_router(health.router)
     router.include_router(auth.router)
     router.include_router(license.router)
-    router.include_router(tasks.router)
+    router.include_router(tasks_runtime.router)
     router.include_router(workflow.router)
     router.include_router(task_batches.router)
     router.include_router(tools.router)

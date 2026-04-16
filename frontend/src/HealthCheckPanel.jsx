@@ -6,7 +6,7 @@ import { cleanupSessions } from './api/auth';
 import { syncWaterScenesFromDisk } from './api/water';
 import { listEngines, runWslCheck } from './api/dinsarProduction';
 import { getOrbitStatus, syncOrbitPools } from './api/orbit';
-import LogManagementPanel from './LogManagementPanel';
+import LogManagementPanel from './LogManagementPanel.clean';
 import DinsarCatalogPanel from './components/DinsarCatalogPanel';
 
 const toNumber = (value) => {

@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+﻿import React, { useCallback, useEffect, useState } from 'react';
 
 import { scanDinsarResults } from './api/dinsar';
-import { extractDispResults, getActiveTasks, getTaskLogs } from './api/idl';
+import { extractDispResults } from './api/idl';
+import { clearTaskLogs, deleteTaskLog, getActiveTasks, getTaskLogs } from './api/tasks';
 import DinsarCatalogPanel from './components/DinsarCatalogPanel';
 
 const card = {
@@ -19,9 +20,9 @@ const PRODUCT_TASK_TYPES = [
 ];
 
 const TASK_TYPE_LABEL = {
-  SCAN_DINSAR: 'D-InSAR结果扫描任务',
-  PUBLISH_DINSAR_PRODUCTS: '结果包发布任务',
-  REBUILD_DINSAR_CATALOG: '结果目录重建任务',
+  SCAN_DINSAR: 'D-InSAR结果扫描',
+  PUBLISH_DINSAR_PRODUCTS: 'D-InSAR产物发布',
+  REBUILD_DINSAR_CATALOG: 'D-InSAR目录重建',
 };
 
 const STATUS_LABEL = {
@@ -53,6 +54,8 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
   const [activeTask, setActiveTask] = useState(null);
   const [taskLogs, setTaskLogs] = useState([]);
   const [taskLogsLoading, setTaskLogsLoading] = useState(false);
+  const [taskLogActionLoading, setTaskLogActionLoading] = useState(false);
+  const [taskLogDeletingId, setTaskLogDeletingId] = useState(null);
 
   const loadActiveTask = useCallback(async () => {
     try {
@@ -80,6 +83,42 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
       setTaskLogsLoading(false);
     }
   }, []);
+
+  const handleDeleteTaskLog = useCallback(async logId => {
+    const taskId = activeTask?.task_id;
+    if (!taskId || !logId || taskLogActionLoading) return;
+    if (!window.confirm('确定要删除这条任务日志吗？')) return;
+
+    setTaskLogDeletingId(logId);
+    setTaskLogActionLoading(true);
+    try {
+      await deleteTaskLog(taskId, logId);
+      await loadTaskLogs(taskId);
+    } catch (error) {
+      setActionMessage(`删除日志失败：${error?.response?.data?.detail || error.message}`);
+      setActionError(true);
+    } finally {
+      setTaskLogDeletingId(null);
+      setTaskLogActionLoading(false);
+    }
+  }, [activeTask?.task_id, loadTaskLogs, taskLogActionLoading]);
+
+  const handleClearTaskLogs = useCallback(async () => {
+    const taskId = activeTask?.task_id;
+    if (!taskId || taskLogActionLoading || taskLogs.length === 0) return;
+    if (!window.confirm('确定要清空当前任务的全部日志吗？')) return;
+
+    setTaskLogActionLoading(true);
+    try {
+      await clearTaskLogs(taskId);
+      await loadTaskLogs(taskId);
+    } catch (error) {
+      setActionMessage(`清空日志失败：${error?.response?.data?.detail || error.message}`);
+      setActionError(true);
+    } finally {
+      setTaskLogActionLoading(false);
+    }
+  }, [activeTask?.task_id, loadTaskLogs, taskLogActionLoading, taskLogs.length]);
 
   useEffect(() => {
     loadActiveTask();
@@ -137,7 +176,7 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
   return (
     <div style={{ padding: '16px', maxWidth: 960 }}>
       <div style={card}>
-        <strong style={{ fontSize: 14, display: 'block', marginBottom: 10 }}>产物提取与重扫</strong>
+        <strong style={{ fontSize: 14, display: 'block', marginBottom: 10 }}>D-InSAR 产物提取与重扫</strong>
 
         <div
           style={{
@@ -151,20 +190,20 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
             borderRadius: 6,
           }}
         >
-          这里负责把生产目录中的位移结果提取为标准结果包，并触发结果重扫、发布和编目。生产运行与参数配置已独立放到“D-InSAR生产”选项卡。
+          这里负责把生产目录中的位移结果提取为标准成果包，并触发结果重扫、发布和编目。生产运行与参数配置已独立放到“D-InSAR生产”选项卡。
         </div>
 
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
           <input
             value={extractRootDir}
             onChange={event => setExtractRootDir(event.target.value)}
-            placeholder="结果根目录（提取位移结果）"
+            placeholder="结果根目录"
             style={{ flex: 2, minWidth: 220, padding: '5px 8px', borderRadius: 4, border: '1px solid #e2e8f0', fontSize: 13 }}
           />
           <input
             value={extractDestDir}
             onChange={event => setExtractDestDir(event.target.value)}
-            placeholder="目标目录（留空使用默认）"
+            placeholder="目标目录（可选）"
             style={{ flex: 1, minWidth: 180, padding: '5px 8px', borderRadius: 4, border: '1px solid #e2e8f0', fontSize: 13 }}
           />
           <button
@@ -209,15 +248,17 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
               <span style={{ color: '#ef4444' }}>提取失败：{extractResult.error}</span>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4, color: '#16a34a' }}>
-                <span>提取完成：复制 {extractResult.copied || 0} 个文件，覆盖 {extractResult.overwritten || 0} 个文件。</span>
+                <span>
+                  提取完成：复制 {extractResult.copied || 0} 个文件，覆盖 {extractResult.overwritten || 0} 个文件。
+                </span>
                 {extractResult.catalog?.attempted && extractResult.catalog?.status === 'ok' && (
                   <span style={{ color: '#166534' }}>
-                    已同步标准结果包目录：发布 {extractResult.catalog?.publish?.processed || 0} 项，重建登记 {extractResult.catalog?.rebuild?.registered || 0} 项。
+                    成果目录已同步：发布 {extractResult.catalog?.publish?.processed || 0} 项，重建登记 {extractResult.catalog?.rebuild?.registered || 0} 项。
                   </span>
                 )}
                 {extractResult.catalog?.attempted && extractResult.catalog?.status === 'error' && (
                   <span style={{ color: '#b45309' }}>
-                    标准结果包目录同步失败：{extractResult.catalog?.message}
+                    标准成果包目录同步失败：{extractResult.catalog?.message}
                   </span>
                 )}
               </div>
@@ -245,7 +286,7 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
         </div>
 
         {!activeTask ? (
-          <div style={{ fontSize: 12, color: '#94a3b8' }}>当前没有运行中的产物处理任务。</div>
+          <div style={{ fontSize: 12, color: '#94a3b8' }}>当前没有正在执行的产物处理任务。</div>
         ) : (
           <div style={{ padding: '8px 10px', background: '#fefce8', borderRadius: 6, border: '1px solid #fde68a' }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: '#92400e', marginBottom: 4 }}>当前任务</div>
@@ -269,7 +310,26 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
             )}
 
             <div style={{ marginTop: 8, background: '#fff', border: '1px solid #fde68a', borderRadius: 6, padding: '8px 10px' }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: '#92400e', marginBottom: 6 }}>任务日志</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: '#92400e' }}>任务日志</div>
+                {!readOnly && (
+                  <button
+                    onClick={handleClearTaskLogs}
+                    disabled={taskLogActionLoading || taskLogs.length === 0}
+                    style={{
+                      fontSize: 11,
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      border: '1px solid #fcd34d',
+                      background: taskLogActionLoading || taskLogs.length === 0 ? '#fef3c7' : '#fff7ed',
+                      color: '#9a3412',
+                      cursor: taskLogActionLoading || taskLogs.length === 0 ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {taskLogActionLoading && taskLogDeletingId == null ? '清空中...' : '清空日志'}
+                  </button>
+                )}
+              </div>
               {taskLogsLoading ? (
                 <div style={{ fontSize: 11, color: '#a16207' }}>加载中...</div>
               ) : taskLogs.length === 0 ? (
@@ -278,13 +338,38 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
                 <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {taskLogs.map((log, index) => (
                     <div
-                      key={`${log.timestamp || 'log'}-${index}`}
-                      style={{ fontSize: 11, lineHeight: 1.45, color: log.level === 'WARNING' ? '#b45309' : '#334155' }}
+                      key={log.id || `${log.timestamp || 'log'}-${index}`}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        gap: 8,
+                        alignItems: 'flex-start',
+                      }}
                     >
-                      <div style={{ color: '#64748b' }}>
-                        {(log.timestamp || '').replace('T', ' ').replace('Z', '')} [{log.level}]
+                      <div style={{ flex: 1, minWidth: 0, fontSize: 11, lineHeight: 1.45, color: log.level === 'WARNING' ? '#b45309' : '#334155' }}>
+                        <div style={{ color: '#64748b' }}>
+                          {(log.timestamp || '').replace('T', ' ').replace('Z', '')} [{log.level}]
+                        </div>
+                        <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{log.message}</div>
                       </div>
-                      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{log.message}</div>
+                      {!readOnly && (
+                        <button
+                          onClick={() => handleDeleteTaskLog(log.id)}
+                          disabled={taskLogActionLoading || !log.id}
+                          style={{
+                            flexShrink: 0,
+                            fontSize: 11,
+                            padding: '2px 8px',
+                            borderRadius: 4,
+                            border: '1px solid #fecaca',
+                            background: '#fef2f2',
+                            color: '#b91c1c',
+                            cursor: taskLogActionLoading || !log.id ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          {taskLogDeletingId === log.id ? '删除中...' : '删除'}
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -302,3 +387,4 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
     </div>
   );
 }
+

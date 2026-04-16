@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+﻿import React, { useCallback, useEffect, useState } from 'react';
 
 import { listEngines, listRuns, submitRun } from './api/dinsarProduction';
-import { getActiveTasks, getJobLog, getTaskLogs } from './api/idl';
+import { getJobLog } from './api/idl';
+import { clearTaskLogs, deleteTaskLog, getActiveTasks, getTaskLogs } from './api/tasks';
 
 const card = {
   background: '#fff',
@@ -24,10 +25,10 @@ const ENGINE_STATUS_COLOR = {
 
 const ENGINE_STATUS_LABEL = {
   ok: '可用',
-  degraded: '部分可用',
+  degraded: '降级',
   unavailable: '不可用',
   not_implemented: '预留',
-  error: '错误',
+  error: '异常',
 };
 
 const ENGINE_LABEL = {
@@ -37,8 +38,8 @@ const ENGINE_LABEL = {
 };
 
 const TASK_TYPE_LABEL = {
-  ISCE2_RUN: 'ISCE2生产任务',
-  IDL_RUN_DINSAR: 'ENVI生产任务',
+  ISCE2_RUN: 'ISCE2生产',
+  IDL_RUN_DINSAR: 'ENVI生产',
 };
 
 const STATUS_LABEL = {
@@ -220,7 +221,7 @@ function ParamField({ name, schema, value, disabled, onChange }) {
         style={inputStyle}
       />
       {description && <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>{description}</div>}
-      {recommendation && <div style={{ fontSize: 11, color: '#2563eb', marginTop: 4 }}>建议：{recommendation}</div>}
+      {recommendation && <div style={{ fontSize: 11, color: '#2563eb', marginTop: 4 }}>推荐：{recommendation}</div>}
     </div>
   );
 }
@@ -236,6 +237,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const [engineExtraParams, setEngineExtraParams] = useState({});
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState('');
+  const [submitError, setSubmitError] = useState(false);
 
   const [runs, setRuns] = useState([]);
   const [runsLoading, setRunsLoading] = useState(false);
@@ -244,6 +246,8 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const [activeTask, setActiveTask] = useState(null);
   const [taskLogs, setTaskLogs] = useState([]);
   const [taskLogsLoading, setTaskLogsLoading] = useState(false);
+  const [taskLogActionLoading, setTaskLogActionLoading] = useState(false);
+  const [taskLogDeletingId, setTaskLogDeletingId] = useState(null);
 
   const currentEngineObj = engines.find(engine => engine.engine_code === selectedEngine) || null;
   const currentProfiles = currentEngineObj?.profiles || EMPTY_ARRAY;
@@ -301,6 +305,42 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   }, []);
 
+  const handleDeleteTaskLog = useCallback(async logId => {
+    const taskId = activeTask?.task_id;
+    if (!taskId || !logId || taskLogActionLoading) return;
+    if (!window.confirm('确定要删除这条任务日志吗？')) return;
+
+    setTaskLogDeletingId(logId);
+    setTaskLogActionLoading(true);
+    try {
+      await deleteTaskLog(taskId, logId);
+      await loadTaskLogs(taskId);
+    } catch (err) {
+      setSubmitError(true);
+      setSubmitMsg(`删除日志失败：${err?.response?.data?.detail || err.message}`);
+    } finally {
+      setTaskLogDeletingId(null);
+      setTaskLogActionLoading(false);
+    }
+  }, [activeTask?.task_id, loadTaskLogs, taskLogActionLoading]);
+
+  const handleClearTaskLogs = useCallback(async () => {
+    const taskId = activeTask?.task_id;
+    if (!taskId || taskLogActionLoading || taskLogs.length === 0) return;
+    if (!window.confirm('确定要清空当前任务的全部日志吗？')) return;
+
+    setTaskLogActionLoading(true);
+    try {
+      await clearTaskLogs(taskId);
+      await loadTaskLogs(taskId);
+    } catch (err) {
+      setSubmitError(true);
+      setSubmitMsg(`清空日志失败：${err?.response?.data?.detail || err.message}`);
+    } finally {
+      setTaskLogActionLoading(false);
+    }
+  }, [activeTask?.task_id, loadTaskLogs, taskLogActionLoading, taskLogs.length]);
+
   useEffect(() => {
     loadEngines();
     loadRuns();
@@ -339,12 +379,14 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
 
   const handleSubmit = async () => {
     if (!rootDir.trim()) {
-      setSubmitMsg('请填写根目录。');
+      setSubmitError(true);
+      setSubmitMsg('请输入根目录。');
       return;
     }
 
     setSubmitting(true);
     setSubmitMsg('');
+    setSubmitError(false);
     try {
       const extra = buildExtraPayload(currentParamSchema, engineExtraParams);
       const result = await submitRun({
@@ -355,12 +397,14 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
         timeout_seconds: timeoutSec ? Number(timeoutSec) : null,
         extra,
       });
-      const taskCount = result?.selected_task_count ? `，已选 ${result.selected_task_count} 个任务` : '';
+      const taskCount = result?.selected_task_count ? `，选中 ${result.selected_task_count} 个任务` : '';
+      setSubmitError(false);
       setSubmitMsg(`任务已入队：${result.task_id}${taskCount}`);
       if (onJobQueued) onJobQueued(result.task_id);
       loadRuns();
       loadActiveTask();
     } catch (err) {
+      setSubmitError(true);
       setSubmitMsg(`提交失败：${err?.response?.data?.detail || err.message}`);
     } finally {
       setSubmitting(false);
@@ -411,7 +455,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                 onClick={() => setLogModal({ open: false, runId: '', content: '', loading: false })}
                 style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 18 }}
               >
-                ×
+                关闭
               </button>
             </div>
             <pre
@@ -451,7 +495,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
         </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           {engines.length === 0 && !enginesLoading && (
-            <span style={{ fontSize: 12, color: '#94a3b8' }}>暂无可用引擎信息。</span>
+            <span style={{ fontSize: 12, color: '#94a3b8' }}>暂无引擎信息。</span>
           )}
           {engines.map(engine => (
             <EngineStatusCard
@@ -465,7 +509,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
       </div>
 
       <div style={card}>
-        <strong style={{ fontSize: 14, display: 'block', marginBottom: 10 }}>生产提交</strong>
+        <strong style={{ fontSize: 14, display: 'block', marginBottom: 10 }}>提交生产任务</strong>
 
         <div style={{ display: 'flex', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 180 }}>
@@ -498,7 +542,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             <input
               value={rootDir}
               onChange={event => setRootDir(event.target.value)}
-              placeholder="批量根目录或单个任务目录"
+              placeholder="批处理根目录或单个任务目录"
               disabled={readOnly}
               style={{
                 width: '100%',
@@ -515,7 +559,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
         <div style={{ display: 'flex', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
           <div style={{ minWidth: 120 }}>
             <label style={{ fontSize: 12, color: '#64748b', display: 'block', marginBottom: 4 }}>
-              处理任务数（0=全部）
+              任务数量（0 表示全部）
             </label>
             <input
               type="number"
@@ -528,7 +572,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           </div>
           <div style={{ minWidth: 140 }}>
             <label style={{ fontSize: 12, color: '#64748b', display: 'block', marginBottom: 4 }}>
-              超时秒数（留空默认）
+              超时时间（秒，可选）
             </label>
             <input
               type="number"
@@ -565,7 +609,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                 borderRadius: 6,
               }}
             >
-              这些参数主要影响目标网格尺寸、精轨裁剪、地理编码范围和位移结果掩膜。建议先使用默认值，通常优先只调整目标网格尺寸；只有在边缘被裁切、时间窗口异常或噪声较多时，再继续调整其他参数。
+              这些参数主要影响目标网格大小、精裁剪范围、地理编码范围和位移结果掩膜。建议先使用默认值，通常优先只调整目标网格大小；只有在边缘被裁切、时间窗异常或噪声较多时，再继续调整其他参数。
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
               {Object.entries(currentParamSchema).map(([name, schema]) => (
@@ -600,7 +644,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             {submitting ? '提交中...' : '提交任务'}
           </button>
           {submitMsg && (
-            <span style={{ fontSize: 12, color: submitMsg.includes('失败') ? '#ef4444' : '#16a34a' }}>
+            <span style={{ fontSize: 12, color: submitError ? '#ef4444' : '#16a34a' }}>
               {submitMsg}
             </span>
           )}
@@ -651,7 +695,26 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             )}
 
             <div style={{ marginTop: 8, background: '#fff', border: '1px solid #fde68a', borderRadius: 6, padding: '8px 10px' }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: '#92400e', marginBottom: 6 }}>任务日志</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: '#92400e' }}>任务日志</div>
+                {!readOnly && (
+                  <button
+                    onClick={handleClearTaskLogs}
+                    disabled={taskLogActionLoading || taskLogs.length === 0}
+                    style={{
+                      fontSize: 11,
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      border: '1px solid #fcd34d',
+                      background: taskLogActionLoading || taskLogs.length === 0 ? '#fef3c7' : '#fff7ed',
+                      color: '#9a3412',
+                      cursor: taskLogActionLoading || taskLogs.length === 0 ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {taskLogActionLoading && taskLogDeletingId == null ? '清空中...' : '清空日志'}
+                  </button>
+                )}
+              </div>
               {taskLogsLoading ? (
                 <div style={{ fontSize: 11, color: '#a16207' }}>加载中...</div>
               ) : taskLogs.length === 0 ? (
@@ -660,13 +723,38 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                 <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {taskLogs.map((log, index) => (
                     <div
-                      key={`${log.timestamp || 'log'}-${index}`}
-                      style={{ fontSize: 11, lineHeight: 1.45, color: log.level === 'WARNING' ? '#b45309' : '#334155' }}
+                      key={log.id || `${log.timestamp || 'log'}-${index}`}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        gap: 8,
+                        alignItems: 'flex-start',
+                      }}
                     >
-                      <div style={{ color: '#64748b' }}>
-                        {(log.timestamp || '').replace('T', ' ').replace('Z', '')} [{log.level}]
+                      <div style={{ flex: 1, minWidth: 0, fontSize: 11, lineHeight: 1.45, color: log.level === 'WARNING' ? '#b45309' : '#334155' }}>
+                        <div style={{ color: '#64748b' }}>
+                          {(log.timestamp || '').replace('T', ' ').replace('Z', '')} [{log.level}]
+                        </div>
+                        <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{log.message}</div>
                       </div>
-                      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{log.message}</div>
+                      {!readOnly && (
+                        <button
+                          onClick={() => handleDeleteTaskLog(log.id)}
+                          disabled={taskLogActionLoading || !log.id}
+                          style={{
+                            flexShrink: 0,
+                            fontSize: 11,
+                            padding: '2px 8px',
+                            borderRadius: 4,
+                            border: '1px solid #fecaca',
+                            background: '#fef2f2',
+                            color: '#b91c1c',
+                            cursor: taskLogActionLoading || !log.id ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          {taskLogDeletingId === log.id ? '删除中...' : '删除'}
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -675,7 +763,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           </div>
         )}
 
-        <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>最近20条运行记录</div>
+        <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>最近 20 条运行记录</div>
         {runsLoading ? (
           <div style={{ fontSize: 12, color: '#94a3b8' }}>加载中...</div>
         ) : runs.length === 0 ? (
@@ -684,7 +772,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ background: '#f8fafc' }}>
-                {['任务编号', '引擎', '状态', '时间', '操作'].map(header => (
+                {['运行ID', '引擎', '状态', '时间', '操作'].map(header => (
                   <th
                     key={header}
                     style={{ padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid #e2e8f0', color: '#64748b' }}
@@ -722,7 +810,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                         background: '#f8fafc',
                       }}
                     >
-                      日志
+                      查看日志
                     </button>
                   </td>
                 </tr>
@@ -734,3 +822,4 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     </div>
   );
 }
+

@@ -8,7 +8,7 @@ import sys
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func, and_, text
+from sqlalchemy import delete, func, and_, text
 
 from ..config import read_int_env
 from ..models import SystemTaskORM, TaskLogORM
@@ -367,4 +367,57 @@ class TaskService:
 
 
 # 创建全局单例实例
+    async def delete_log(
+        self,
+        task_id: str,
+        log_id: int,
+        db: Optional[AsyncSession] = None,
+    ) -> bool:
+        gen_db = db is None
+        if gen_db:
+            db = get_db_session()
+
+        try:
+            result = await db.execute(
+                select(TaskLogORM).where(
+                    TaskLogORM.id == int(log_id),
+                    TaskLogORM.task_id == task_id,
+                )
+            )
+            log_entry = result.scalar_one_or_none()
+            if log_entry is None:
+                return False
+            await db.delete(log_entry)
+            await db.commit()
+            return True
+        except Exception:
+            await db.rollback()
+            raise
+        finally:
+            if gen_db:
+                await db.close()
+
+    async def clear_logs(
+        self,
+        task_id: str,
+        db: Optional[AsyncSession] = None,
+    ) -> int:
+        gen_db = db is None
+        if gen_db:
+            db = get_db_session()
+
+        try:
+            result = await db.execute(
+                delete(TaskLogORM).where(TaskLogORM.task_id == task_id)
+            )
+            await db.commit()
+            return int(result.rowcount or 0)
+        except Exception:
+            await db.rollback()
+            raise
+        finally:
+            if gen_db:
+                await db.close()
+
+
 task_service = TaskService()
