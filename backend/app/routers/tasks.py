@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from ..auth_utils import verify_password
 from ..models import AuthUserORM, TaskInfo
+from ..services.dinsar_production_service import dinsar_production_service
 from ..services.task_service import (
     TASK_ACTIVE_DEFAULT_LIMIT,
     TASK_ACTIVE_MAX_LIMIT,
@@ -125,5 +126,18 @@ async def force_cancel_task(
         raise HTTPException(status_code=404, detail="任务未找到")
     if task.status not in ("PENDING", "RUNNING"):
         raise HTTPException(status_code=400, detail="任务已结束，无需取消")
+    killed_pid = None
+    if AsyncSessionLocal is not None:
+        async with AsyncSessionLocal() as db:
+            run = await dinsar_production_service.request_cancel(task_id, db=db)
+            if run is not None:
+                killed_pid = await dinsar_production_service.kill_active_execution_by_task_id(
+                    task_id,
+                    db=db,
+                )
     await task_service.update_task(task_id, status="CANCELLED", message="管理员强制取消")
-    return {"message": "任务已强制取消", "task_id": task_id}
+    return {
+        "message": "任务已强制取消",
+        "task_id": task_id,
+        "killed_pid": killed_pid,
+    }

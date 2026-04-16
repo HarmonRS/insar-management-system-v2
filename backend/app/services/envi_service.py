@@ -14,7 +14,7 @@ import defusedxml.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from glob import glob
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..config import get_env_text, settings
 from ..process_utils import is_any_process_running
@@ -1589,6 +1589,189 @@ def run_dinsar_custom_workflow(
         "output_dirs": output_dirs,
         "run_key": resolved_run_key,
         "profile_code": profile_code,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Single-task D-InSAR workflow entrypoints
+# ---------------------------------------------------------------------------
+
+def run_single_task_workflow(
+    workflow: str,
+    task_dir: str,
+    output_dir: str,
+    *,
+    source_root: Optional[str] = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    timeout_seconds: Optional[int] = None,
+    job_id: Optional[str] = None,
+    run_key: Optional[str] = None,
+    profile_code: Optional[str] = None,
+    started_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Run one Task_* directory into an isolated output directory."""
+    normalized_workflow = str(workflow or "").strip().lower()
+    if normalized_workflow not in {"dinsar", "dinsar_custom"}:
+        raise ValueError(f"Unsupported single-task workflow: {workflow}")
+
+    timeout = min(timeout_seconds or timeout or DEFAULT_TIMEOUT, MAX_TIMEOUT)
+    task_dir = _to_local_path(task_dir)
+    output_dir = _to_local_path(output_dir)
+    source_root = _to_local_path(source_root or os.path.dirname(task_dir))
+    run_started_at = started_at or datetime.utcnow()
+    run_started_at_text = run_started_at.isoformat(timespec="seconds") + "Z"
+    resolved_profile_code = profile_code or ("custom6" if normalized_workflow == "dinsar_custom" else "metatask")
+    resolved_run_key = run_key or build_run_key("sarscape", resolved_profile_code, started_at=run_started_at)
+    task_name = os.path.basename(os.path.normpath(task_dir))
+    task_alias, pair_key, pair_meta = _resolve_dinsar_pair_identity(task_dir, task_name)
+
+    if not task_dir or not os.path.isdir(task_dir):
+        raise ValueError(f"D-InSAR task directory does not exist: {task_dir}")
+    if not output_dir:
+        raise ValueError("output_dir must not be empty.")
+    if not DEM_BASE_FILE:
+        raise ValueError("DEM path not configured. Set IDL_DINSAR_DEM_BASE_FILE in .env")
+
+    master_dir = os.path.join(task_dir, "master")
+    slave_dir = os.path.join(task_dir, "slave")
+    if not os.path.isdir(master_dir) or not os.path.isdir(slave_dir):
+        raise RuntimeError(f"{task_name}: master/slave dir missing")
+
+    os.makedirs(output_dir, exist_ok=True)
+    log_lines: List[str] = [
+        f"[envi] single task workflow={normalized_workflow}",
+        f"[envi] source_root={source_root}",
+        f"[envi] task_dir={task_dir}",
+        f"[envi] output_dir={output_dir}",
+        f"[envi] dem={DEM_BASE_FILE}",
+    ]
+    auto_imported = 0
+
+    for side, side_dir in [("master", master_dir), ("slave", slave_dir)]:
+        if _has_sml(side_dir):
+            continue
+        meta_files = _find_meta_files(side_dir)
+        if not meta_files:
+            log_lines.append(f"[warn] {task_name}/{side}: no .sml and no .meta.xml")
+            continue
+        log_lines.append(f"[auto-import] {task_name}/{side}: importing {len(meta_files)} file(s)")
+        for meta_file in meta_files:
+            start = time.time()
+            try:
+                execute_envi_task(
+                    "SARsImportLuTan1",
+                    {
+                        "INPUT_FILE_LIST": [meta_file],
+                        "ROOT_URI_FOR_OUTPUT": side_dir,
+                    },
+                )
+                elapsed = round(time.time() - start, 1)
+                auto_imported += 1
+                log_lines.append(f"[auto-import ok] {task_name}/{side}: {os.path.basename(meta_file)} ({elapsed}s)")
+            except Exception as exc:
+                elapsed = round(time.time() - start, 1)
+                log_lines.append(f"[auto-import err] {task_name}/{side}: {os.path.basename(meta_file)} ({elapsed}s): {exc}")
+
+    master_base = _first_sml_base(master_dir)
+    slave_base = _first_sml_base(slave_dir)
+    if not master_base or not slave_base:
+        raise RuntimeError(
+            f"{task_name}: missing .sml after import "
+            f"(master={'yes' if master_base else 'no'} slave={'yes' if slave_base else 'no'})"
+        )
+
+    start = time.time()
+    if normalized_workflow == "dinsar":
+        _write_progress(job_id, 1, 1, "Metatask D-InSAR", output_dir, 1, 1, task_name)
+        execute_envi_task(
+            "SARsMetataskInSARDisplacementGeneration",
+            {
+                "REFERENCE_SARSCAPEDATA": _build_sarscapedata(master_base),
+                "SECONDARY_SARSCAPEDATA": _build_sarscapedata(slave_base),
+                "DEM_SARSCAPEDATA": _build_sarscapedata(DEM_BASE_FILE),
+                "OUTPUT_FOLDER": _normalize_path(output_dir),
+            },
+        )
+        _write_progress(job_id, 1, 1, "Completed", output_dir, 1, 1, task_name)
+    else:
+        success = _run_dinsar_custom_single(
+            master_base,
+            slave_base,
+            DEM_BASE_FILE,
+            os.path.join(output_dir, "workflow"),
+            log_lines,
+            job_id=job_id,
+            pair_index=1,
+            total_pairs=1,
+            pair_name=task_name,
+        )
+        if not success:
+            detail = "\n".join(log_lines[-20:])
+            raise RuntimeError(f"{task_name}: custom D-InSAR workflow failed.\n{detail}")
+
+    elapsed = round(time.time() - start, 1)
+    log_lines.append(f"[ok] {normalized_workflow} {task_name} ({elapsed}s)")
+    _write_envi_run_sidecar(
+        output_dir,
+        engine_code="sarscape",
+        profile_code=resolved_profile_code,
+        root_dir=source_root,
+        task_dir=task_dir,
+        task_name=task_name,
+        task_alias=task_alias,
+        pair_key=pair_key,
+        run_key=resolved_run_key,
+        pair_meta=pair_meta,
+        started_at=run_started_at_text,
+        params=(
+            {
+                "timeout_seconds": timeout,
+                "workflow": "custom6",
+                "dem_base_file": DEM_BASE_FILE,
+                "target_resolution_m": CUSTOM_TARGET_RESOLUTION_M,
+                "filter_method": CUSTOM_FILTER_METHOD,
+                "unwrap_coh_threshold": CUSTOM_UNWRAP_COH_THRESHOLD,
+                "gcp_coh_threshold": CUSTOM_GCP_COH_THRESHOLD,
+                "gcp_number": CUSTOM_GCP_NUMBER,
+                "geocoding_coh_threshold": CUSTOM_GEOCODING_COH_THRESHOLD,
+                "geocoding_pixel_size_m": CUSTOM_GEOCODING_PIXEL_SIZE_M,
+            }
+            if normalized_workflow == "dinsar_custom"
+            else {
+                "timeout_seconds": timeout,
+                "workflow": "metatask",
+                "dem_base_file": DEM_BASE_FILE,
+            }
+        ),
+        metrics={
+            "elapsed_seconds": elapsed,
+        },
+    )
+    return {
+        "summary": {
+            "task_folders": 1,
+            "processed": 1,
+            "failed": 0,
+            "skipped": 0,
+            "auto_imported": auto_imported,
+        },
+        "log_lines": log_lines,
+        "task_results": [
+            {
+                "task_name": task_name,
+                "task_alias": task_alias,
+                "pair_key": pair_key,
+                "run_key": resolved_run_key,
+                "task_dir": task_dir,
+                "output_dir": output_dir,
+                "success": True,
+                "status": "ok",
+                "elapsed_seconds": elapsed,
+            }
+        ],
+        "output_dirs": [output_dir],
+        "run_key": resolved_run_key,
+        "profile_code": resolved_profile_code,
     }
 
 

@@ -781,6 +781,109 @@ class DinsarTaskItemORM(Base):
     batch = relationship("DinsarTaskBatchORM", back_populates="items")
 
 
+class DinsarProductionRunORM(Base):
+    __tablename__ = "dinsar_production_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), unique=True, index=True, nullable=False)
+    task_id = Column(String, index=True, nullable=True)
+    workflow_run_id = Column(String, index=True, nullable=True)
+
+    engine_code = Column(String(32), index=True, nullable=False, default="sarscape")
+    profile_code = Column(String(64), index=True, nullable=False, default="custom6")
+    mode = Column(String(32), index=True, nullable=False, default="custom")
+    source_root = Column(String, nullable=False)
+    status = Column(String(32), index=True, nullable=False, default="PENDING")
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+
+    total_items = Column(Integer, nullable=False, default=0)
+    completed_items = Column(Integer, nullable=False, default=0)
+    failed_items = Column(Integer, nullable=False, default=0)
+    skipped_items = Column(Integer, nullable=False, default=0)
+
+    latest_message = Column(Text, nullable=True)
+    params_json = Column(JSON, nullable=True)
+    summary_json = Column(JSON, nullable=True)
+    created_by = Column(String(128), nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    started_at = Column(DateTime, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+
+    items = relationship("DinsarProductionRunItemORM", back_populates="run", cascade="all, delete-orphan")
+
+
+class DinsarProductionRunItemORM(Base):
+    __tablename__ = "dinsar_production_run_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), ForeignKey("dinsar_production_runs.run_id"), index=True, nullable=False)
+
+    order_index = Column(Integer, nullable=False, default=0)
+    task_name = Column(String(255), nullable=True)
+    task_alias = Column(String(255), index=True, nullable=True)
+    pair_key = Column(String(128), index=True, nullable=True)
+    pair_uid = Column(String(64), index=True, nullable=True)
+    network_run_id = Column(String(64), index=True, nullable=True)
+    network_edge_id = Column(Integer, nullable=True)
+    policy_version = Column(String(32), index=True, nullable=True)
+    selection_strategy = Column(String(32), index=True, nullable=True)
+
+    source_task_dir = Column(String, nullable=False)
+    results_root_dir = Column(String, nullable=False)
+    status = Column(String(32), index=True, nullable=False, default="PENDING")
+    current_step = Column(String(64), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    latest_run_key = Column(String(128), index=True, nullable=True)
+    latest_output_dir = Column(String, nullable=True)
+    latest_manifest_path = Column(String, nullable=True)
+    latest_log_path = Column(String, nullable=True)
+    last_error = Column(Text, nullable=True)
+    metrics_json = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    started_at = Column(DateTime, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+
+    run = relationship("DinsarProductionRunORM", back_populates="items")
+    executions = relationship("DinsarProductionExecutionORM", back_populates="item", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_dinsar_run_items_run_order", "run_id", "order_index"),
+    )
+
+
+class DinsarProductionExecutionORM(Base):
+    __tablename__ = "dinsar_production_executions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    execution_id = Column(String(128), unique=True, index=True, nullable=False)
+    run_id = Column(String(64), ForeignKey("dinsar_production_runs.run_id"), index=True, nullable=False)
+    item_id = Column(Integer, ForeignKey("dinsar_production_run_items.id"), index=True, nullable=False)
+
+    run_key = Column(String(128), index=True, nullable=False)
+    status = Column(String(32), index=True, nullable=False, default="PENDING")
+    output_dir = Column(String, nullable=False)
+    manifest_path = Column(String, nullable=True)
+    log_path = Column(String, nullable=True)
+    subprocess_pid = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    metrics_json = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    started_at = Column(DateTime, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+
+    item = relationship("DinsarProductionRunItemORM", back_populates="executions")
+
+    __table_args__ = (
+        Index("idx_dinsar_exec_run_item", "run_id", "item_id"),
+    )
+
+
 class PsTaskBatchORM(Base):
     __tablename__ = "ps_task_batches"
 

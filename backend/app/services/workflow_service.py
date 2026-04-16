@@ -57,6 +57,7 @@ class WorkflowService:
                     "payload": step.get("payload") or {},
                     "task_id": step.get("task_id"),
                     "optional": bool(step.get("optional", False)),
+                    "max_attempts": step.get("max_attempts"),
                 }
                 db.add(
                     WorkflowStepORM(
@@ -101,12 +102,14 @@ class WorkflowService:
                     continue
                 payload = params.get("payload") or {}
                 task_id = params.get("task_id")
+                max_attempts = params.get("max_attempts")
                 await job_queue_service.create_job(
                     job_type,
                     payload=payload,
                     workflow_run_id=run_id,
                     workflow_step_id=step.step_id,
                     task_id=task_id,
+                    max_attempts=max_attempts if max_attempts is not None else 3,
                     db=db,
                 )
                 step.status = "RUNNING"

@@ -96,7 +96,11 @@ async def _run_job(job: SystemJobORM) -> None:
             if status == JOB_STATUS_RETRY:
                 await task_service.update_task(job.task_id, message=f"任务失败，稍后重试: {err}")
             else:
-                await task_service.update_task(job.task_id, status="FAILED", message=err)
+                current_task = await task_service.get_task(job.task_id)
+                final_status = "FAILED"
+                if current_task and current_task.status == "CANCELLED":
+                    final_status = "CANCELLED"
+                await task_service.update_task(job.task_id, status=final_status, message=err)
         if job.workflow_run_id and job.workflow_step_id and status != JOB_STATUS_RETRY:
             await workflow_service.mark_step_failed(
                 job.workflow_run_id,

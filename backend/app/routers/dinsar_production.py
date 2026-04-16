@@ -9,19 +9,14 @@ from pydantic import BaseModel, Field
 
 from .dependencies import _get_current_user, _require_admin
 from ..config import read_int_env, settings
+from ..database import AsyncSessionLocal
 from ..models import AuthUserORM
-from ..services import envi_service as _envi_svc
+from ..services.dinsar_production_service import dinsar_production_service
 from ..services.job_queue_service import job_queue_service
 from ..services.task_service import task_service
 
 router = APIRouter(prefix="/dinsar-production", tags=["dinsar-production"])
 
-DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
-    "DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS",
-    1,
-    minimum=1,
-    maximum=20,
-)
 ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
     "ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS",
     1,
@@ -181,8 +176,34 @@ async def submit_run(
             detail=f"Engine '{req.engine_code}' does not support queued production.",
         )
 
-    task_name = f"D-InSAR production: {req.engine_code}/{req.profile}"
     try:
+        if req.engine_code == "sarscape":
+            if AsyncSessionLocal is None:
+                raise RuntimeError("Database session factory is not initialized.")
+            async with AsyncSessionLocal() as db:
+                result = await dinsar_production_service.create_run(
+                    engine_code=req.engine_code,
+                    profile_code=req.profile,
+                    root_dir=req.root_dir,
+                    num_to_process=req.num_to_process,
+                    timeout_seconds=req.timeout_seconds,
+                    extra=req.extra,
+                    created_by=getattr(current_user, "username", None),
+                    db=db,
+                )
+            return {
+                "task_id": result["task_id"],
+                "job_id": result.get("workflow_run_id"),
+                "run_id": result["run_id"],
+                "workflow_run_id": result.get("workflow_run_id"),
+                "job_type": job_type,
+                "engine_code": req.engine_code,
+                "profile": req.profile,
+                "selected_task_count": result.get("selected_task_count", 0),
+                "message": "Task queued.",
+            }
+
+        task_name = f"D-InSAR production: {req.engine_code}/{req.profile}"
         task_id = await task_service.create_task(
             task_type=job_type,
             task_name=task_name,
@@ -212,5 +233,8 @@ async def submit_run(
 
 @router.get("/runs")
 async def list_runs(limit: int = 20):
-    runs = await asyncio.to_thread(_envi_svc.list_recent_runs, limit)
-    return {"runs": runs, "total": len(runs)}
+    if AsyncSessionLocal is None:
+        raise HTTPException(status_code=500, detail="Database session factory is not initialized.")
+    async with AsyncSessionLocal() as db:
+        result = await dinsar_production_service.list_runs(db, limit=limit)
+    return result

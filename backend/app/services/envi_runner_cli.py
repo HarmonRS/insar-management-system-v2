@@ -28,10 +28,15 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         choices=["import", "dinsar", "dinsar_custom"],
     )
-    parser.add_argument("--root-dir", required=True)
+    parser.add_argument("--root-dir", required=False)
+    parser.add_argument("--task-dir", required=False)
+    parser.add_argument("--output-dir", required=False)
+    parser.add_argument("--source-root", required=False)
     parser.add_argument("--num-to-process", type=int, default=0)
     parser.add_argument("--timeout-seconds", type=int, default=None)
     parser.add_argument("--job-id", type=str, default=None)
+    parser.add_argument("--run-key", type=str, default=None)
+    parser.add_argument("--profile-code", type=str, default=None)
     return parser.parse_args()
 
 
@@ -39,15 +44,31 @@ def main() -> int:
     ensure_project_env_loaded()
     args = _parse_args()
     try:
-        from .envi_service import run_workflow
+        from .envi_service import run_single_task_workflow, run_workflow
 
-        record = run_workflow(
-            workflow=args.workflow,
-            root_dir=args.root_dir,
-            num_to_process=args.num_to_process,
-            timeout=args.timeout_seconds or 14400,
-            job_id=args.job_id,
-        )
+        if args.task_dir:
+            if not args.output_dir:
+                raise ValueError("--output-dir is required when --task-dir is used.")
+            record = run_single_task_workflow(
+                workflow=args.workflow,
+                task_dir=args.task_dir,
+                output_dir=args.output_dir,
+                source_root=args.source_root,
+                timeout=args.timeout_seconds or 14400,
+                job_id=args.job_id,
+                run_key=args.run_key,
+                profile_code=args.profile_code,
+            )
+        else:
+            if not args.root_dir:
+                raise ValueError("--root-dir is required when --task-dir is not used.")
+            record = run_workflow(
+                workflow=args.workflow,
+                root_dir=args.root_dir,
+                num_to_process=args.num_to_process,
+                timeout=args.timeout_seconds or 14400,
+                job_id=args.job_id,
+            )
         print(json.dumps(record, ensure_ascii=False))
         return 0
     except Exception as exc:

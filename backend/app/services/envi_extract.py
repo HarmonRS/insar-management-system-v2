@@ -1,6 +1,7 @@
 """D-InSAR result extraction and task overview helpers."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -89,6 +90,29 @@ def _find_envi_task_result(task_dir: str) -> Optional[Dict[str, Any]]:
     dinsar_results_dir = os.path.join(task_dir, "dinsar_results")
     if not os.path.isdir(dinsar_results_dir):
         return None
+
+    current_pointer_path = os.path.join(dinsar_results_dir, "current.json")
+    if os.path.isfile(current_pointer_path):
+        try:
+            with open(current_pointer_path, "r", encoding="utf-8") as fp:
+                pointer = json.load(fp)
+            primary_file = str(pointer.get("primary_file") or "").strip()
+            source_files = [
+                os.path.normpath(os.path.abspath(path))
+                for path in (pointer.get("source_files") or [])
+                if str(path or "").strip()
+            ]
+            if primary_file and os.path.isfile(primary_file):
+                if not source_files:
+                    source_files = [os.path.normpath(os.path.abspath(primary_file))]
+                return {
+                    "engine": "envi",
+                    "task_name": os.path.basename(os.path.normpath(task_dir)),
+                    "source_dir": os.path.dirname(primary_file),
+                    "source_files": source_files,
+                }
+        except Exception:
+            pass
 
     candidates: List[Tuple[str, str]] = []
     try:
