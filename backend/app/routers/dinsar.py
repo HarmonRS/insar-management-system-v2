@@ -371,7 +371,7 @@ async def export_dinsar_results_endpoint(
     if not records:
         raise HTTPException(status_code=404, detail="未找到任何匹配的结果记录")
 
-    file_paths = []
+    export_items = []
     for record in records:
         compat_row = record.compat_row
         file_path = (
@@ -380,15 +380,23 @@ async def export_dinsar_results_endpoint(
             or (str(compat_row.file_path).strip() if compat_row is not None and compat_row.file_path else "")
         )
         if file_path:
-            file_paths.append(file_path)
+            export_items.append(
+                {
+                    "source": file_path,
+                    "task_alias": str(record.product.task_alias or "").strip(),
+                    "task_name": str(record.product.task_name or "").strip(),
+                    "display_name": str(record.display_name or "").strip(),
+                    "product_id": str(record.product.product_id or "").strip(),
+                }
+            )
 
-    if not file_paths:
+    if not export_items:
         raise HTTPException(status_code=400, detail="选中的结果没有关联的文件路径")
 
     try:
         import asyncio
         export_result = await asyncio.to_thread(
-            export_dinsar_results, file_paths, request.target_dir
+            export_dinsar_results, export_items, request.target_dir
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

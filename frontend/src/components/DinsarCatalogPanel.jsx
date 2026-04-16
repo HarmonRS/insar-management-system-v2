@@ -133,6 +133,7 @@ export default function DinsarCatalogPanel({
       setSelectedProduct(null);
       return;
     }
+    setSelectedProduct(null);
     setDetailLoading(true);
     try {
       const detail = await getDinsarProductDetail(productId);
@@ -148,13 +149,7 @@ export default function DinsarCatalogPanel({
 
   useEffect(() => {
     loadCatalog();
-    const timer = setInterval(() => {
-      if (!actionLoading) {
-        loadCatalog();
-      }
-    }, 10000);
-    return () => clearInterval(timer);
-  }, [actionLoading, loadCatalog]);
+  }, [loadCatalog]);
 
   useEffect(() => {
     loadProductDetail(selectedProductId);
@@ -408,7 +403,7 @@ export default function DinsarCatalogPanel({
           </div>
           {!selectedProductId ? (
             <div style={{ padding: '12px', fontSize: 12, color: '#94a3b8' }}>请选择一个结果包查看详情。</div>
-          ) : detailLoading ? (
+          ) : detailLoading || !selectedProduct ? (
             <div style={{ padding: '12px', fontSize: 12, color: '#94a3b8' }}>正在加载详情...</div>
           ) : selectedProduct?.error ? (
             <div style={{ padding: '12px', fontSize: 12, color: '#dc2626' }}>{selectedProduct.error}</div>

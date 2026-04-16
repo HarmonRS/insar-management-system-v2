@@ -67,17 +67,22 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
       const tasks = Array.isArray(data) ? data : (data?.tasks || []);
       const relevantTask = tasks.find(task => PRODUCT_TASK_TYPES.includes(task.task_type)) || null;
       setActiveTask(relevantTask);
+      return relevantTask;
     } catch {
       setActiveTask(null);
+      return null;
     }
   }, []);
 
   const loadRecentTask = useCallback(async () => {
     try {
       const tasks = await getRecentTasks(PRODUCT_TASK_TYPES, [], 1, 0);
-      setRecentTask(Array.isArray(tasks) ? (tasks[0] || null) : null);
+      const nextTask = Array.isArray(tasks) ? (tasks[0] || null) : null;
+      setRecentTask(nextTask);
+      return nextTask;
     } catch {
       setRecentTask(null);
+      return null;
     }
   }, []);
 
@@ -133,26 +138,18 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
     }
   }, [logTaskId, loadTaskLogs, taskLogActionLoading, taskLogs.length]);
 
-  useEffect(() => {
-    loadActiveTask();
-    loadRecentTask();
-  }, [loadActiveTask, loadRecentTask]);
+  const refreshMonitor = useCallback(async () => {
+    const [nextActiveTask, nextRecentTask] = await Promise.all([
+      loadActiveTask(),
+      loadRecentTask(),
+    ]);
+    const nextTaskId = nextActiveTask?.task_id || nextRecentTask?.task_id || '';
+    await loadTaskLogs(nextTaskId);
+  }, [loadActiveTask, loadRecentTask, loadTaskLogs]);
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      loadActiveTask();
-      loadRecentTask();
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [loadActiveTask, loadRecentTask]);
-
-  useEffect(() => {
-    const taskId = logTaskId;
-    loadTaskLogs(taskId);
-    if (!taskId) return undefined;
-    const timer = setInterval(() => loadTaskLogs(taskId), 5000);
-    return () => clearInterval(timer);
-  }, [logTaskId, loadTaskLogs]);
+    refreshMonitor();
+  }, [refreshMonitor]);
 
   const handleExtract = async () => {
     if (!extractRootDir.trim()) return;
@@ -181,8 +178,7 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
       if (result?.task_id) {
         onJobQueued?.(result.task_id);
       }
-      loadActiveTask();
-      loadRecentTask();
+      await refreshMonitor();
     } catch (err) {
       setActionError(true);
       setActionMessage(err?.response?.data?.detail || err.message || 'D-InSAR结果扫描失败');
@@ -289,10 +285,7 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <strong style={{ fontSize: 14 }}>产物任务监控</strong>
           <button
-            onClick={() => {
-              loadActiveTask();
-              loadRecentTask();
-            }}
+            onClick={refreshMonitor}
             style={{
               fontSize: 12,
               padding: '3px 10px',
@@ -304,6 +297,9 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
           >
             刷新
           </button>
+        </div>
+        <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 10 }}>
+          任务状态与日志改为手动刷新，避免页面持续轮询。
         </div>
 
         {!monitoredTask ? (

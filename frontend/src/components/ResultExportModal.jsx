@@ -1,18 +1,23 @@
 import { useState } from 'react';
 import { exportDinsarResults } from '../api/dinsar';
 
-export default function ResultExportModal({ results, onClose }) {
+const EXAMPLE_TARGET_DIR = String.raw`例如: D:\Export\Results 或 \\server\share\results`;
+
+export default function ResultExportModal({ results = [], onClose }) {
     const [targetDir, setTargetDir] = useState('');
-    const [selectedIds, setSelectedIds] = useState(() => new Set(results.map(r => r.id)));
+    const [selectedIds, setSelectedIds] = useState(() => new Set(results.map((result) => result.id)));
     const [exporting, setExporting] = useState(false);
     const [exportResult, setExportResult] = useState(null);
     const [error, setError] = useState('');
 
     const toggleSelect = (id) => {
-        setSelectedIds(prev => {
+        setSelectedIds((prev) => {
             const next = new Set(prev);
-            if (next.has(id)) next.delete(id);
-            else next.add(id);
+            if (next.has(id)) {
+                next.delete(id);
+            } else {
+                next.add(id);
+            }
             return next;
         });
     };
@@ -20,29 +25,30 @@ export default function ResultExportModal({ results, onClose }) {
     const toggleAll = () => {
         if (selectedIds.size === results.length) {
             setSelectedIds(new Set());
-        } else {
-            setSelectedIds(new Set(results.map(r => r.id)));
+            return;
         }
+        setSelectedIds(new Set(results.map((result) => result.id)));
     };
 
     const handleExport = async () => {
         const dir = targetDir.trim();
         if (!dir) {
-            setError('请输入目标路径');
+            setError('请输入目标路径。');
             return;
         }
         if (selectedIds.size === 0) {
-            setError('请至少选择一个结果');
+            setError('请至少选择一个结果。');
             return;
         }
+
         setError('');
         setExporting(true);
         setExportResult(null);
         try {
-            const res = await exportDinsarResults([...selectedIds], dir);
-            setExportResult(res);
-        } catch (e) {
-            setError(e.response?.data?.detail || e.message || '导出失败');
+            const response = await exportDinsarResults([...selectedIds], dir);
+            setExportResult(response);
+        } catch (eventualError) {
+            setError(eventualError.response?.data?.detail || eventualError.message || '提取失败。');
         } finally {
             setExporting(false);
         }
@@ -50,20 +56,22 @@ export default function ResultExportModal({ results, onClose }) {
 
     return (
         <div className="modal-overlay visible" onClick={onClose}>
-            <div className="modal-content result-export-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-content result-export-modal" onClick={(event) => event.stopPropagation()}>
                 <div className="modal-header">
                     <h3>提取 D-InSAR 结果</h3>
-                    <button className="modal-close-btn" onClick={onClose}>&times;</button>
+                    <button type="button" className="modal-close-btn" onClick={onClose} aria-label="关闭">
+                        &times;
+                    </button>
                 </div>
 
                 <div className="modal-body">
                     <div className="export-path-section">
-                        <label>目标路径（支持 UNC 路径，如 \\\\server\\share\\path）</label>
+                        <label>目标路径，支持本地盘符或 UNC 路径，例如 `D:\Export\Results`。</label>
                         <input
                             type="text"
                             value={targetDir}
-                            onChange={e => setTargetDir(e.target.value)}
-                            placeholder="例如: D:\Export\Results 或 \\server\share\results"
+                            onChange={(event) => setTargetDir(event.target.value)}
+                            placeholder={EXAMPLE_TARGET_DIR}
                             disabled={exporting}
                             className="export-path-input"
                         />
@@ -76,23 +84,28 @@ export default function ResultExportModal({ results, onClose }) {
                                     type="checkbox"
                                     checked={selectedIds.size === results.length && results.length > 0}
                                     onChange={toggleAll}
-                                    disabled={exporting}
+                                    disabled={exporting || results.length === 0}
                                 />
                                 全选 ({selectedIds.size}/{results.length})
                             </label>
                         </div>
+
+                        <div className="export-select-hint">
+                            导出时会优先按任务名创建子目录；如果同名结果已存在且内容不同，会自动追加后缀避免覆盖。
+                        </div>
+
                         <ul className="export-result-list">
-                            {results.map(r => (
-                                <li key={r.id} className="export-result-item">
+                            {results.map((result) => (
+                                <li key={result.id} className="export-result-item">
                                     <label>
                                         <input
                                             type="checkbox"
-                                            checked={selectedIds.has(r.id)}
-                                            onChange={() => toggleSelect(r.id)}
+                                            checked={selectedIds.has(result.id)}
+                                            onChange={() => toggleSelect(result.id)}
                                             disabled={exporting}
                                         />
-                                        <span className="export-result-name" title={r.file_path || r.name}>
-                                            {r.name}
+                                        <span className="export-result-name" title={result.file_path || result.name}>
+                                            {result.name}
                                         </span>
                                     </label>
                                 </li>
@@ -104,7 +117,7 @@ export default function ResultExportModal({ results, onClose }) {
 
                     {exportResult && (
                         <div className="export-summary">
-                            <div className="export-summary-title">导出完成</div>
+                            <div className="export-summary-title">提取完成</div>
                             <div className="export-summary-stats">
                                 <span className="stat-ok">复制: {exportResult.copied}</span>
                                 <span className="stat-skip">跳过: {exportResult.skipped}</span>
@@ -120,13 +133,16 @@ export default function ResultExportModal({ results, onClose }) {
                 </div>
 
                 <div className="modal-footer">
-                    <button onClick={onClose} disabled={exporting}>关闭</button>
+                    <button type="button" className="btn-secondary" onClick={onClose} disabled={exporting}>
+                        关闭
+                    </button>
                     <button
+                        type="button"
                         onClick={handleExport}
                         disabled={exporting || selectedIds.size === 0 || !targetDir.trim()}
                         className="btn-primary"
                     >
-                        {exporting ? '导出中...' : `提取 ${selectedIds.size} 个结果`}
+                        {exporting ? '提取中...' : `确定提取 ${selectedIds.size} 个结果`}
                     </button>
                 </div>
             </div>

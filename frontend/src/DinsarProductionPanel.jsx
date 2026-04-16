@@ -284,9 +284,12 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     setRunsLoading(true);
     try {
       const data = await listRuns(20);
-      setRuns(data.runs || []);
+      const nextRuns = data.runs || [];
+      setRuns(nextRuns);
+      return nextRuns;
     } catch {
       setRuns([]);
+      return [];
     } finally {
       setRunsLoading(false);
     }
@@ -298,8 +301,10 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
       const tasks = Array.isArray(data) ? data : (data?.tasks || []);
       const relevantTask = tasks.find(task => ['ISCE2_RUN', 'IDL_RUN_DINSAR'].includes(task.task_type)) || null;
       setActiveTask(relevantTask);
+      return relevantTask;
     } catch {
       setActiveTask(null);
+      return null;
     }
   }, []);
 
@@ -355,27 +360,19 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   }, [logTaskId, loadTaskLogs, taskLogActionLoading, taskLogs.length]);
 
+  const refreshMonitor = useCallback(async () => {
+    const [nextRuns, nextActiveTask] = await Promise.all([
+      loadRuns(),
+      loadActiveTask(),
+    ]);
+    const fallbackTaskId = nextActiveTask?.task_id || nextRuns.find(run => run?.task_id)?.task_id || '';
+    await loadTaskLogs(fallbackTaskId);
+  }, [loadActiveTask, loadRuns, loadTaskLogs]);
+
   useEffect(() => {
     loadEngines();
-    loadRuns();
-    loadActiveTask();
-  }, [loadActiveTask, loadEngines, loadRuns]);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      loadRuns();
-      loadActiveTask();
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [loadActiveTask, loadRuns]);
-
-  useEffect(() => {
-    const taskId = logTaskId;
-    loadTaskLogs(taskId);
-    if (!taskId) return undefined;
-    const timer = setInterval(() => loadTaskLogs(taskId), 5000);
-    return () => clearInterval(timer);
-  }, [logTaskId, loadTaskLogs]);
+    refreshMonitor();
+  }, [loadEngines, refreshMonitor]);
 
   useEffect(() => {
     if (currentProfiles.length > 0) {
@@ -418,8 +415,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
       setSubmitError(false);
       setSubmitMsg(`任务已入队：${result.task_id}${taskCount}`);
       if (onJobQueued) onJobQueued(result.task_id);
-      loadRuns();
-      loadActiveTask();
+      await refreshMonitor();
     } catch (err) {
       setSubmitError(true);
       setSubmitMsg(`提交失败：${err?.response?.data?.detail || err.message}`);
@@ -672,10 +668,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <strong style={{ fontSize: 14 }}>运行监控</strong>
           <button
-            onClick={() => {
-              loadRuns();
-              loadActiveTask();
-            }}
+            onClick={refreshMonitor}
             style={{
               fontSize: 12,
               padding: '3px 10px',
@@ -687,6 +680,9 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           >
             刷新
           </button>
+        </div>
+        <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 10 }}>
+          监控与日志改为手动刷新，避免界面持续轮询请求。
         </div>
 
         {monitoredTask && (
