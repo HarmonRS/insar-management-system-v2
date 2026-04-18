@@ -7,7 +7,6 @@ import { syncWaterScenesFromDisk } from './api/water';
 import { listEngines, runWslCheck } from './api/dinsarProduction';
 import { getOrbitStatus, syncOrbitPools } from './api/orbit';
 import LogManagementPanel from './LogManagementPanel.clean';
-import DinsarCatalogPanel from './components/DinsarCatalogPanel';
 
 const toNumber = (value) => {
   const parsed = Number(value);
@@ -37,6 +36,29 @@ const formatMismatchList = (items, formatter) => (
 const formatIntegerText = (value) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed.toLocaleString() : '0';
+};
+
+const isCatalogHealthy = (catalog) => {
+  if (!catalog || typeof catalog !== 'object') {
+    return false;
+  }
+  if (catalog.enabled === false) {
+    return true;
+  }
+  return Boolean(catalog.ok) && !catalog.needs_rebuild;
+};
+
+const formatCatalogStatusLabel = (catalog, en = false) => {
+  if (!catalog || typeof catalog !== 'object') {
+    return en ? 'Unknown' : '未知';
+  }
+  if (catalog.enabled === false) {
+    return en ? 'Disabled' : '已禁用';
+  }
+  if (catalog.needs_rebuild) {
+    return en ? 'Rebuild required' : '需要重建';
+  }
+  return catalog.catalog_status || (en ? 'Unknown' : '未知');
 };
 
 const getOrbitSourcePath = (item) => item?.source || item?.source_path || '';
@@ -312,6 +334,9 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   const formatPathText = (value) => value || (en ? 'Not configured' : '未配置');
   const databaseStatus = status?.database || {};
   const dinsarBridge = asObject(status?.dinsar_bridge);
+  const dinsarResultCatalog = asObject(status?.dinsar_result_catalog || status?.result_catalog);
+  const dinsarCatalogNeedsRebuild =
+    typeof dinsarResultCatalog.needs_rebuild === 'boolean' ? dinsarResultCatalog.needs_rebuild : null;
   const sourceRoots = asObject(status?.source_roots);
   const pairingSystem = asObject(status?.pairing_system);
   const sourceRootItems = asArray(sourceRoots.items);
@@ -556,7 +581,40 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
               )}
             </div>
 
-            <DinsarCatalogPanel compact readOnly={!isAdmin} />
+            <div className="health-card">
+              <div className="health-card-title">{en ? 'D-InSAR Result Catalog' : 'D-InSAR 结果目录'}</div>
+              <div className="health-card-row">
+                <span>{en ? 'Catalog status' : '目录状态'}</span>
+                {renderBadge(
+                  isCatalogHealthy(dinsarResultCatalog),
+                  formatCatalogStatusLabel(dinsarResultCatalog, en)
+                )}
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Needs rebuild' : '需要重建'}</span>
+                {renderBadge(
+                  dinsarCatalogNeedsRebuild === false,
+                  dinsarCatalogNeedsRebuild === null
+                    ? (en ? 'Unknown' : '未知')
+                    : (dinsarCatalogNeedsRebuild ? (en ? 'Yes' : '是') : (en ? 'No' : '否'))
+                )}
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Manifest / DB' : 'Manifest / 数据库'}</span>
+                <span>
+                  {toNumber(dinsarResultCatalog.manifest_count)} / {toNumber(dinsarResultCatalog.db_count)}
+                </span>
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Issue count' : '问题数量'}</span>
+                <span>{toNumber(dinsarResultCatalog.issue_count)}</span>
+              </div>
+              <div className="health-card-note">
+                {en
+                  ? 'Full directory details and maintenance actions remain in the D-InSAR Products workspace.'
+                  : '完整目录详情和维护操作已保留在 “D-InSAR 产物工作台”，不再在自检页展开。'}
+              </div>
+            </div>
 
             <div className="health-card">
               <div className="health-card-title">{en ? 'Pairing System' : '配对系统'}</div>
