@@ -8,6 +8,7 @@ import {
     LEFT_GROUP_TABS,
     LEFT_TAB_GROUP,
     LEFT_TAB_SECTION,
+    PRODUCTION_WORKSPACE_ROUTE_TABS,
 } from '../../config/appConstants';
 import { getLeftTabLabel } from '../../utils/appUiHelpers';
 import { PanelLoadingBody, PanelLoadingPanel } from './AppLoadingFallbacks';
@@ -15,27 +16,26 @@ import { PanelLoadingBody, PanelLoadingPanel } from './AppLoadingFallbacks';
 const LazyDataMonitorPanel = lazy(() => import('../../DataMonitorPanel'));
 const LazyDataCopierPanel = lazy(() => import('../../DataCopierPanel'));
 const LazyIDLAutomationPanel = lazy(() => import('../../IDLAutomationPanel'));
-const LazyDinsarProductionPanel = lazy(() => import('../../DinsarProductionPanel'));
-const LazyDinsarProductsPanel = lazy(() => import('../../DinsarProductsPanel'));
 const LazyHazardPointPanel = lazy(() => import('../../HazardPointPanel'));
 const LazyHealthCheckPanel = lazy(() => import('../../HealthCheckPanel'));
-const LazyTimeseriesProductionPanel = lazy(() => import('../../TimeseriesProductionPanel'));
 const LazyWaterMonitorPanel = lazy(() => import('../../WaterMonitorPanel'));
 const LazyUserAdminPanel = lazy(() => import('../../UserAdminPanel'));
 const LazyAuditLogPanel = lazy(() => import('../../AuditLogPanel'));
 const LazyAiQualityPanel = lazy(() => import('../../panels/AiQualityPanel'));
 const LazyAiAnalysisPanel = lazy(() => import('../../AiAnalysisPanel'));
 const LazyPairingPanel = lazy(() => import('../../panels/PairPlanningPanel'));
-const LazyDinsarResultPanel = lazy(() => import('../../panels/DinsarResultPanel'));
+const LazyDinsarResultPanel = lazy(() => import('../../panels/DinsarResultPanel.rewrite'));
 const LazyBatchPanel = lazy(() => import('../../panels/BatchPanel'));
 const LazyPairsListPanel = lazy(() => import('../../panels/PairsListPanel'));
 const LazyPsResultsPanel = lazy(() => import('../../panels/PsResultsPanel'));
 const LazyPsinsarCatalogPanel = lazy(() => import('../PsinsarCatalogPanel'));
+const LazyProductionWorkspace = lazy(() => import('../../ProductionWorkspace'));
 
 export default function AppSidePanel({
     leftPanelWidth,
     leftPanelTab,
     setLeftPanelTab,
+    isStandalone,
     isAdmin,
     isReadOnlyUser,
     currentUser,
@@ -62,7 +62,13 @@ export default function AppSidePanel({
     pairsPanel,
     psPanel,
 }) {
+    const isProductionWorkspace = PRODUCTION_WORKSPACE_ROUTE_TABS.has(leftPanelTab);
     const activeLeftGroup = LEFT_TAB_GROUP[leftPanelTab] || 'data';
+    const leftTabLabelContext = {
+        pairCount: foundPairs.length,
+        psResultCount: psResults ? Object.keys(psResults).length : 0,
+        dinsarTotal,
+    };
     const getVisibleTabs = (tabs = []) => tabs.filter((tab) => isAdmin || !ADMIN_ONLY_TABS.has(tab));
     const getVisibleSections = (groupKey) => (
         (LEFT_GROUP_SECTIONS[groupKey] || [])
@@ -79,6 +85,7 @@ export default function AppSidePanel({
         }
         return getVisibleTabs(LEFT_GROUP_TABS[groupKey] || [])[0] || '';
     };
+    const mainWorkspaceTab = getDefaultGroupTab('data') || 'data';
     const activeGroupSections = getVisibleSections(activeLeftGroup);
     const hasSectionNav = activeGroupSections.length > 0;
     const preferredActiveSection = LEFT_TAB_SECTION[leftPanelTab];
@@ -88,59 +95,105 @@ export default function AppSidePanel({
     const activeLeafTabs = hasSectionNav
         ? (activeGroupSections.find((section) => section.key === activeLeftSection)?.tabs || [])
         : getVisibleTabs(LEFT_GROUP_TABS[activeLeftGroup] || []);
-    const psResultCount = psResults ? Object.keys(psResults).length : 0;
+    const standaloneSectionTabs = isProductionWorkspace
+        ? []
+        : (
+            hasSectionNav
+                ? (activeGroupSections.find((section) => section.key === activeLeftSection)?.tabs || activeLeafTabs)
+                : activeLeafTabs
+        );
+    const standaloneEyebrow = [LEFT_GROUP_LABELS[activeLeftGroup], activeGroupSections.find((section) => section.key === activeLeftSection)?.label]
+        .filter(Boolean)
+        .join(' / ');
+    const standaloneTitle = isProductionWorkspace
+        ? '生产管理'
+        : getLeftTabLabel(leftPanelTab, leftTabLabelContext);
+    const standaloneDescription = isProductionWorkspace
+        ? '这里统一承载 D-InSAR 与时序InSAR的运行和产物页面，当前时序流程默认接入 SBAS，后续可继续扩展 PS-InSAR / SBAS-InSAR。'
+        : '当前模块已切换为独立工作区模式。';
 
     return (
-        <aside className="panel data-panel" style={{ display: 'flex', flexDirection: 'column', width: leftPanelWidth }}>
-            <div className="panel-tabs">
-                <div className="tabs-header group-tabs">
-                    {Object.entries(LEFT_GROUP_LABELS)
-                        .filter(([groupKey]) => {
-                            if (isAdmin) return true;
-                            return !!getDefaultGroupTab(groupKey);
-                        })
-                        .map(([groupKey, label]) => (
-                            <button
-                                key={groupKey}
-                                className={activeLeftGroup === groupKey ? 'active-tab' : ''}
-                                onClick={() => {
-                                    const nextTab = getDefaultGroupTab(groupKey);
-                                    if (nextTab) setLeftPanelTab(nextTab);
-                                }}
-                            >
-                                {label}
-                            </button>
-                        ))}
+        <aside
+            className={`panel data-panel${isStandalone ? ' panel--standalone' : ''}`}
+            style={{ display: 'flex', flexDirection: 'column', width: leftPanelWidth }}
+        >
+            {isStandalone ? (
+                <div className="panel-standalone-header">
+                    <div className="panel-standalone-header-main">
+                        <span className="panel-standalone-eyebrow">{standaloneEyebrow}</span>
+                        <strong>{standaloneTitle}</strong>
+                        <p>{standaloneDescription}</p>
+                    </div>
+                    <div className="panel-standalone-actions">
+                        <button
+                            type="button"
+                            className="panel-standalone-return"
+                            onClick={() => setLeftPanelTab(mainWorkspaceTab)}
+                        >
+                            返回主界面
+                        </button>
+                        {standaloneSectionTabs.length > 1 && (
+                            <>
+                                {standaloneSectionTabs.map((tabKey) => (
+                                    <button
+                                        key={tabKey}
+                                        className={leftPanelTab === tabKey ? 'active-tab' : ''}
+                                        onClick={() => setLeftPanelTab(tabKey)}
+                                    >
+                                        {getLeftTabLabel(tabKey, leftTabLabelContext)}
+                                    </button>
+                                ))}
+                            </>
+                        )}
+                    </div>
                 </div>
-                {hasSectionNav && (
-                    <div className="tabs-header section-tabs">
-                        {activeGroupSections.map((section) => (
+            ) : (
+                <div className="panel-tabs">
+                    <div className="tabs-header group-tabs">
+                        {Object.entries(LEFT_GROUP_LABELS)
+                            .filter(([groupKey]) => {
+                                if (isAdmin) return true;
+                                return !!getDefaultGroupTab(groupKey);
+                            })
+                            .map(([groupKey, label]) => (
+                                <button
+                                    key={groupKey}
+                                    className={activeLeftGroup === groupKey ? 'active-tab' : ''}
+                                    onClick={() => {
+                                        const nextTab = getDefaultGroupTab(groupKey);
+                                        if (nextTab) setLeftPanelTab(nextTab);
+                                    }}
+                                >
+                                    {label}
+                                </button>
+                            ))}
+                    </div>
+                    {hasSectionNav && (
+                        <div className="tabs-header section-tabs">
+                            {activeGroupSections.map((section) => (
+                                <button
+                                    key={section.key}
+                                    className={activeLeftSection === section.key ? 'active-tab' : ''}
+                                    onClick={() => setLeftPanelTab(section.tabs[0])}
+                                >
+                                    {section.label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                    <div className="tabs-header left-tabs sub-tabs">
+                        {activeLeafTabs.map((tabKey) => (
                             <button
-                                key={section.key}
-                                className={activeLeftSection === section.key ? 'active-tab' : ''}
-                                onClick={() => setLeftPanelTab(section.tabs[0])}
+                                key={tabKey}
+                                className={leftPanelTab === tabKey ? 'active-tab' : ''}
+                                onClick={() => setLeftPanelTab(tabKey)}
                             >
-                                {section.label}
+                                {getLeftTabLabel(tabKey, leftTabLabelContext)}
                             </button>
                         ))}
                     </div>
-                )}
-                <div className="tabs-header left-tabs sub-tabs">
-                    {activeLeafTabs.map((tabKey) => (
-                        <button
-                            key={tabKey}
-                            className={leftPanelTab === tabKey ? 'active-tab' : ''}
-                            onClick={() => setLeftPanelTab(tabKey)}
-                        >
-                            {getLeftTabLabel(tabKey, {
-                                pairCount: foundPairs.length,
-                                psResultCount,
-                                dinsarTotal,
-                            })}
-                        </button>
-                    ))}
                 </div>
-            </div>
+            )}
 
             {leftPanelTab === 'data' && (
                 <RadarDataPanel
@@ -227,48 +280,14 @@ export default function AppSidePanel({
                 </div>
             )}
 
-            {leftPanelTab === 'dinsar_production' && (
+            {isProductionWorkspace && (
                 <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <Suspense fallback={<PanelLoadingBody message="正在加载 D-InSAR 生产面板..." />}>
-                        <LazyDinsarProductionPanel
-                            readOnly={isReadOnlyUser}
-                            currentUser={currentUser}
-                            onJobQueued={(taskId) => taskPanel.onTaskStart(taskId, 'D-InSAR 任务已入队，等待处理...')}
-                        />
-                    </Suspense>
-                </div>
-            )}
-
-            {leftPanelTab === 'dinsar_products' && (
-                <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <Suspense fallback={<PanelLoadingBody message="正在加载 D-InSAR 产物面板..." />}>
-                        <LazyDinsarProductsPanel
-                            readOnly={isReadOnlyUser}
-                            onJobQueued={(taskId) => taskPanel.onTaskStart(taskId, 'D-InSAR 产物任务已入队，等待处理...')}
-                        />
-                    </Suspense>
-                </div>
-            )}
-
-            {leftPanelTab === 'ps_production' && (
-                <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <Suspense fallback={<PanelLoadingBody message="正在加载 PS-InSAR 生产面板..." />}>
-                        <LazyTimeseriesProductionPanel
-                            readOnly={isReadOnlyUser}
-                            onJobQueued={(taskId) => taskPanel.onTaskStart(taskId, 'SBAS 运行已入队，正在执行 prepare...')}
-                        />
-                    </Suspense>
-                </div>
-            )}
-
-            {leftPanelTab === 'ps_products' && (
-                <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <Suspense fallback={<PanelLoadingBody message="正在加载 PS-InSAR 目录面板..." />}>
-                        <div style={{ padding: '16px' }}>
-                            <LazyPsinsarCatalogPanel
+                    <Suspense fallback={<PanelLoadingBody message="正在加载生产管理工作台..." />}>
+                        <div style={{ minHeight: '100%' }}>
+                            <LazyProductionWorkspace
+                                activeEntry={leftPanelTab}
                                 readOnly={isReadOnlyUser}
-                                showActions
-                                onTaskQueued={(taskId) => taskPanel.onTaskStart(taskId, 'PS-InSAR 结果目录任务已入队，等待处理...')}
+                                onTaskStart={taskPanel.onTaskStart}
                             />
                         </div>
                     </Suspense>
@@ -380,7 +399,7 @@ export default function AppSidePanel({
 
             {leftPanelTab === 'psinsar_results' && (
                 <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <Suspense fallback={<PanelLoadingBody message="正在加载 PS-InSAR 结果目录..." />}>
+                    <Suspense fallback={<PanelLoadingBody message="正在加载时序InSAR结果目录..." />}>
                         <div style={{ padding: '16px' }}>
                             <LazyPsinsarCatalogPanel
                                 readOnly
@@ -395,7 +414,7 @@ export default function AppSidePanel({
                 <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
                     <div style={{ padding: '16px' }}>
                         <div className="empty-state">
-                            PS-InSAR 分析页已预留。
+                            时序InSAR 分析页已预留。
                             <br />
                             后续可以在这里放置时序分析、速率分级、热点识别和专题统计能力。
                         </div>

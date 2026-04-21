@@ -31,6 +31,7 @@ import {
     NATIONAL_BOUNDARY_GEOJSON_URL,
     getBaseLayerConfig,
     DEFAULT_LIST_PAGE_SIZE,
+    FULL_WIDTH_LEFT_TABS,
 } from './config/appConstants';
 import { escapeHtml, formatCoordinate } from './utils/appHelpers';
 import {
@@ -42,6 +43,7 @@ import {
     DINSAR_STRATEGY_ALL,
     filterDinsarResults,
 } from './utils/dinsarResultFilters';
+import { DINSAR_ENGINE_ALL, getDinsarEngineMeta } from './utils/dinsarEngines';
 
 const NATIONAL_BOUNDARY_STATIC_URL = '/geojson/\u5168\u56fd\u884c\u653f\u533a.geojson';
 
@@ -78,6 +80,7 @@ function App() {
         activeTasks, setActiveTasks, isGlobalLocked, setIsGlobalLocked,
         isCheckingTasks, setIsCheckingTasks,
         pendingTaskIds, setPendingTaskIds,
+        nonBlockingTaskIds, setNonBlockingTaskIds,
     } = useTaskStore(useShallow((state) => ({
         activeTasks: state.activeTasks,
         setActiveTasks: state.setActiveTasks,
@@ -87,6 +90,8 @@ function App() {
         setIsCheckingTasks: state.setIsCheckingTasks,
         pendingTaskIds: state.pendingTaskIds,
         setPendingTaskIds: state.setPendingTaskIds,
+        nonBlockingTaskIds: state.nonBlockingTaskIds,
+        setNonBlockingTaskIds: state.setNonBlockingTaskIds,
     })));
     const {
         leftPanelTab, setLeftPanelTab, leftPanelWidth, setLeftPanelWidth,
@@ -170,7 +175,7 @@ function App() {
     const {
         dinsarResults, setDinsarResults, dinsarPagination,
         dinsarPageInput, setDinsarPageInput, dinsarPageInputTouched, setDinsarPageInputTouched,
-        aiStatus, scoreFilter, setScoreFilter, traceSearch, strategyFilter,
+        aiStatus, scoreFilter, setScoreFilter, engineFilter, traceSearch, strategyFilter,
     } = useDinsarStore(useShallow((state) => ({
         dinsarResults: state.dinsarResults,
         setDinsarResults: state.setDinsarResults,
@@ -182,6 +187,7 @@ function App() {
         aiStatus: state.aiStatus,
         scoreFilter: state.scoreFilter,
         setScoreFilter: state.setScoreFilter,
+        engineFilter: state.engineFilter,
         traceSearch: state.traceSearch,
         strategyFilter: state.strategyFilter,
     })));
@@ -291,6 +297,19 @@ function App() {
     const mapBatchRef = useRef({ frameId: null, token: 0 });
     const isAdmin = currentUser?.role === 'admin';
     const isReadOnlyUser = !!currentUser && !isAdmin;
+    const isStandaloneLeftPage = FULL_WIDTH_LEFT_TABS.has(leftPanelTab);
+
+    useEffect(() => {
+        if (isStandaloneLeftPage || !mapRef.current) {
+            return undefined;
+        }
+
+        const frameId = requestAnimationFrame(() => {
+            mapRef.current?.invalidateSize(false);
+        });
+
+        return () => cancelAnimationFrame(frameId);
+    }, [isStandaloneLeftPage, leftPanelWidth, rightPanelWidth]);
 
     const getVisibleLayerRefs = useCallback(() => ({
         activeLayersRef: activeLayersRef.current,
@@ -776,6 +795,8 @@ function App() {
         setActiveTasks,
         pendingTaskIds,
         setPendingTaskIds,
+        nonBlockingTaskIds,
+        setNonBlockingTaskIds,
         isGlobalLocked,
         setIsGlobalLocked,
         setIsCheckingTasks,
@@ -926,7 +947,7 @@ function App() {
         });
         allDataRef.current = newAllData;
         setAllData(newAllData);
-        addLog('info', `正在预览包含 ${stack.length} 个场景的PS时序栈。`);
+        addLog('info', `正在预览包含 ${stack.length} 个场景的时序InSAR候选栈。`);
     };
 
     const updateLayerTooltip = useCallback((layer, result, show) => {
@@ -973,10 +994,12 @@ function App() {
         const aiScore = result.ai_score === null || result.ai_score === undefined
             ? '-'
             : `${(Number(result.ai_score) * 100).toFixed(0)}%`;
+        const engine = getDinsarEngineMeta(result.engine_code);
         const strategy = escapeHtml(result.selection_strategy || 'legacy');
         const taskAlias = escapeHtml(result.task_alias || result.task_name || result.name || '-');
         const pairKey = escapeHtml(result.pair_key || '-');
         const pairUid = escapeHtml(result.pair_uid || '-');
+        const runKey = escapeHtml(result.run_key || '-');
         const networkRunId = escapeHtml(result.network_run_id || '-');
         const networkEdgeId = escapeHtml(result.network_edge_id ?? '-');
         const policyVersion = escapeHtml(result.policy_version || '-');
@@ -990,9 +1013,11 @@ function App() {
                 <div><strong>任务:</strong> ${taskAlias}</div>
                 <div><strong>日期:</strong> ${dateText}</div>
                 <div><strong>AI:</strong> ${aiScore}</div>
+                <div><strong>引擎:</strong> ${escapeHtml(engine.label)} <span class="mono">(${escapeHtml(engine.code)})</span></div>
                 <div><strong>策略:</strong> ${strategy}</div>
                 <div><strong>edge:</strong> ${networkEdgeId}</div>
                 <div><strong>run:</strong> <span class="mono">${networkRunId}</span></div>
+                <div><strong>run_key:</strong> <span class="mono">${runKey}</span></div>
                 <div><strong>pair_key:</strong> <span class="mono">${pairKey}</span></div>
                 <div><strong>pair_uid:</strong> <span class="mono">${pairUid}</span></div>
                 <div><strong>policy:</strong> ${policyVersion}</div>
@@ -1071,6 +1096,7 @@ function App() {
         const currentResults = dinsarResultsRef.current;
         const currentFilters = {
             scoreFilter,
+            engineFilter,
             strategyFilter,
             traceSearch,
             focusedHazardPoint,
@@ -1082,6 +1108,9 @@ function App() {
 
         if (scoreFilter > 0) {
             filterNotes.push(`AI>=${Math.round(scoreFilter * 100)}%`);
+        }
+        if (engineFilter !== DINSAR_ENGINE_ALL) {
+            filterNotes.push(`引擎:${getDinsarEngineMeta(engineFilter).shortLabel}`);
         }
         if (focusedHazardPoint?.hazard_name) {
             filterNotes.push(`点位:${focusedHazardPoint.hazard_name}`);
@@ -1124,7 +1153,7 @@ function App() {
         runMapBatch(changedResults, (result) => {
             updateDinsarLayer(result, result.isVisible);
         });
-    }, [addLog, focusedHazardPoint, runMapBatch, scoreFilter, setDinsarResults, strategyFilter, traceSearch, updateDinsarLayer]);
+    }, [addLog, engineFilter, focusedHazardPoint, runMapBatch, scoreFilter, setDinsarResults, strategyFilter, traceSearch, updateDinsarLayer]);
 
     const handleScoreFilterChange = useCallback((e) => {
         cancelMapBatch();
@@ -1562,11 +1591,12 @@ function App() {
                 onRefreshHealth={handleRefreshHealth}
                 onLogout={handleLogout}
             />
-            <div className="main-layout">
+            <div className={`main-layout${isStandaloneLeftPage ? ' main-layout--standalone' : ''}`}>
                 <AppSidePanel
-                    leftPanelWidth={leftPanelWidth}
+                    leftPanelWidth={isStandaloneLeftPage ? '100%' : leftPanelWidth}
                     leftPanelTab={leftPanelTab}
                     setLeftPanelTab={setLeftPanelTab}
+                    isStandalone={isStandaloneLeftPage}
                     isAdmin={isAdmin}
                     isReadOnlyUser={isReadOnlyUser}
                     currentUser={currentUser}
@@ -1594,28 +1624,32 @@ function App() {
                     psPanel={psPanel}
                 />
 
-                <div className="panel-resizer" onMouseDown={(event) => startResize('left', event)} />
+                {!isStandaloneLeftPage && (
+                    <>
+                        <div className="panel-resizer" onMouseDown={(event) => startResize('left', event)} />
 
-                <AppMapWorkspace
-                    language={language}
-                    showMapRegionLocator={showMapRegionLocator}
-                    toggleMapRegionLocator={toggleMapRegionLocator}
-                    mapRegionOptions={mapRegionOptions}
-                    mapRegionSelection={mapRegionSelection}
-                    mapRegionLoading={mapRegionLoading}
-                    mapRegionLocating={mapRegionLocating}
-                    mapRegionError={mapRegionError}
-                    mapRegionLocatedName={mapRegionLocatedName}
-                    onMapRegionProvinceChange={handleMapRegionProvinceChange}
-                    onMapRegionCityChange={handleMapRegionCityChange}
-                    onLocateSelectedRegion={locateSelectedRegionOnMap}
-                    onClearMapRegionHighlight={clearMapRegionHighlight}
-                    baseLayerKey={baseLayerKey}
-                    setBaseLayerKey={setBaseLayerKey}
-                    onOpenExportModal={mapExport.openExportModal}
-                />
-                <div className="panel-resizer" onMouseDown={(event) => startResize('right', event)} />
-                <AppLogPanel width={rightPanelWidth} />
+                        <AppMapWorkspace
+                            language={language}
+                            showMapRegionLocator={showMapRegionLocator}
+                            toggleMapRegionLocator={toggleMapRegionLocator}
+                            mapRegionOptions={mapRegionOptions}
+                            mapRegionSelection={mapRegionSelection}
+                            mapRegionLoading={mapRegionLoading}
+                            mapRegionLocating={mapRegionLocating}
+                            mapRegionError={mapRegionError}
+                            mapRegionLocatedName={mapRegionLocatedName}
+                            onMapRegionProvinceChange={handleMapRegionProvinceChange}
+                            onMapRegionCityChange={handleMapRegionCityChange}
+                            onLocateSelectedRegion={locateSelectedRegionOnMap}
+                            onClearMapRegionHighlight={clearMapRegionHighlight}
+                            baseLayerKey={baseLayerKey}
+                            setBaseLayerKey={setBaseLayerKey}
+                            onOpenExportModal={mapExport.openExportModal}
+                        />
+                        <div className="panel-resizer" onMouseDown={(event) => startResize('right', event)} />
+                        <AppLogPanel width={rightPanelWidth} />
+                    </>
+                )}
             </div>
 
             <AppOverlays

@@ -71,10 +71,12 @@ class DinsarResult(BaseModel):
     task_alias: Optional[str] = None
     pair_key: Optional[str] = None
     pair_uid: Optional[str] = None
+    run_key: Optional[str] = None
     network_run_id: Optional[str] = None
     network_edge_id: Optional[int] = None
     policy_version: Optional[str] = None
     selection_strategy: Optional[str] = None
+    engine_code: Optional[str] = None
     file_path: str
     min_lon: float
     min_lat: float

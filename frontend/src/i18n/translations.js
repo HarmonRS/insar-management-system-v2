@@ -208,7 +208,7 @@
   { zh: '取消', en: 'Cancel' },
 
   // --- App.jsx: PS modal ---
-  { zh: '准备PS时序数据栈', en: 'Prepare PS Time-series Stack' },
+  { zh: '准备时序InSAR候选栈', en: 'Prepare Time-series InSAR Stack' },
   { zh: '研究区域来源:', en: 'Study Area Source:' },
   { zh: '研究区域 (Shapefile):', en: 'Study Area (Shapefile):' },
   { zh: '准备并导出', en: 'Prepare & Export' },

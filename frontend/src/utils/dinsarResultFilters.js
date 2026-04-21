@@ -1,3 +1,5 @@
+import { DINSAR_ENGINE_ALL } from './dinsarEngines';
+
 export const DINSAR_STRATEGY_ALL = '__ALL__';
 
 function normalizeTraceSearch(value) {
@@ -15,10 +17,12 @@ function buildTraceText(result = {}) {
         result.task_name,
         result.pair_key,
         result.pair_uid,
+        result.run_key,
         result.network_run_id,
         result.network_edge_id,
         result.policy_version,
         result.selection_strategy,
+        result.engine_code,
     ]
         .filter(Boolean)
         .join(' ')
@@ -71,19 +75,22 @@ export function matchesDinsarResultFilters(
     result,
     {
         scoreFilter = 0,
+        engineFilter = DINSAR_ENGINE_ALL,
         strategyFilter = DINSAR_STRATEGY_ALL,
         traceSearch = '',
         focusedHazardPoint = null,
     } = {}
 ) {
     const matchesScore = !hasAiScore(result) || Number(result.ai_score) >= Number(scoreFilter || 0);
+    const engineValue = String(result?.engine_code || '').trim().toLowerCase();
+    const matchesEngine = engineFilter === DINSAR_ENGINE_ALL || engineValue === engineFilter;
     const strategyValue = String(result?.selection_strategy || '').trim();
     const matchesStrategy = strategyFilter === DINSAR_STRATEGY_ALL || strategyValue === strategyFilter;
     const normalizedTraceSearch = normalizeTraceSearch(traceSearch);
     const matchesTrace = !normalizedTraceSearch || buildTraceText(result).includes(normalizedTraceSearch);
     const matchesHazard = matchesFocusedHazardPoint(result, focusedHazardPoint);
 
-    return matchesScore && matchesStrategy && matchesTrace && matchesHazard;
+    return matchesScore && matchesEngine && matchesStrategy && matchesTrace && matchesHazard;
 }
 
 export function filterDinsarResults(results = [], filters = {}) {

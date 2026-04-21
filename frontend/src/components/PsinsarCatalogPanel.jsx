@@ -96,7 +96,7 @@ export default function PsinsarCatalogPanel({
         return nextItems[0]?.id ?? null;
       });
     } catch (error) {
-      setActionMessage(`PS-InSAR 结果目录状态加载失败：${error?.response?.data?.detail || error.message}`);
+      setActionMessage(`时序InSAR产物目录状态加载失败：${error?.response?.data?.detail || error.message}`);
       setCatalogStatus(null);
       setProducts([]);
       setSelectedProductId(null);
@@ -146,11 +146,11 @@ export default function PsinsarCatalogPanel({
         publish_root: publishRoot.trim() || null,
         full_rebuild: true,
       });
-      setActionMessage(`PS-InSAR 结果目录重建任务已入队：${result.task_id}`);
+      setActionMessage(`时序InSAR产物目录重建任务已入队：${result.task_id}`);
       onTaskQueued?.(result.task_id);
       await loadCatalog();
     } catch (error) {
-      setActionMessage(`PS-InSAR 结果目录重建失败：${error?.response?.data?.detail || error.message}`);
+      setActionMessage(`时序InSAR产物目录重建失败：${error?.response?.data?.detail || error.message}`);
     } finally {
       setActionLoading(false);
     }
@@ -164,9 +164,9 @@ export default function PsinsarCatalogPanel({
     <div style={panelCardStyle}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 10 }}>
         <div>
-          <strong style={{ fontSize: 14 }}>PS-InSAR 结果目录</strong>
+          <strong style={{ fontSize: 14 }}>时序InSAR 产物目录</strong>
           <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
-            结果目录以 `psinsar.publish.v1` bundle 为事实源，数据库仅保存索引与展示信息。
+            当前默认登记 SBAS 流程产物。结果目录以 `psinsar.publish.v1` bundle 为事实源，数据库仅保存索引与展示信息，后续可继续兼容 PS-InSAR / SBAS-InSAR。
           </div>
         </div>
         <button
@@ -224,7 +224,7 @@ export default function PsinsarCatalogPanel({
           <input
             value={publishRoot}
             onChange={event => setPublishRoot(event.target.value)}
-            placeholder="可选：自定义 PS-InSAR 发布根目录，留空使用系统默认目录"
+            placeholder="可选：自定义时序InSAR发布根目录，留空使用系统默认目录"
             disabled={readOnly || actionLoading}
             style={{
               width: '100%',
@@ -249,7 +249,7 @@ export default function PsinsarCatalogPanel({
               fontSize: 12,
             }}
           >
-            {actionLoading ? '处理中...' : '重建 PS-InSAR 结果目录'}
+            {actionLoading ? '处理中...' : '重建时序InSAR产物目录'}
           </button>
           {actionMessage && (
             <div style={{ marginTop: 8, fontSize: 12, color: actionMessage.includes('失败') ? '#dc2626' : '#166534' }}>
@@ -259,14 +259,14 @@ export default function PsinsarCatalogPanel({
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 360px) 1fr', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
         <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, overflow: 'hidden' }}>
           <div style={{ padding: '8px 10px', background: '#f8fafc', fontSize: 12, fontWeight: 600 }}>
             产品列表 ({products.length})
           </div>
           {products.length === 0 ? (
             <div style={{ padding: '12px', fontSize: 12, color: '#94a3b8' }}>
-              {loading ? '正在加载结果...' : '当前没有已登记的 PS-InSAR 产品。'}
+              {loading ? '正在加载结果...' : '当前没有已登记的时序InSAR产物。'}
             </div>
           ) : (
             <div style={{ maxHeight: 420, overflowY: 'auto' }}>

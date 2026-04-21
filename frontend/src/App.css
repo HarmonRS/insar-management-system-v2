@@ -56,6 +56,14 @@ html, body {
   overflow: hidden;
 }
 
+.main-layout--standalone {
+  padding: 14px 16px 18px;
+  align-items: stretch;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0)) no-repeat,
+    radial-gradient(circle at top left, rgba(37, 99, 235, 0.08), transparent 36%);
+}
+
 .panel-resizer {
   flex: 0 0 6px;
   cursor: col-resize;
@@ -3810,4 +3818,1183 @@ input[type="checkbox"] {
 .result-export-modal .modal-footer button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ============ D-InSAR Results Workspace ============ */
+
+.dinsar-results-toolbar {
+  gap: 12px;
+  padding: 12px 15px 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(242, 246, 251, 0.98)),
+    var(--color-panel-muted);
+}
+
+.dinsar-toolbar-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dinsar-toolbar-panel {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(247, 250, 252, 0.98));
+  box-shadow: var(--shadow-soft);
+}
+
+.dinsar-toolbar-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.dinsar-toolbar-value {
+  font-size: 1.25rem;
+  color: var(--color-text-primary);
+}
+
+.dinsar-toolbar-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+}
+
+.dinsar-toolbar-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dinsar-toolbar-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.dinsar-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dinsar-filter-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.6fr);
+  gap: 10px;
+}
+
+.dinsar-filter-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dinsar-filter-field span,
+.dinsar-pagination-field span {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.dinsar-filter-field input,
+.dinsar-filter-field select,
+.dinsar-pagination-field input,
+.dinsar-pagination-field select,
+.dinsar-catalog-filter-field input,
+.dinsar-catalog-filter-field select,
+.dinsar-catalog-manage-form textarea,
+.dinsar-catalog-manage-form input,
+.dinsar-products-field input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  color: var(--color-text-primary);
+  background: #fff;
+}
+
+.dinsar-filter-field input:focus,
+.dinsar-filter-field select:focus,
+.dinsar-pagination-field input:focus,
+.dinsar-pagination-field select:focus,
+.dinsar-catalog-filter-field input:focus,
+.dinsar-catalog-filter-field select:focus,
+.dinsar-catalog-manage-form textarea:focus,
+.dinsar-catalog-manage-form input:focus,
+.dinsar-products-field input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-glow);
+}
+
+.dinsar-score-filter {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.dinsar-score-filter strong {
+  min-width: 42px;
+  text-align: center;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+}
+
+.dinsar-engine-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dinsar-engine-filter-row button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.dinsar-engine-filter-row button strong {
+  min-width: 24px;
+  text-align: center;
+  color: var(--color-text-primary);
+}
+
+.dinsar-engine-filter-row button.active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+}
+
+.dinsar-toolbar-footer {
+  display: grid;
+  gap: 8px;
+}
+
+.dinsar-toolbar-footer-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.dinsar-pagination-field {
+  display: grid;
+  gap: 6px;
+  min-width: 120px;
+}
+
+.dinsar-pagination-field-jump {
+  min-width: 240px;
+}
+
+.dinsar-page-jump-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.dinsar-page-jump-input input.has-error {
+  border-color: var(--color-danger);
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.12);
+}
+
+.dinsar-toolbar-hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.dinsar-toolbar-hint.error {
+  color: var(--color-danger);
+}
+
+.dinsar-row-header {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.dinsar-item {
+  gap: 8px;
+  min-height: 118px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.dinsar-item .data-item-controls {
+  width: 100%;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.dinsar-row-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.dinsar-engine-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.9);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.dinsar-engine-badge.tone-envi {
+  border-color: rgba(14, 165, 164, 0.34);
+  background: rgba(14, 165, 164, 0.12);
+  color: #0f766e;
+}
+
+.dinsar-engine-badge.tone-isce2 {
+  border-color: rgba(37, 99, 235, 0.32);
+  background: rgba(37, 99, 235, 0.12);
+  color: #1d4ed8;
+}
+
+.dinsar-engine-badge.tone-pyint {
+  border-color: rgba(190, 24, 93, 0.28);
+  background: rgba(244, 63, 94, 0.12);
+  color: #be123c;
+}
+
+.dinsar-engine-badge.tone-landsar {
+  border-color: rgba(217, 119, 6, 0.32);
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+
+.dinsar-engine-badge.tone-unknown {
+  border-color: rgba(100, 116, 139, 0.28);
+  background: rgba(148, 163, 184, 0.12);
+  color: #475569;
+}
+
+.dinsar-trace-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--color-text-secondary);
+}
+
+.dinsar-trace-stat strong {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+}
+
+.dinsar-control-cluster {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dinsar-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: #fff;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dinsar-toggle-label input[type="checkbox"] {
+  accent-color: var(--color-accent);
+}
+
+/* ============ D-InSAR Catalog ============ */
+
+.dinsar-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.dinsar-status-pill.tone-ready {
+  background: rgba(22, 163, 74, 0.12);
+  color: #166534;
+  border-color: rgba(22, 163, 74, 0.25);
+}
+
+.dinsar-status-pill.tone-info {
+  background: rgba(14, 165, 233, 0.12);
+  color: #0369a1;
+  border-color: rgba(14, 165, 233, 0.24);
+}
+
+.dinsar-status-pill.tone-warn {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+  border-color: rgba(245, 158, 11, 0.25);
+}
+
+.dinsar-status-pill.tone-error {
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+  border-color: rgba(220, 38, 38, 0.24);
+}
+
+.dinsar-status-pill.tone-neutral {
+  background: rgba(148, 163, 184, 0.12);
+  color: #475569;
+  border-color: rgba(148, 163, 184, 0.24);
+}
+
+.dinsar-catalog-shell,
+.dinsar-products-card,
+.dinsar-products-hero {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 251, 255, 0.98));
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-soft);
+}
+
+.dinsar-catalog-shell {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.dinsar-catalog-header,
+.dinsar-products-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.dinsar-catalog-header-copy strong,
+.dinsar-products-hero strong {
+  display: block;
+  font-size: 16px;
+  color: var(--color-text-primary);
+}
+
+.dinsar-catalog-header-copy p,
+.dinsar-products-hero p {
+  margin: 6px 0 0;
+  max-width: 760px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.dinsar-catalog-header-actions,
+.dinsar-products-hero-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.dinsar-catalog-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dinsar-catalog-stat-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: rgba(248, 250, 252, 0.95);
+}
+
+.dinsar-catalog-stat-card span {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.dinsar-catalog-stat-card strong {
+  font-size: 18px;
+  color: var(--color-text-primary);
+}
+
+.dinsar-catalog-stat-card small {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.dinsar-catalog-meta-strip {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(239, 246, 255, 0.75);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.dinsar-catalog-message,
+.dinsar-products-message {
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dinsar-catalog-message.tone-success,
+.dinsar-products-message.tone-success {
+  background: rgba(22, 163, 74, 0.12);
+  color: #166534;
+  border: 1px solid rgba(22, 163, 74, 0.24);
+}
+
+.dinsar-catalog-message.tone-error,
+.dinsar-products-message.tone-error {
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+  border: 1px solid rgba(220, 38, 38, 0.24);
+}
+
+.dinsar-catalog-manage {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.85fr);
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: rgba(248, 250, 252, 0.92);
+}
+
+.dinsar-catalog-manage-copy strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14px;
+  color: var(--color-text-primary);
+}
+
+.dinsar-catalog-manage-copy p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.dinsar-catalog-manage-form {
+  display: grid;
+  gap: 10px;
+}
+
+.dinsar-catalog-manage-form textarea {
+  min-height: 94px;
+  resize: vertical;
+}
+
+.dinsar-catalog-manage-actions,
+.dinsar-products-actions,
+.dinsar-catalog-filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dinsar-catalog-manage-actions .primary,
+.dinsar-products-actions .primary {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+}
+
+.dinsar-catalog-manage-actions .primary:hover:not(:disabled),
+.dinsar-products-actions .primary:hover:not(:disabled) {
+  background: var(--color-accent-strong);
+}
+
+.dinsar-catalog-workspace {
+  display: grid;
+  grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
+  gap: 14px;
+  min-height: 0;
+}
+
+.panel--standalone .dinsar-catalog-workspace {
+  grid-template-columns: minmax(380px, 440px) minmax(0, 1fr);
+}
+
+.dinsar-catalog-list-card,
+.dinsar-catalog-detail-card {
+  min-height: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.95);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel--standalone {
+  width: 100%;
+  border-right: none;
+  border-left: none;
+  box-shadow: none;
+  background: transparent;
+}
+
+.panel--standalone .panel-tabs {
+  padding-left: 0;
+  padding-right: 0;
+  background: transparent;
+  border-bottom: none;
+}
+
+.panel--standalone .panel-content {
+  overflow-y: auto;
+}
+
+.panel-standalone-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 4px 0 18px;
+}
+
+.panel-standalone-header-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.panel-standalone-eyebrow {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.panel-standalone-header-main strong {
+  font-size: 24px;
+  line-height: 1.2;
+  color: var(--color-text-primary);
+}
+
+.panel-standalone-header-main p {
+  margin: 0;
+  max-width: 860px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.panel-standalone-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.panel-standalone-actions button {
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+.panel-standalone-actions button.panel-standalone-return {
+  background: rgba(15, 23, 42, 0.86);
+  border-color: rgba(15, 23, 42, 0.92);
+  color: #fff;
+}
+
+.panel-standalone-actions button.active-tab {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #fff;
+}
+
+.dinsar-catalog-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border);
+  background: rgba(248, 250, 252, 0.94);
+}
+
+.dinsar-catalog-card-head strong {
+  display: block;
+  font-size: 14px;
+}
+
+.dinsar-catalog-card-head span {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.dinsar-catalog-filter-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dinsar-catalog-filter-field {
+  display: grid;
+  gap: 6px;
+}
+
+.dinsar-catalog-filter-field span {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.dinsar-catalog-empty {
+  padding: 20px 14px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.dinsar-catalog-empty.inline {
+  padding: 8px 0 0;
+}
+
+.dinsar-catalog-empty.error {
+  color: var(--color-danger);
+}
+
+.dinsar-catalog-empty.ok {
+  color: #166534;
+}
+
+.dinsar-catalog-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.dinsar-catalog-list-item {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  text-align: left;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: #fff;
+  box-shadow: none;
+}
+
+.dinsar-catalog-list-item.active {
+  border-color: rgba(37, 99, 235, 0.3);
+  background: rgba(239, 246, 255, 0.92);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.08);
+}
+
+.dinsar-catalog-list-item-top,
+.dinsar-catalog-asset-top,
+.dinsar-catalog-issue-top,
+.dinsar-monitor-top,
+.dinsar-monitor-log-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.dinsar-catalog-list-item-top strong {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.dinsar-catalog-list-item-badges,
+.dinsar-catalog-hero-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.dinsar-catalog-list-item-meta,
+.dinsar-catalog-list-item-trace,
+.dinsar-monitor-message,
+.dinsar-monitor-log-message,
+.dinsar-catalog-asset-item,
+.dinsar-catalog-issue-item {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  word-break: break-all;
+}
+
+.dinsar-catalog-list-item-trace {
+  color: var(--color-text-muted);
+}
+
+.dinsar-catalog-detail-body {
+  padding: 14px;
+  display: grid;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.dinsar-catalog-hero {
+  display: grid;
+  grid-template-columns: minmax(200px, 280px) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.dinsar-catalog-preview-frame {
+  overflow: hidden;
+  min-height: 180px;
+  border-radius: 14px;
+  border: 1px solid var(--color-border);
+  background:
+    linear-gradient(135deg, rgba(226, 232, 240, 0.86), rgba(241, 245, 249, 0.96));
+}
+
+.dinsar-catalog-preview-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.dinsar-catalog-hero-meta {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.dinsar-catalog-hero-title-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.dinsar-catalog-hero-title-row h4 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.dinsar-catalog-hero-title-row p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.dinsar-catalog-kv-grid,
+.dinsar-catalog-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dinsar-catalog-meta-field {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: rgba(248, 250, 252, 0.88);
+}
+
+.dinsar-catalog-meta-field span {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.dinsar-catalog-meta-field strong {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--color-text-primary);
+}
+
+.break-all {
+  word-break: break-all;
+}
+
+.dinsar-catalog-section-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.95);
+}
+
+.dinsar-catalog-section-card.nested {
+  background: rgba(248, 250, 252, 0.92);
+}
+
+.dinsar-catalog-section-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.dinsar-catalog-asset-list,
+.dinsar-catalog-issue-list,
+.dinsar-monitor-log-list {
+  display: grid;
+  gap: 10px;
+}
+
+.dinsar-catalog-asset-item,
+.dinsar-catalog-issue-item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: rgba(248, 250, 252, 0.92);
+}
+
+.dinsar-catalog-asset-item.ok {
+  border-color: rgba(22, 163, 74, 0.22);
+}
+
+.dinsar-catalog-asset-item.missing,
+.dinsar-catalog-issue-item.error {
+  border-color: rgba(220, 38, 38, 0.2);
+  background: rgba(254, 242, 242, 0.92);
+}
+
+.dinsar-catalog-issue-item.warn {
+  border-color: rgba(245, 158, 11, 0.22);
+  background: rgba(255, 247, 237, 0.92);
+}
+
+.dinsar-catalog-asset-top span,
+.dinsar-catalog-issue-top span,
+.dinsar-catalog-issue-action,
+.dinsar-monitor-log-time {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.dinsar-products-page {
+  width: 100%;
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 6px 0 24px;
+  display: grid;
+  gap: 18px;
+}
+
+.panel--standalone .dinsar-products-page {
+  max-width: none;
+}
+
+.dinsar-products-hero {
+  padding: 16px 18px;
+}
+
+.dinsar-products-top-grid {
+  display: grid;
+  grid-template-columns: minmax(420px, 0.95fr) minmax(460px, 1.05fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.dinsar-products-card {
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.dinsar-products-card.monitor.tone-warn {
+  border-color: rgba(245, 158, 11, 0.28);
+}
+
+.dinsar-products-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.dinsar-products-card-head strong {
+  display: block;
+  font-size: 14px;
+}
+
+.dinsar-products-card-head span {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.dinsar-products-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.dinsar-products-field {
+  display: grid;
+  gap: 6px;
+}
+
+.dinsar-products-field span {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.dinsar-products-result-card {
+  padding: 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.dinsar-products-result-card.success {
+  background: rgba(22, 163, 74, 0.1);
+  color: #166534;
+}
+
+.dinsar-products-result-card.error {
+  background: rgba(220, 38, 38, 0.1);
+  color: #b91c1c;
+}
+
+.dinsar-products-empty {
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.dinsar-monitor-card {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--color-border);
+  background: rgba(248, 250, 252, 0.92);
+}
+
+.dinsar-monitor-top strong {
+  display: block;
+  font-size: 14px;
+}
+
+.dinsar-monitor-top span,
+.dinsar-monitor-task-id {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.dinsar-monitor-task-id {
+  font-family: var(--font-mono);
+}
+
+.dinsar-monitor-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.dinsar-monitor-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.2);
+}
+
+.dinsar-monitor-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #38bdf8, #2563eb);
+}
+
+.dinsar-monitor-log-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.dinsar-monitor-log-item.tone-error {
+  border-color: rgba(220, 38, 38, 0.22);
+  background: rgba(254, 242, 242, 0.92);
+}
+
+.dinsar-monitor-log-item.tone-warn {
+  border-color: rgba(245, 158, 11, 0.22);
+  background: rgba(255, 247, 237, 0.92);
+}
+
+.dinsar-monitor-log-item .danger {
+  color: #b91c1c;
+  border-color: rgba(220, 38, 38, 0.2);
+  background: rgba(254, 242, 242, 0.92);
+}
+
+.dinsar-monitor-log-main {
+  min-width: 0;
+}
+
+.export-result-item label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.export-result-item .dinsar-engine-badge {
+  margin-left: auto;
+}
+
+@media (max-width: 1200px) {
+  .dinsar-toolbar-grid,
+  .dinsar-catalog-summary,
+  .dinsar-products-top-grid,
+  .dinsar-catalog-manage,
+  .dinsar-catalog-hero,
+  .dinsar-catalog-detail-grid,
+  .dinsar-catalog-kv-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dinsar-filter-layout {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dinsar-catalog-workspace {
+    grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1500px) {
+  .panel--standalone .dinsar-products-top-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .dinsar-toolbar-grid,
+  .dinsar-filter-layout,
+  .dinsar-catalog-summary,
+  .dinsar-catalog-workspace,
+  .dinsar-catalog-manage,
+  .dinsar-catalog-filter-bar,
+  .dinsar-catalog-hero,
+  .dinsar-catalog-detail-grid,
+  .dinsar-catalog-kv-grid,
+  .dinsar-products-top-grid,
+  .dinsar-products-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dinsar-catalog-header,
+  .dinsar-products-hero,
+  .dinsar-catalog-card-head,
+  .dinsar-products-card-head,
+  .dinsar-catalog-hero-title-row,
+  .dinsar-monitor-top,
+  .dinsar-monitor-log-head,
+  .dinsar-row-header,
+  .dinsar-item .data-item-controls {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .dinsar-row-badges {
+    justify-content: flex-start;
+  }
+
+  .dinsar-toolbar-footer-main {
+    align-items: stretch;
+  }
+
+  .panel-standalone-header {
+    flex-direction: column;
+  }
+
+  .panel-standalone-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .dinsar-products-page {
+    padding: 12px;
+  }
+
+  .dinsar-results-toolbar,
+  .dinsar-catalog-shell,
+  .dinsar-products-card,
+  .dinsar-products-hero {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .dinsar-engine-filter-row,
+  .dinsar-toolbar-actions,
+  .dinsar-catalog-manage-actions,
+  .dinsar-products-actions {
+    flex-direction: column;
+  }
+
+  .dinsar-engine-filter-row button,
+  .dinsar-toolbar-actions button,
+  .dinsar-catalog-manage-actions button,
+  .dinsar-products-actions button {
+    width: 100%;
+  }
 }

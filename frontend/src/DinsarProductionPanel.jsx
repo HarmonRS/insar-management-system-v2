@@ -1,6 +1,6 @@
 ﻿import React, { useCallback, useEffect, useState } from 'react';
 
-import { listEngines, listRuns, submitRun } from './api/dinsarProduction';
+import { listEngines, listRuns, previewPyintInputAssets, submitRun } from './api/dinsarProduction';
 import { getJobLog } from './api/idl';
 import { clearTaskLogs, deleteTaskLog, getActiveTasks, getTaskLogs } from './api/tasks';
 
@@ -34,11 +34,13 @@ const ENGINE_STATUS_LABEL = {
 const ENGINE_LABEL = {
   sarscape: 'SARscape',
   isce2: 'ISCE2',
+  pyint: 'PyINT / Gamma',
   landsar: 'LANDSAR',
 };
 
 const TASK_TYPE_LABEL = {
   ISCE2_RUN: 'ISCE2生产',
+  PYINT_RUN: 'PyINT生产',
   IDL_RUN_DINSAR: 'ENVI生产',
 };
 
@@ -55,6 +57,23 @@ const STATUS_LABEL = {
   pending: '等待中',
 };
 
+const PYINT_DEM_MODE_LABEL = {
+  local_fabdem: '本地 FABDEM',
+  opentopo: 'OpenTopography',
+  prepared_file: '现有 DEM',
+};
+
+const PYINT_ORBIT_POLICY_LABEL = {
+  validate_only: '仅校验',
+  require_txt: '必须存在',
+  stage_txt: '校验并留痕',
+};
+
+const PYINT_PRECISE_ORBIT_MODE_LABEL = {
+  replace: '状态向量替换',
+  replace_and_validate: '替换并校验',
+};
+
 function formatEngineLabel(engineCode, engineLabel = '') {
   return engineLabel || ENGINE_LABEL[engineCode] || engineCode || '-';
 }
@@ -65,6 +84,61 @@ function formatTaskType(taskType) {
 
 function formatStatus(status) {
   return STATUS_LABEL[status] || status || '-';
+}
+
+function formatPyintDemMode(mode) {
+  return PYINT_DEM_MODE_LABEL[mode] || mode || '-';
+}
+
+function formatPyintOrbitPolicy(policy) {
+  return PYINT_ORBIT_POLICY_LABEL[policy] || policy || '-';
+}
+
+function formatPyintPreciseOrbitMode(mode) {
+  return PYINT_PRECISE_ORBIT_MODE_LABEL[mode] || mode || '-';
+}
+
+function PreviewIssueList({ title, items, tone = 'warning' }) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return null;
+  }
+
+  const palette = tone === 'error'
+    ? {
+      background: '#fef2f2',
+      border: '#fecaca',
+      title: '#b91c1c',
+      text: '#7f1d1d',
+    }
+    : {
+      background: '#fff7ed',
+      border: '#fed7aa',
+      title: '#c2410c',
+      text: '#9a3412',
+    };
+
+  return (
+    <div
+      style={{
+        padding: '8px 10px',
+        borderRadius: 6,
+        border: `1px solid ${palette.border}`,
+        background: palette.background,
+      }}
+    >
+      <div style={{ fontSize: 12, fontWeight: 600, color: palette.title, marginBottom: 6 }}>{title}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {items.slice(0, 6).map((item, index) => (
+          <div key={`${title}-${index}`} style={{ fontSize: 11, lineHeight: 1.45, color: palette.text }}>
+            {item}
+          </div>
+        ))}
+        {items.length > 6 && (
+          <div style={{ fontSize: 11, color: palette.text }}>其余 {items.length - 6} 项已折叠。</div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function EngineStatusCard({ engine, onSelect, selected }) {
@@ -238,6 +312,9 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState('');
   const [submitError, setSubmitError] = useState(false);
+  const [pyintPreview, setPyintPreview] = useState(null);
+  const [pyintPreviewLoading, setPyintPreviewLoading] = useState(false);
+  const [pyintPreviewFeedback, setPyintPreviewFeedback] = useState({ message: '', error: false });
 
   const [runs, setRuns] = useState([]);
   const [runsLoading, setRunsLoading] = useState(false);
@@ -253,12 +330,22 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const currentProfiles = currentEngineObj?.profiles || EMPTY_ARRAY;
   const currentProfileObj = currentProfiles.find(profile => profile.code === selectedProfile) || null;
   const currentParamSchema = currentProfileObj?.params_schema || EMPTY_OBJECT;
+  const currentDefaultTimeoutSec = Number(currentEngineObj?.default_timeout_seconds || 0) || 0;
+  const currentParamHelpText = selectedEngine === 'pyint'
+    ? '这些参数影响 PyINT 的多视、并行度以及是否执行解缠/地理编码。建议先直接使用默认值，优先确认当前任务目录里的 LT-1 原始压缩包是否能被正常识别。'
+    : '这些参数主要影响目标网格大小、精裁剪范围、地理编码范围和位移结果掩膜。建议先使用默认值，通常优先只调整目标网格大小；只有在边缘被裁切、时间窗异常或噪声较多时，再继续调整其他参数。';
+  const pyintPreviewBlocksSubmit = selectedEngine === 'pyint' && pyintPreview && pyintPreview.allow_submit === false;
   const latestRunWithTask = runs.find(run => run?.task_id) || null;
   const monitoredTask = activeTask || (
     latestRunWithTask
       ? {
         task_id: latestRunWithTask.task_id,
-        task_type: latestRunWithTask.engine === 'isce2' ? 'ISCE2_RUN' : 'IDL_RUN_DINSAR',
+        task_type:
+          latestRunWithTask.engine === 'isce2'
+            ? 'ISCE2_RUN'
+            : latestRunWithTask.engine === 'pyint'
+              ? 'PYINT_RUN'
+              : 'IDL_RUN_DINSAR',
         status: latestRunWithTask.raw_status || latestRunWithTask.status,
         progress: latestRunWithTask.raw_status === 'COMPLETED' || latestRunWithTask.status === 'success' ? 100 : null,
         message: latestRunWithTask.message || '最近一次任务',
@@ -299,7 +386,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     try {
       const data = await getActiveTasks();
       const tasks = Array.isArray(data) ? data : (data?.tasks || []);
-      const relevantTask = tasks.find(task => ['ISCE2_RUN', 'IDL_RUN_DINSAR'].includes(task.task_type)) || null;
+      const relevantTask = tasks.find(task => ['ISCE2_RUN', 'PYINT_RUN', 'IDL_RUN_DINSAR'].includes(task.task_type)) || null;
       setActiveTask(relevantTask);
       return relevantTask;
     } catch {
@@ -384,6 +471,19 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     setEngineExtraParams(buildDefaults(currentParamSchema));
   }, [selectedEngine, selectedProfile, currentParamSchema]);
 
+  useEffect(() => {
+    if (currentDefaultTimeoutSec > 0) {
+      setTimeoutSec(String(currentDefaultTimeoutSec));
+      return;
+    }
+    setTimeoutSec('');
+  }, [selectedEngine, currentDefaultTimeoutSec]);
+
+  useEffect(() => {
+    setPyintPreview(null);
+    setPyintPreviewFeedback({ message: '', error: false });
+  }, [selectedEngine, rootDir, numToProcess]);
+
   const handleParamChange = useCallback((name, value) => {
     setEngineExtraParams(current => ({
       ...current,
@@ -391,10 +491,47 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }));
   }, []);
 
+  const handlePreviewPyint = useCallback(async () => {
+    if (!rootDir.trim()) {
+      setPyintPreview(null);
+      setPyintPreviewFeedback({ message: '请先输入根目录。', error: true });
+      return;
+    }
+
+    setPyintPreviewLoading(true);
+    setPyintPreviewFeedback({ message: '', error: false });
+    try {
+      const data = await previewPyintInputAssets({
+        root_dir: rootDir.trim(),
+        num_to_process: Number(numToProcess) || 0,
+      });
+      setPyintPreview(data);
+      const taskCount = Number(data?.selected_task_count || data?.task_count || 0);
+      const orbitMissingCount = Number(data?.orbits?.missing_task_count || 0);
+      const detail = data?.allow_submit
+        ? `预检完成，可提交 ${taskCount} 个任务。`
+        : `预检完成，存在阻塞项；涉及 ${orbitMissingCount} 个轨道未齐全任务。`;
+      setPyintPreviewFeedback({ message: detail, error: !data?.allow_submit });
+    } catch (err) {
+      setPyintPreview(null);
+      setPyintPreviewFeedback({
+        message: `预检失败：${err?.response?.data?.detail || err.message}`,
+        error: true,
+      });
+    } finally {
+      setPyintPreviewLoading(false);
+    }
+  }, [numToProcess, rootDir]);
+
   const handleSubmit = async () => {
     if (!rootDir.trim()) {
       setSubmitError(true);
       setSubmitMsg('请输入根目录。');
+      return;
+    }
+    if (pyintPreviewBlocksSubmit) {
+      setSubmitError(true);
+      setSubmitMsg('PyINT 输入资产预检未通过，请先修复阻塞项。');
       return;
     }
 
@@ -434,10 +571,10 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   };
 
-  const isSubmitDisabled = readOnly || submitting || !currentEngineObj?.available;
+  const isSubmitDisabled = readOnly || submitting || !currentEngineObj?.available || pyintPreviewBlocksSubmit;
 
   return (
-    <div style={{ padding: '16px', maxWidth: 960 }}>
+    <div style={{ padding: '16px 0', width: '100%' }}>
       {logModal.open && (
         <div
           style={{
@@ -585,17 +722,27 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           </div>
           <div style={{ minWidth: 140 }}>
             <label style={{ fontSize: 12, color: '#64748b', display: 'block', marginBottom: 4 }}>
-              超时时间（秒，可选）
+              超时时间（秒）
             </label>
             <input
               type="number"
               min={60}
               value={timeoutSec}
               onChange={event => setTimeoutSec(event.target.value)}
-              placeholder="默认"
+              placeholder={currentDefaultTimeoutSec > 0 ? `默认 ${currentDefaultTimeoutSec}` : '默认'}
               disabled={readOnly}
               style={{ width: 140, padding: '5px 8px', borderRadius: 4, border: '1px solid #e2e8f0', fontSize: 13 }}
             />
+            {selectedEngine === 'isce2' && currentDefaultTimeoutSec > 0 && (
+              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
+                ISCE2 默认按单对任务使用 {currentDefaultTimeoutSec} 秒；批量目录会串行逐对套用该超时。
+              </div>
+            )}
+            {selectedEngine === 'pyint' && currentDefaultTimeoutSec > 0 && (
+              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
+                PyINT 默认按单对任务使用 {currentDefaultTimeoutSec} 秒；当前会逐对串行创建工作区并运行外部 PyINT / Gamma 流程。
+              </div>
+            )}
           </div>
         </div>
 
@@ -622,7 +769,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                 borderRadius: 6,
               }}
             >
-              这些参数主要影响目标网格大小、精裁剪范围、地理编码范围和位移结果掩膜。建议先使用默认值，通常优先只调整目标网格大小；只有在边缘被裁切、时间窗异常或噪声较多时，再继续调整其他参数。
+              {currentParamHelpText}
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
               {Object.entries(currentParamSchema).map(([name, schema]) => (
@@ -636,6 +783,185 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                 />
               ))}
             </div>
+          </div>
+        )}
+
+        {selectedEngine === 'pyint' && (
+          <div
+            style={{
+              marginBottom: 10,
+              padding: '10px 12px',
+              background: '#f8fafc',
+              borderRadius: 6,
+              border: '1px solid #e2e8f0',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
+              <div>
+                <div style={{ fontSize: 12, color: '#0f172a', fontWeight: 600 }}>PyINT 输入资产预检</div>
+                <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
+                  提交前检查 Task_* 结构、DEM 策略和 LT-1 轨道是否齐备。即使不手动预检，后端提交时也会做同样校验。
+                </div>
+              </div>
+              <button
+                onClick={handlePreviewPyint}
+                disabled={readOnly || pyintPreviewLoading || !rootDir.trim()}
+                style={{
+                  fontSize: 12,
+                  padding: '5px 12px',
+                  borderRadius: 6,
+                  border: '1px solid #cbd5e1',
+                  cursor: readOnly || pyintPreviewLoading || !rootDir.trim() ? 'not-allowed' : 'pointer',
+                  background: '#fff',
+                  color: '#0f172a',
+                }}
+              >
+                {pyintPreviewLoading ? '预检中...' : '预检输入资产'}
+              </button>
+            </div>
+
+            {pyintPreviewFeedback.message && (
+              <div
+                style={{
+                  marginBottom: pyintPreview ? 10 : 0,
+                  padding: '8px 10px',
+                  borderRadius: 6,
+                  border: `1px solid ${pyintPreviewFeedback.error ? '#fecaca' : '#bbf7d0'}`,
+                  background: pyintPreviewFeedback.error ? '#fef2f2' : '#f0fdf4',
+                  color: pyintPreviewFeedback.error ? '#b91c1c' : '#15803d',
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                }}
+              >
+                {pyintPreviewFeedback.message}
+              </div>
+            )}
+
+            {!pyintPreview && !pyintPreviewLoading && (
+              <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                尚未执行预检。建议在首次处理新批次前先预检一次。
+              </div>
+            )}
+
+            {pyintPreview && (
+              <>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+                    gap: 8,
+                    marginBottom: 10,
+                  }}
+                >
+                  {[
+                    { label: '任务数', value: pyintPreview.selected_task_count ?? pyintPreview.task_count ?? 0, color: '#0f172a' },
+                  { label: 'DEM 策略', value: formatPyintDemMode(pyintPreview?.dem?.mode), color: '#1d4ed8' },
+                  { label: '轨道策略', value: formatPyintOrbitPolicy(pyintPreview?.orbits?.policy), color: '#7c3aed' },
+                  {
+                    label: '精轨桥接',
+                    value: pyintPreview?.precise_orbit_bridge?.enabled
+                      ? formatPyintPreciseOrbitMode(pyintPreview?.precise_orbit_bridge?.mode)
+                      : '关闭',
+                    color: pyintPreview?.precise_orbit_bridge?.enabled ? '#0f766e' : '#64748b',
+                  },
+                  { label: '可提交', value: pyintPreview.allow_submit ? '是' : '否', color: pyintPreview.allow_submit ? '#15803d' : '#b91c1c' },
+                  { label: '缺轨道任务', value: pyintPreview?.orbits?.missing_task_count ?? 0, color: (pyintPreview?.orbits?.missing_task_count || 0) > 0 ? '#b91c1c' : '#475569' },
+                  { label: '无效目录', value: pyintPreview?.invalid_candidates?.length ?? 0, color: (pyintPreview?.invalid_candidates?.length || 0) > 0 ? '#c2410c' : '#475569' },
+                ].map(item => (
+                    <div
+                      key={item.label}
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: 6,
+                        border: '1px solid #e2e8f0',
+                        background: '#fff',
+                      }}
+                    >
+                      <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>{item.label}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: item.color, wordBreak: 'break-word' }}>{item.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                    gap: 8,
+                    marginBottom: 10,
+                  }}
+                >
+                  <PreviewIssueList title="阻塞项" items={pyintPreview.blockers || []} tone="error" />
+                  <PreviewIssueList title="警告" items={pyintPreview.warnings || []} tone="warning" />
+                </div>
+
+                <div style={{ fontSize: 12, color: '#475569', marginBottom: 6 }}>任务级预检结果</div>
+                <div
+                  style={{
+                    border: '1px solid #e2e8f0',
+                    borderRadius: 6,
+                    overflowX: 'auto',
+                    overflowY: 'hidden',
+                    background: '#fff',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'minmax(180px, 1.6fr) minmax(70px, 0.8fr) minmax(220px, 1.5fr) minmax(70px, 0.7fr)',
+                      minWidth: 560,
+                      gap: 0,
+                      background: '#f8fafc',
+                      borderBottom: '1px solid #e2e8f0',
+                    }}
+                  >
+                    {['任务', '源文件', '轨道解析', '提交'].map(header => (
+                      <div key={header} style={{ padding: '8px 10px', fontSize: 11, color: '#64748b', fontWeight: 600 }}>
+                        {header}
+                      </div>
+                    ))}
+                  </div>
+                  {(pyintPreview.tasks || []).map(task => {
+                    const masterOrbit = task?.orbit_resolution?.master;
+                    const slaveOrbit = task?.orbit_resolution?.slave;
+                    return (
+                      <div
+                        key={task.task_dir}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: 'minmax(180px, 1.6fr) minmax(70px, 0.8fr) minmax(220px, 1.5fr) minmax(70px, 0.7fr)',
+                          minWidth: 560,
+                          borderBottom: '1px solid #f1f5f9',
+                        }}
+                      >
+                        <div style={{ padding: '8px 10px', minWidth: 0 }}>
+                          <div style={{ fontSize: 12, color: '#0f172a', fontWeight: 600 }}>{task.task_alias || task.task_name}</div>
+                          <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
+                            {task.master_date || '-'} / {task.slave_date || '-'}
+                          </div>
+                        </div>
+                        <div style={{ padding: '8px 10px', fontSize: 11, color: '#334155' }}>
+                          M {task?.archive_counts?.master ?? 0}
+                          <br />
+                          S {task?.archive_counts?.slave ?? 0}
+                        </div>
+                        <div style={{ padding: '8px 10px', fontSize: 11, lineHeight: 1.5 }}>
+                          <div style={{ color: masterOrbit?.resolved ? '#15803d' : '#b91c1c' }}>
+                            M {masterOrbit?.resolved ? `${masterOrbit.satellite}/${masterOrbit.date}` : '缺失'}
+                          </div>
+                          <div style={{ color: slaveOrbit?.resolved ? '#15803d' : '#b91c1c' }}>
+                            S {slaveOrbit?.resolved ? `${slaveOrbit.satellite}/${slaveOrbit.date}` : '缺失'}
+                          </div>
+                        </div>
+                        <div style={{ padding: '8px 10px', fontSize: 11, fontWeight: 600, color: task.allow_submit ? '#15803d' : '#b91c1c' }}>
+                          {task.allow_submit ? '可提交' : '阻塞'}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </div>
         )}
 

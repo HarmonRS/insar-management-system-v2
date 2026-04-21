@@ -27,7 +27,7 @@ function PsStackModal({
     return (
         <div className="modal-overlay visible">
             <div className="modal-content">
-                <h3>准备PS时序数据栈</h3>
+                <h3>准备时序InSAR候选栈</h3>
                 <form onSubmit={onSubmit}>
                     <div className="form-group">
                         <label>研究区域来源:</label>

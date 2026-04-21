@@ -8,14 +8,19 @@ import ResultExportModal from '../components/ResultExportModal';
 import { PAGE_SIZE_OPTIONS } from '../config/appConstants';
 import { getPageHintText } from '../utils/appUiHelpers';
 import {
+    DINSAR_ENGINE_ALL,
+    buildDinsarEngineOptions,
+    getDinsarEngineMeta,
+} from '../utils/dinsarEngines';
+import {
     DINSAR_STRATEGY_ALL,
     buildDinsarStrategyOptions,
     filterDinsarResults,
 } from '../utils/dinsarResultFilters';
 
 const DINSAR_ROW_HEIGHT = {
-    compact: 110,
-    expanded: 138,
+    compact: 136,
+    expanded: 166,
 };
 
 export default function DinsarResultPanel({
@@ -37,9 +42,11 @@ export default function DinsarResultPanel({
         dinsarResults,
         dinsarPagination,
         scoreFilter,
+        engineFilter,
         traceSearch,
         strategyFilter,
         dinsarPageInput,
+        setEngineFilter,
         setTraceSearch,
         setStrategyFilter,
         setDinsarPageInput,
@@ -48,9 +55,11 @@ export default function DinsarResultPanel({
         dinsarResults: state.dinsarResults,
         dinsarPagination: state.dinsarPagination,
         scoreFilter: state.scoreFilter,
+        engineFilter: state.engineFilter,
         traceSearch: state.traceSearch,
         strategyFilter: state.strategyFilter,
         dinsarPageInput: state.dinsarPageInput,
+        setEngineFilter: state.setEngineFilter,
         setTraceSearch: state.setTraceSearch,
         setStrategyFilter: state.setStrategyFilter,
         setDinsarPageInput: state.setDinsarPageInput,
@@ -73,6 +82,38 @@ export default function DinsarResultPanel({
         () => buildDinsarStrategyOptions(dinsarResults),
         [dinsarResults]
     );
+    const engineOptions = useMemo(
+        () => buildDinsarEngineOptions(dinsarResults),
+        [dinsarResults]
+    );
+    const engineFilterOptions = useMemo(
+        () => [
+            {
+                value: DINSAR_ENGINE_ALL,
+                label: language === 'en' ? 'All engines' : '全部引擎',
+            },
+            ...engineOptions.map((option) => ({
+                value: option.value,
+                label: option.label,
+            })),
+        ],
+        [engineOptions, language]
+    );
+    const filteredEngineMeta = useMemo(
+        () => (engineFilter === DINSAR_ENGINE_ALL ? null : getDinsarEngineMeta(engineFilter)),
+        [engineFilter]
+    );
+    const engineCounts = useMemo(() => {
+        const counts = new Map();
+        dinsarResults.forEach((result) => {
+            const meta = getDinsarEngineMeta(result?.engine_code);
+            counts.set(meta.code, (counts.get(meta.code) || 0) + 1);
+        });
+        return engineOptions.map((option) => ({
+            ...option,
+            count: counts.get(option.code) || 0,
+        }));
+    }, [dinsarResults, engineOptions]);
 
     useEffect(() => {
         if (strategyFilter === DINSAR_STRATEGY_ALL) {
@@ -83,17 +124,31 @@ export default function DinsarResultPanel({
         }
     }, [setStrategyFilter, strategyFilter, strategyOptions]);
 
+    useEffect(() => {
+        if (engineFilter === DINSAR_ENGINE_ALL) {
+            return;
+        }
+        if (!engineOptions.some((option) => option.value === engineFilter)) {
+            setEngineFilter(DINSAR_ENGINE_ALL);
+        }
+    }, [engineFilter, engineOptions, setEngineFilter]);
+
     const filteredResults = useMemo(
         () => filterDinsarResults(dinsarResults, {
             scoreFilter,
+            engineFilter,
             strategyFilter,
             traceSearch,
             focusedHazardPoint,
         }),
-        [dinsarResults, focusedHazardPoint, scoreFilter, strategyFilter, traceSearch]
+        [dinsarResults, engineFilter, focusedHazardPoint, scoreFilter, strategyFilter, traceSearch]
     );
 
+    const scorePercent = Math.round(Number(scoreFilter || 0) * 100);
     const virtualRowHeight = showDates ? DINSAR_ROW_HEIGHT.expanded : DINSAR_ROW_HEIGHT.compact;
+    const pageSummaryText = language === 'en'
+        ? `Page ${dinsarCurrentPage}/${dinsarTotalPages} · ${dinsarPagination.total} total`
+        : `第 ${dinsarCurrentPage}/${dinsarTotalPages} 页 · 共 ${dinsarPagination.total} 条`;
 
     return (
         <div className="panel-content">

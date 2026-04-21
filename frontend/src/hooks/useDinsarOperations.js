@@ -11,6 +11,8 @@ import { normalizePagePayload } from '../utils/appHelpers';
 import { normalizeTaskStatus } from '../utils/appUiHelpers';
 import { DEFAULT_LIST_PAGE_SIZE } from '../config/appConstants';
 
+const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES']);
+
 export default function useDinsarOperations({
     onCleanupDinsarLayers,
     fetchRadarImagingDates,
@@ -24,7 +26,7 @@ export default function useDinsarOperations({
         setAiStatus, setActiveAiReport,
     } = useDinsarStore();
     const { setHazardPoints } = useHazardStore();
-    const { setPendingTaskIds, setIsGlobalLocked } = useTaskStore();
+    const { setPendingTaskIds, setNonBlockingTaskIds, setIsGlobalLocked } = useTaskStore();
     const { currentUser } = useAuthStore();
     const {
         hasRadarSearched, radarPagination,
@@ -120,17 +122,49 @@ export default function useDinsarOperations({
         }
     };
 
-    const handleTaskStart = (taskId, message) => {
+    const handleTaskStart = (taskId, message, options = {}) => {
+        const taskType = String(options?.taskType || '').trim().toUpperCase();
+        const isNonBlocking = !!options?.nonBlocking || NON_BLOCKING_TASK_TYPES.has(taskType);
         if (taskId) {
             setPendingTaskIds(prev => [...prev, taskId]);
+            if (isNonBlocking) {
+                setNonBlockingTaskIds(prev => [...new Set([...prev, taskId])]);
+            }
         }
-        setIsGlobalLocked(true);
+        if (!isNonBlocking) {
+            setIsGlobalLocked(true);
+        }
         if (message) addLog('info', message);
     };
 
     const handleTaskCompletion = (taskInfo) => {
         console.log("收到任务完成通知:", taskInfo);
         const taskStatus = normalizeTaskStatus(taskInfo?.status);
+        const syncRadarViewsAfterUnpack = async () => {
+            try {
+                await Promise.all([
+                    fetchRadarImagingDates(),
+                    fetchRadarSearchOptions(),
+                ]);
+                if (hasRadarSearched) {
+                    const requestId = radarSearchRequestSeqRef.current + 1;
+                    radarSearchRequestSeqRef.current = requestId;
+                    await fetchAllData({
+                        limit: radarPagination.limit,
+                        offset: radarPagination.offset,
+                        criteria: radarSearchApplied,
+                        aoiMode: radarSearchAppliedAoiMode,
+                        regionTreeId: radarSearchAppliedRegionTreeId,
+                        aoiToken: radarSearchAoiToken,
+                        files: null,
+                        requestId,
+                    });
+                }
+            } catch (error) {
+                console.error('解包完成后刷新 LT-1 视图失败:', error);
+                addLog('warn', 'LT-1 解包已完成，但刷新数据视图时发生错误，请手动刷新。');
+            }
+        };
 
         if (taskInfo.task_type === 'AI_ANALYZE') {
             if (taskInfo.message) {
@@ -186,6 +220,14 @@ export default function useDinsarOperations({
                 fetchHazardPoints();
             } else if (taskStatus === 'FAILED') {
                 addLog('error', `灾害点同步失败: ${taskInfo.message || '未知错误'}`);
+            }
+        } else if (taskInfo.task_type === 'UNPACK_ARCHIVES') {
+            if (taskStatus === 'COMPLETED') {
+                addLog('success', taskInfo.message || 'LT-1 解包完成。');
+                addLog('info', '正在同步 LT-1 解包后的数据视图...');
+                void syncRadarViewsAfterUnpack();
+            } else if (taskStatus === 'FAILED') {
+                addLog('error', `LT-1 解包失败: ${taskInfo.message || '未知错误'}`);
             }
         }
     };

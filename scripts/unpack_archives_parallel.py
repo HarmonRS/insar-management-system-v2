@@ -4,6 +4,7 @@ import os
 import shutil
 import tarfile
 import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 
@@ -84,6 +85,14 @@ def _default_scan_workers(source_dirs):
 def _default_extract_workers():
     cpu = os.cpu_count() or 4
     return max(1, min(cpu, 8))
+
+
+def _format_limit_reason(reason, limit_value):
+    if reason == "max_files_per_run":
+        return f"reached max files per run: {limit_value}"
+    if reason == "max_runtime_minutes":
+        return f"reached max runtime: {limit_value} minutes"
+    return str(reason or "stopped")
 
 
 def get_disk_usage(path):
@@ -528,7 +537,7 @@ def _configure_logging():
         logging.warning("failed to open activity log '%s': %s", ACTIVITY_LOG, file_handler_error)
 
 
-def run_unpack_job(env_path=None, log_callback=None, progress_callback=None):
+def run_unpack_job(env_path=None, log_callback=None, progress_callback=None, config_overrides=None):
     def _log(level, message, *args):
         logging.log(level, message, *args)
         if log_callback:
@@ -542,6 +551,7 @@ def run_unpack_job(env_path=None, log_callback=None, progress_callback=None):
     _configure_logging()
 
     env = load_env(env_path or ENV_PATH)
+    config_overrides = config_overrides if isinstance(config_overrides, dict) else {}
     source_dirs = parse_dirs(env.get("UNPACK_SOURCE_DIRS"))
     target_dirs = parse_dirs(
         env.get("INSAR_STORAGE_DIRS")
@@ -564,8 +574,25 @@ def run_unpack_job(env_path=None, log_callback=None, progress_callback=None):
         minimum=1,
         maximum=32,
     )
+    max_files_per_run = parse_int(
+        config_overrides.get("max_files_per_run", env.get("UNPACK_MAX_FILES_PER_RUN")),
+        default=0,
+        minimum=0,
+    )
+    max_runtime_minutes = parse_int(
+        config_overrides.get("max_runtime_minutes", env.get("UNPACK_MAX_RUNTIME_MINUTES")),
+        default=0,
+        minimum=0,
+    )
 
     _log(logging.INFO, "=== start unpack job ===")
+    if "max_files_per_run" in config_overrides or "max_runtime_minutes" in config_overrides:
+        _log(
+            logging.INFO,
+            "run overrides: max_files_per_run=%s, max_runtime_minutes=%s",
+            max_files_per_run,
+            max_runtime_minutes,
+        )
 
     if not source_dirs:
         _log(logging.INFO, "no UNPACK_SOURCE_DIRS configured, exit")
@@ -590,6 +617,7 @@ def run_unpack_job(env_path=None, log_callback=None, progress_callback=None):
 
     all_archives = find_archives(source_dirs, extensions, workers=scan_workers, log_fn=_log)
     files_to_process = [archive_path for archive_path in all_archives if archive_path not in processed_files]
+    total_pending_files = len(files_to_process)
 
     _log(
         logging.INFO,
@@ -609,16 +637,32 @@ def run_unpack_job(env_path=None, log_callback=None, progress_callback=None):
             "message": "nothing to do",
         }
 
+    if max_files_per_run > 0 and len(files_to_process) > max_files_per_run:
+        _log(
+            logging.INFO,
+            "apply UNPACK_MAX_FILES_PER_RUN=%s, this run will process the first %s pending archives",
+            max_files_per_run,
+            max_files_per_run,
+        )
+        files_to_process = files_to_process[:max_files_per_run]
+
     min_space_bytes = min_disk_gb * (1024 ** 3)
     reservation_manager = DiskReservationManager(min_space_bytes)
 
     total_files = len(files_to_process)
+    remaining_backlog_count = max(0, total_pending_files - total_files)
     processed_count = 0
     failed_count = 0
     skipped_count = 0
     completed_count = 0
     stop_reason = None
+    stop_reason_limit = None
     jobs = list(enumerate(files_to_process, start=1))
+    started_at = time.monotonic()
+    max_runtime_seconds = max_runtime_minutes * 60
+
+    def _runtime_limit_reached():
+        return max_runtime_seconds > 0 and (time.monotonic() - started_at) >= max_runtime_seconds
 
     _progress(0, f"processing 0/{total_files}")
 
@@ -688,6 +732,11 @@ def run_unpack_job(env_path=None, log_callback=None, progress_callback=None):
                 pct = int((completed_count / max(total_files, 1)) * 100)
                 _progress(pct, f"processed {completed_count}/{total_files}")
 
+            if not stop_reason and next_job_index < total_files and _runtime_limit_reached():
+                stop_reason_limit = max_runtime_minutes
+                stop_reason = _format_limit_reason("max_runtime_minutes", max_runtime_minutes)
+                _log(logging.INFO, "stop scheduling new archives: %s", stop_reason)
+
             while (
                 next_job_index < total_files
                 and len(active_futures) < extract_workers
@@ -712,15 +761,21 @@ def run_unpack_job(env_path=None, log_callback=None, progress_callback=None):
                 active_futures[future] = (archive_index, archive_path)
                 next_job_index += 1
 
+    if not stop_reason and remaining_backlog_count > 0 and max_files_per_run > 0:
+        stop_reason_limit = max_files_per_run
+        stop_reason = _format_limit_reason("max_files_per_run", max_files_per_run)
+
     if stop_reason:
-        remaining_count = max(0, total_files - completed_count)
+        remaining_count = remaining_backlog_count + max(0, total_files - completed_count)
         create_report(REPORT_FILE, stop_reason, processed_count, remaining_count)
         return {
             "processed": processed_count,
             "failed": failed_count,
             "skipped": skipped_count,
             "total": total_files,
-            "message": "insufficient free space",
+            "remaining": remaining_count,
+            "limit_value": stop_reason_limit,
+            "message": stop_reason,
         }
 
     if os.path.exists(REPORT_FILE):
@@ -732,6 +787,7 @@ def run_unpack_job(env_path=None, log_callback=None, progress_callback=None):
         "failed": failed_count,
         "skipped": skipped_count,
         "total": total_files,
+        "remaining": 0,
         "message": "completed",
     }
 

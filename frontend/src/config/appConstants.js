@@ -51,9 +51,54 @@ export const NATIONAL_BOUNDARY_GEOJSON_URL = buildTileServerUrl('/geojson/全国
 
 export const getBaseLayerConfig = key => BASE_LAYERS[key] || BASE_LAYERS[TILE_LAYER_DEFAULT_KEY];
 
+export const PRODUCTION_WORKSPACE_TAB = 'production_management';
+export const PRODUCTION_WORKSPACE_LEGACY_TABS = [
+  'dinsar_production',
+  'dinsar_products',
+  'ps_production',
+  'ps_products',
+];
+
+export const PRODUCTION_WORKSPACE_VIEWS = [
+  {
+    key: 'dinsar_runs',
+    label: 'D-InSAR 运行',
+    description: '运行任务编排、引擎切换与过程监控',
+  },
+  {
+    key: 'timeseries_runs',
+    label: '时序InSAR 运行',
+    description: '当前默认接入 SBAS 流程，后续可扩展 PS-InSAR / SBAS-InSAR',
+  },
+  {
+    key: 'dinsar_products',
+    label: 'D-InSAR 产物',
+    description: '结果提取、标准目录发布与产物编目',
+  },
+  {
+    key: 'timeseries_products',
+    label: '时序InSAR 产物',
+    description: '当前统一登记时序产物，后续兼容多类型时序成果',
+  },
+];
+
+export const PRODUCTION_WORKSPACE_ENTRY_TO_VIEW = Object.freeze({
+  [PRODUCTION_WORKSPACE_TAB]: 'dinsar_runs',
+  dinsar_production: 'dinsar_runs',
+  dinsar_products: 'dinsar_products',
+  ps_production: 'timeseries_runs',
+  ps_products: 'timeseries_products',
+});
+
+export const PRODUCTION_WORKSPACE_ROUTE_TABS = new Set([
+  PRODUCTION_WORKSPACE_TAB,
+  ...PRODUCTION_WORKSPACE_LEGACY_TABS,
+]);
+
 export const LEFT_GROUP_LABELS = {
   data: '数据管理',
-  production: '生产规划',
+  production_planning: '生产规划',
+  production_management: '生产管理',
   insar_analysis: 'InSAR形变分析',
   ai_analysis: 'AI分析',
   water: '水体监测',
@@ -61,7 +106,7 @@ export const LEFT_GROUP_LABELS = {
 };
 
 export const LEFT_GROUP_SECTIONS = {
-  production: [
+  production_planning: [
     {
       key: 'planning',
       label: '规划编组',
@@ -72,16 +117,6 @@ export const LEFT_GROUP_SECTIONS = {
       label: '数据分发',
       tabs: ['copier'],
     },
-    {
-      key: 'dinsar',
-      label: 'D-InSAR',
-      tabs: ['dinsar_production', 'dinsar_products'],
-    },
-    {
-      key: 'psinsar',
-      label: 'PS-InSAR',
-      tabs: ['ps_production', 'ps_products'],
-    },
   ],
   insar_analysis: [
     {
@@ -91,7 +126,7 @@ export const LEFT_GROUP_SECTIONS = {
     },
     {
       key: 'psinsar',
-      label: 'PS-InSAR',
+      label: '时序InSAR',
       tabs: ['psinsar_results', 'psinsar_analysis'],
     },
   ],
@@ -111,7 +146,8 @@ export const LEFT_GROUP_SECTIONS = {
 
 export const LEFT_GROUP_TABS = {
   data: ['ingest', 'data', 'hazard'],
-  production: LEFT_GROUP_SECTIONS.production.flatMap(section => section.tabs),
+  production_planning: LEFT_GROUP_SECTIONS.production_planning.flatMap(section => section.tabs),
+  production_management: [PRODUCTION_WORKSPACE_TAB],
   insar_analysis: LEFT_GROUP_SECTIONS.insar_analysis.flatMap(section => section.tabs),
   ai_analysis: LEFT_GROUP_SECTIONS.ai_analysis.flatMap(section => section.tabs),
   water: ['water'],
@@ -125,6 +161,10 @@ export const LEFT_TAB_GROUP = Object.entries(LEFT_GROUP_TABS).reduce((acc, [grou
   return acc;
 }, {});
 
+PRODUCTION_WORKSPACE_LEGACY_TABS.forEach(tab => {
+  LEFT_TAB_GROUP[tab] = 'production_management';
+});
+
 export const LEFT_TAB_SECTION = Object.entries(LEFT_GROUP_SECTIONS).reduce((acc, [, sections]) => {
   sections.forEach(section => {
     section.tabs.forEach(tab => {
@@ -134,6 +174,10 @@ export const LEFT_TAB_SECTION = Object.entries(LEFT_GROUP_SECTIONS).reduce((acc,
   return acc;
 }, {});
 
+export const FULL_WIDTH_LEFT_TABS = new Set([
+  ...PRODUCTION_WORKSPACE_ROUTE_TABS,
+]);
+
 export const ADMIN_ONLY_TABS = new Set([
   'ingest',
   'pairing',
@@ -141,10 +185,8 @@ export const ADMIN_ONLY_TABS = new Set([
   'ps_results',
   'batches',
   'copier',
-  'dinsar_production',
-  'dinsar_products',
-  'ps_production',
-  'ps_products',
+  PRODUCTION_WORKSPACE_TAB,
+  ...PRODUCTION_WORKSPACE_LEGACY_TABS,
   'water',
   'users',
   'audit',

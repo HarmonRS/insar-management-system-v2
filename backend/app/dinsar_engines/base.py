@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 @dataclass
@@ -38,6 +38,7 @@ class RunRequest:
     num_to_process: int = 0
     timeout_seconds: Optional[int] = None
     extra: Dict[str, Any] = field(default_factory=dict)
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
 @dataclass
@@ -80,12 +81,19 @@ class DinsarEngine(ABC):
     def run(self, request: RunRequest) -> RunResult:
         """Executes a production run synchronously."""
 
+    @property
+    def default_timeout_seconds(self) -> Optional[int]:
+        """Returns the engine's default timeout when the caller leaves it empty."""
+
+        return None
+
     def to_dict(self) -> Dict[str, Any]:
         """Serializes the engine definition for API responses."""
 
         return {
             "engine_code": self.engine_code,
             "engine_label": self.engine_label,
+            "default_timeout_seconds": self.default_timeout_seconds,
             "profiles": [
                 {
                     "code": profile.code,

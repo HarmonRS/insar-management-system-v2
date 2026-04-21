@@ -13,6 +13,7 @@ from ..config import read_int_env, settings
 from ..models import AuthUserORM
 from ..services.dinsar_production_service import dinsar_production_service
 from ..services.job_queue_service import job_queue_service
+from ..services.pyint_input_assets_service import build_pyint_input_preview, summarize_preview_blockers
 from ..services.task_service import task_service
 
 router = APIRouter(prefix="/dinsar-production", tags=["dinsar-production"])
@@ -29,11 +30,17 @@ ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
     minimum=1,
     maximum=10,
 )
+PYINT_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
+    "PYINT_PRODUCTION_JOB_MAX_ATTEMPTS",
+    1,
+    minimum=1,
+    maximum=10,
+)
 
 
 class RunJobRequest(BaseModel):
-    engine_code: str = Field(..., description="Engine code: sarscape / isce2 / landsar")
-    profile: str = Field(..., description="Engine profile, for example custom6 / lt1_stripmap")
+    engine_code: str = Field(..., description="Engine code: sarscape / isce2 / pyint / landsar")
+    profile: str = Field(..., description="Engine profile, for example custom6 / lt1_stripmap / lt1_gamma_dinsar")
     root_dir: str = Field(..., description="Windows root directory")
     num_to_process: int = Field(default=0, ge=0, description="How many tasks to process; 0 means all")
     timeout_seconds: Optional[int] = Field(default=None, ge=60)
@@ -43,6 +50,11 @@ class RunJobRequest(BaseModel):
 class WslCheckRequest(BaseModel):
     distro: Optional[str] = Field(default=None, description="Optional WSL distro override")
     smoke_test: bool = Field(default=False)
+
+
+class PreviewInputAssetsRequest(BaseModel):
+    root_dir: str = Field(..., description="Windows root directory or a single Task_* directory")
+    num_to_process: int = Field(default=0, ge=0, description="How many tasks to preview; 0 means all")
 
 
 def _get_registry():
@@ -116,6 +128,22 @@ async def run_wsl_check(
     return report.to_dict()
 
 
+@router.post("/engines/pyint/preview-input-assets")
+async def preview_pyint_input_assets(
+    req: PreviewInputAssetsRequest,
+    current_user: AuthUserORM = Depends(_get_current_user),
+):
+    try:
+        preview = await asyncio.to_thread(
+            build_pyint_input_preview,
+            req.root_dir,
+            req.num_to_process,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return preview
+
+
 @router.post("/run")
 async def submit_run(
     req: RunJobRequest,
@@ -144,7 +172,7 @@ async def submit_run(
         )
 
     validation_summary = None
-    if req.engine_code == "isce2" and hasattr(engine, "validate_root_dir"):
+    if hasattr(engine, "validate_root_dir"):
         try:
             validation_summary = await asyncio.to_thread(
                 engine.validate_root_dir,
@@ -154,33 +182,69 @@ async def submit_run(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    effective_timeout_seconds = req.timeout_seconds
+    if effective_timeout_seconds is None:
+        engine_default_timeout = getattr(engine, "default_timeout_seconds", None)
+        if engine_default_timeout:
+            effective_timeout_seconds = int(engine_default_timeout)
+
+    pyint_preview = None
+    if req.engine_code == "pyint":
+        try:
+            pyint_preview = await asyncio.to_thread(
+                build_pyint_input_preview,
+                req.root_dir,
+                req.num_to_process,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not pyint_preview.get("allow_submit"):
+            detail = summarize_preview_blockers(pyint_preview)
+            raise HTTPException(
+                status_code=400,
+                detail=f"PyINT 输入资产预检未通过: {detail or '请先修复阻塞项。'}",
+            )
+        if not pyint_preview.get("allow_submit"):
+            detail = summarize_preview_blockers(pyint_preview)
+            raise HTTPException(
+                status_code=400,
+                detail=f"PyINT 输入资产预检未通过: {detail or '请先修复阻塞项。'}",
+            )
+
     payload = {
         "engine_code": req.engine_code,
         "profile": req.profile,
         "root_dir": req.root_dir,
         "num_to_process": req.num_to_process,
-        "timeout_seconds": req.timeout_seconds,
+        "timeout_seconds": effective_timeout_seconds,
         "extra": dict(req.extra or {}),
     }
 
-    from ..services.job_handlers import JOB_TYPE_IDL_RUN_DINSAR, JOB_TYPE_ISCE2_RUN
+    from ..services.job_handlers import JOB_TYPE_IDL_RUN_DINSAR, JOB_TYPE_ISCE2_RUN, JOB_TYPE_PYINT_RUN
 
     if req.engine_code == "sarscape":
         payload["mode"] = "custom" if req.profile == "custom6" else "metatask"
         job_type = JOB_TYPE_IDL_RUN_DINSAR
         max_attempts = DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS
-    elif req.engine_code == "isce2":
+    elif req.engine_code in {"isce2", "pyint"}:
         if hasattr(engine, "normalize_extra"):
             try:
                 payload["extra"] = engine.normalize_extra(payload["extra"])
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        job_type = JOB_TYPE_ISCE2_RUN
-        max_attempts = ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS
+        if req.engine_code == "isce2":
+            job_type = JOB_TYPE_ISCE2_RUN
+            max_attempts = ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS
+        else:
+            job_type = JOB_TYPE_PYINT_RUN
+            max_attempts = PYINT_PRODUCTION_JOB_MAX_ATTEMPTS
         if validation_summary is not None:
+            validated_task_count = validation_summary.get("task_count", 0)
+            if pyint_preview is not None:
+                validated_task_count = int(pyint_preview.get("selected_task_count", validated_task_count) or 0)
             payload["extra"].update(
                 {
-                    "__validated_task_count": validation_summary.get("task_count", 0),
+                    "__validated_task_count": validated_task_count,
                     "__validated_mode": validation_summary.get("mode", ""),
                 }
             )

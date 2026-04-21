@@ -18,3 +18,6 @@ export const submitRun = (payload) =>
 // 运行历史
 export const listRuns = (limit = 20) =>
   apiClient.get(`/dinsar-production/runs?limit=${encodeURIComponent(limit)}`).then(r => r.data);
+
+export const previewPyintInputAssets = (payload) =>
+  apiClient.post('/dinsar-production/engines/pyint/preview-input-assets', payload).then(r => r.data);

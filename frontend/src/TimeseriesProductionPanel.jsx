@@ -154,7 +154,7 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
 
   const handleSubmit = async () => {
     if (!selectedBatchId) {
-      setMessage('请先选择一个 PS 批次。');
+      setMessage('请先选择一个时序批次。');
       return;
     }
     setSubmitting(true);
@@ -182,9 +182,9 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
   const workflowSteps = selectedRunDetail?.workflow?.steps || [];
 
   return (
-    <div style={{ padding: '16px', maxWidth: 1080 }}>
+    <div style={{ padding: '16px 0', width: '100%' }}>
       <div style={card}>
-        <strong style={{ fontSize: 14, display: 'block', marginBottom: 10 }}>SBAS 生产入口</strong>
+        <strong style={{ fontSize: 14, display: 'block', marginBottom: 10 }}>时序InSAR 运行入口</strong>
         <div
           style={{
             fontSize: 12,
@@ -196,18 +196,18 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
             borderRadius: 6,
           }}
         >
-          当前系统阶段已接入完整八步链路：prepare、stack_prep_initial、materialize、stack_prep_refresh、
-          run_isce2_stack、run_mintpy_sbas、export_publish_bundle、register_psinsar_product。
-          提交后系统会依次生成选栈 manifest、物化 LT-1 SLC、执行 ISCE2 stack、运行 MintPy SBAS、
-          导出 publish bundle，并把结果注册进 PS-InSAR catalog。
+          当前接入实现为 SBAS。现阶段已连通完整八步链路：prepare、stack_prep_initial、materialize、
+          stack_prep_refresh、run_isce2_stack、run_mintpy_sbas、export_publish_bundle、
+          register_psinsar_product。提交后系统会依次生成选栈 manifest、物化 LT-1 SLC、执行 ISCE2
+          stack、运行 MintPy SBAS、导出 publish bundle，并把结果注册进时序InSAR catalog。
         </div>
       </div>
 
       <div style={card}>
         <strong style={{ fontSize: 14, display: 'block', marginBottom: 10 }}>新建运行</strong>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
           <div>
-            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>PS 批次</div>
+            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>时序批次</div>
             <select
               value={selectedBatchId}
               onChange={event => setSelectedBatchId(event.target.value)}
@@ -298,7 +298,7 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
               cursor: readOnly ? 'not-allowed' : 'pointer',
             }}
           >
-            {submitting ? '提交中...' : '提交 SBAS 运行'}
+            {submitting ? '提交中...' : '提交时序运行（SBAS）'}
           </button>
           {message && (
             <span style={{ fontSize: 12, color: message.includes('失败') ? '#dc2626' : '#166534' }}>
@@ -321,13 +321,13 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
           </button>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 360px) 1fr', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
           <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, overflow: 'hidden' }}>
             <div style={{ padding: '8px 10px', background: '#f8fafc', fontSize: 12, fontWeight: 600 }}>
               运行列表 ({runs.length})
             </div>
             {runs.length === 0 ? (
-              <div style={{ padding: '12px', fontSize: 12, color: '#94a3b8' }}>当前暂无 SBAS 运行记录。</div>
+              <div style={{ padding: '12px', fontSize: 12, color: '#94a3b8' }}>当前暂无时序InSAR运行记录。</div>
             ) : (
               <div style={{ maxHeight: 420, overflowY: 'auto' }}>
                 {runs.map(item => (

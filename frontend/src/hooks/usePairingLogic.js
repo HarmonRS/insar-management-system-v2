@@ -59,13 +59,13 @@ export default function usePairingLogic({
                 name: `PS_${direction}_${new Date().toISOString().slice(0, 10)}`
             });
             const batchId = response.data?.batch_id || '';
-            addLog('success', `已创建 PS 批次: ${batchId || direction}`);
+            addLog('success', `已创建时序批次: ${batchId || direction}`);
             if (focusAfterCreate && batchId) {
                 await focusBatchAfterCreate('ps', batchId);
             }
         } catch (error) {
             const errorMessage = error.response?.data?.detail || error.message || '未知错误';
-            addLog('error', `PS 批次创建失败: ${errorMessage}`);
+            addLog('error', `时序批次创建失败: ${errorMessage}`);
         }
     };
 
@@ -97,7 +97,7 @@ export default function usePairingLogic({
         setPsResults(null);
         onClearAoiLayer();
         setAoiLayer(null);
-        addLog('info', 'PS-InSAR 结果已清空。');
+        addLog('info', '时序InSAR 候选栈结果已清空。');
     };
 
     const findPairs = async (e, externalRequireOrbitRef) => {
@@ -210,7 +210,7 @@ export default function usePairingLogic({
 
         setShowPsModal(false);
         setIsLoading(true);
-        addLog('info', '开始准备PS时序数据栈...');
+        addLog('info', '开始准备时序InSAR候选栈...');
 
         const formData = new FormData();
         for (const key in psParams) {
@@ -258,7 +258,7 @@ export default function usePairingLogic({
             setPsResults(processedResults);
 
             if (Object.keys(processedResults).length > 0) {
-                addLog('success', `成功找到 ${Object.keys(processedResults).length} 个PS时序栈。`);
+                addLog('success', `成功找到 ${Object.keys(processedResults).length} 个时序InSAR候选栈。`);
                 setLeftPanelTab('ps_results');
                 for (const [direction, stack] of Object.entries(processedResults)) {
                     await createPsBatch(direction, stack, { focusAfterCreate: false });
@@ -268,9 +268,9 @@ export default function usePairingLogic({
                 setLeftPanelTab('ps_results');
             }
         } catch (error) {
-            console.error("PS时序准备失败:", error);
+            console.error('时序InSAR候选栈准备失败:', error);
             const errorMessage = error.response?.data?.detail || error.message || '未知错误';
-            addLog('error', `PS时序准备失败: ${errorMessage}`);
+            addLog('error', `时序InSAR候选栈准备失败: ${errorMessage}`);
         } finally {
             setIsLoading(false);
             setPsFiles(null);

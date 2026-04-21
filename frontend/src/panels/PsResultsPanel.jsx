@@ -18,7 +18,7 @@ function PsResultsPanel({
     return (
         <div className="panel-content panel-scroll-shell">
             {psStacks.length === 0 ? (
-                <p className="empty-state">未找到PS时序栈。</p>
+                <p className="empty-state">未找到时序InSAR候选栈。</p>
             ) : (
                 <>
                     <div className="list-toolbar">

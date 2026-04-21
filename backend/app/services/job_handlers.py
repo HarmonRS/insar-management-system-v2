@@ -74,6 +74,7 @@ JOB_TYPE_WATER_DETECT = "WATER_DETECT"
 JOB_TYPE_GF3_PROCESS = "GF3_PROCESS"
 JOB_TYPE_GF3_BATCH_PROCESS = "GF3_BATCH_PROCESS"
 JOB_TYPE_ISCE2_RUN = "ISCE2_RUN"
+JOB_TYPE_PYINT_RUN = "PYINT_RUN"
 JOB_TYPE_PUBLISH_DINSAR_PRODUCTS = "PUBLISH_DINSAR_PRODUCTS"
 JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
@@ -1878,8 +1879,13 @@ async def _handle_idl_run_dinsar(job: SystemJobORM) -> None:
         )
 
 
-async def _handle_isce2_run(job: SystemJobORM) -> None:
-    """ISCE2 生产任务 handler — 通过 WSL 执行 run_lt1_dinsar_pipeline.py。"""
+async def _handle_queued_engine_run(
+    job: SystemJobORM,
+    *,
+    engine_title: str,
+    fallback_timeout_seconds: int,
+) -> None:
+    """Run a queued D-InSAR engine task through the shared WSL execution path."""
     payload = job.payload or {}
     engine_code = payload.get("engine_code", "isce2")
     profile = payload.get("profile", "lt1_stripmap")
@@ -1887,23 +1893,51 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
     num_to_process = payload.get("num_to_process", 0)
     timeout_seconds = payload.get("timeout_seconds")
     extra = payload.get("extra", {})
+    selected_task_count = max(1, int(extra.get("__validated_task_count") or 0 or 1))
+    pair_timeout_seconds = int(timeout_seconds or fallback_timeout_seconds)
 
     await task_service.start_task(
         job.task_id,
-        message=f"[{engine_code}/{profile}] 启动 ISCE2 处理...",
+        message=f"[{engine_code}/{profile}] 启动 {engine_title} 处理...",
     )
     await task_service.add_log(
         job.task_id,
         "INFO",
-        f"ISCE2 job accepted. root_dir={root_dir}, profile={profile}, timeout={timeout_seconds or 21600}s, extra={extra}",
+        f"{engine_title} job accepted. root_dir={root_dir}, profile={profile}, timeout={pair_timeout_seconds}s, extra={extra}",
     )
-
+    await task_service.add_log(
+        job.task_id,
+        "INFO",
+        (
+            f"{engine_title} batch contains {selected_task_count} pair task(s). "
+            f"Pairs run sequentially and each pair uses timeout={pair_timeout_seconds}s."
+        ),
+    )
     from ..dinsar_engines.base import RunRequest
     from ..dinsar_engines import registry
 
     engine = registry.get_engine(engine_code)
     if not engine:
         raise RuntimeError(f"引擎 '{engine_code}' 未注册")
+
+    loop = asyncio.get_running_loop()
+    progress_queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
+    progress_state: Dict[str, Any] = {
+        "progress": 5,
+        "message": f"[{engine_code}/{profile}] Running in WSL...",
+        "pair_index": 0,
+        "pair_total": selected_task_count,
+        "pair_label": "",
+        "pair_started_monotonic": None,
+    }
+
+    def _emit_progress(event: Dict[str, Any]) -> None:
+        if not event:
+            return
+        try:
+            loop.call_soon_threadsafe(progress_queue.put_nowait, dict(event))
+        except RuntimeError:
+            return
 
     request = RunRequest(
         engine_code=engine_code,
@@ -1913,6 +1947,7 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
         num_to_process=num_to_process,
         timeout_seconds=timeout_seconds,
         extra=extra,
+        progress_callback=_emit_progress,
     )
 
     await task_service.update_task(
@@ -1921,18 +1956,119 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
         message=f"[{engine_code}/{profile}] 正在执行，请等待...",
     )
 
+    async def _consume_progress() -> None:
+        while True:
+            event = await progress_queue.get()
+            if event is None:
+                return
+
+            event_type = str(event.get("event") or "").strip().lower()
+            pair_total = max(1, int(event.get("pair_total") or progress_state["pair_total"] or 1))
+            pair_index = max(0, int(event.get("pair_index") or 0))
+            task_label = str(event.get("task_alias") or event.get("task_name") or "").strip()
+
+            if event_type == "pair_started":
+                progress = min(
+                    90,
+                    max(
+                        int(progress_state["progress"] or 5),
+                        5 + int((max(pair_index - 1, 0) / pair_total) * 80),
+                    ),
+                )
+                progress_state.update(
+                    {
+                        "progress": progress,
+                        "pair_index": pair_index,
+                        "pair_total": pair_total,
+                        "pair_label": task_label,
+                        "pair_started_monotonic": time.monotonic(),
+                        "message": f"[{engine_code}/{profile}] Running {pair_index}/{pair_total}: {task_label}",
+                    }
+                )
+                await task_service.add_log(
+                    job.task_id,
+                    "INFO",
+                    (
+                        f"{engine_title} pair {pair_index}/{pair_total} started: {task_label} "
+                        f"(work_dir={event.get('work_dir')})"
+                    ),
+                )
+                await task_service.update_task(
+                    job.task_id,
+                    progress=progress_state["progress"],
+                    message=progress_state["message"],
+                )
+                continue
+
+            if event_type == "pair_finished":
+                success = bool(event.get("success"))
+                returncode = int(event.get("returncode") or 0)
+                progress = min(
+                    90,
+                    max(
+                        int(progress_state["progress"] or 5),
+                        5 + int((max(pair_index, 0) / pair_total) * 80) if success else int(progress_state["progress"] or 5),
+                    ),
+                )
+                progress_state.update(
+                    {
+                        "progress": progress,
+                        "pair_index": pair_index,
+                        "pair_total": pair_total,
+                        "pair_label": task_label,
+                        "pair_started_monotonic": None,
+                    }
+                )
+                if success:
+                    progress_state["message"] = f"[{engine_code}/{profile}] Finished {pair_index}/{pair_total}: {task_label}"
+                    await task_service.add_log(
+                        job.task_id,
+                        "INFO",
+                        f"{engine_title} pair {pair_index}/{pair_total} completed: {task_label}",
+                    )
+                else:
+                    error_text = str(event.get("error") or "").strip()
+                    timeout_note = " (timeout)" if returncode == -1 else ""
+                    progress_state["message"] = f"[{engine_code}/{profile}] Failed {pair_index}/{pair_total}: {task_label}"
+                    await task_service.add_log(
+                        job.task_id,
+                        "WARNING",
+                        (
+                            f"{engine_title} pair {pair_index}/{pair_total} failed{timeout_note}: "
+                            f"{task_label} (rc={returncode})"
+                            f"{f', error={error_text}' if error_text else ''}"
+                        ),
+                    )
+                    if pair_index < pair_total:
+                        await task_service.add_log(
+                            job.task_id,
+                            "WARNING",
+                            f"{engine_title} will continue with the next pair ({pair_index + 1}/{pair_total}).",
+                        )
+                await task_service.update_task(
+                    job.task_id,
+                    progress=progress_state["progress"],
+                    message=progress_state["message"],
+                )
+
     async def _task_keepalive():
         while True:
             await asyncio.sleep(30)
             try:
+                message = str(progress_state.get("message") or f"[{engine_code}/{profile}] Running in WSL...")
+                started_monotonic = progress_state.get("pair_started_monotonic")
+                if isinstance(started_monotonic, (int, float)):
+                    elapsed_seconds = max(0, int(time.monotonic() - float(started_monotonic)))
+                    message = f"{message} (elapsed={elapsed_seconds}s)"
                 await task_service.update_task(
                     job.task_id,
-                    progress=5,
-                    message=f"[{engine_code}/{profile}] Running in WSL...",
+                    progress=int(progress_state.get("progress") or 5),
+                    message=message,
                 )
             except Exception as exc:
                 print(f"[keepalive] WARNING: failed to update task {job.task_id}: {exc}")
 
+    progress_task = asyncio.create_task(_consume_progress())
     keepalive_task = asyncio.create_task(_task_keepalive())
     try:
         result = await asyncio.to_thread(engine.run, request)
@@ -1942,6 +2078,8 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
             await keepalive_task
         except asyncio.CancelledError:
             pass
+        await progress_queue.put(None)
+        await progress_task
 
     detail = result.detail or {}
 
@@ -1949,7 +2087,7 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
         await task_service.add_log(
             job.task_id,
             "INFO",
-            f"ISCE2 run mode={detail.get('mode', 'unknown')}, task_count={detail.get('task_count', 0)}",
+            f"{engine_title} run mode={detail.get('mode', 'unknown')}, task_count={detail.get('task_count', 0)}",
         )
 
     for invalid in detail.get("invalid_candidates", []) or []:
@@ -2062,16 +2200,26 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
                     job.task_id,
                     "INFO",
                     (
-                        f"Auto-published ISCE2 results from {len(output_dirs)} directory(s). "
+                        f"Auto-published {engine_title} results from {len(output_dirs)} directory(s). "
                         f"processed={publish_result.get('processed', 0)} "
                         f"issues={rebuild_result.get('issue_count', 0) if rebuild_result else 0}"
                     ),
                 )
+                if int(publish_result.get("processed", 0) or 0) <= 0:
+                    await task_service.add_log(
+                        job.task_id,
+                        "WARNING",
+                        (
+                            f"No publishable {engine_title} result bundle was detected under "
+                            f"{len(output_dirs)} output director"
+                            f"{'y' if len(output_dirs) == 1 else 'ies'}."
+                        ),
+                    )
             except Exception as exc:
                 await task_service.add_log(
                     job.task_id,
                     "WARNING",
-                    f"Auto-publish ISCE2 results failed: {exc}",
+                    f"Auto-publish {engine_title} results failed: {exc}",
                 )
 
     if result.success:
@@ -2080,7 +2228,7 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
             status="COMPLETED",
             progress=100,
             message=(
-                f"[{engine_code}/{profile}] 完成 — "
+                f"[{engine_code}/{profile}] 完成，"
                 f"成功 {result.pairs_processed} 对，失败 {result.pairs_failed} 对"
             ),
         )
@@ -2093,6 +2241,22 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
         raise RuntimeError(
             f"[{engine_code}/{profile}] 执行失败：{error_summary}"
         )
+
+
+async def _handle_isce2_run(job: SystemJobORM) -> None:
+    await _handle_queued_engine_run(
+        job,
+        engine_title="ISCE2",
+        fallback_timeout_seconds=settings.ISCE2_PER_TASK_TIMEOUT_SECONDS,
+    )
+
+
+async def _handle_pyint_run(job: SystemJobORM) -> None:
+    await _handle_queued_engine_run(
+        job,
+        engine_title="PyINT",
+        fallback_timeout_seconds=settings.PYINT_DEFAULT_TIMEOUT_SECONDS,
+    )
 
 
 async def _handle_water_geocode(job: SystemJobORM) -> None:
@@ -2860,6 +3024,7 @@ _HANDLERS = {
     JOB_TYPE_IDL_RUN_IMPORT: _handle_idl_run_import,
     JOB_TYPE_IDL_RUN_DINSAR: _handle_idl_run_dinsar,
     JOB_TYPE_ISCE2_RUN: _handle_isce2_run,
+    JOB_TYPE_PYINT_RUN: _handle_pyint_run,
     JOB_TYPE_WATER_GEOCODE: _handle_water_geocode,
     JOB_TYPE_WATER_FLOOD: _handle_water_flood,
     JOB_TYPE_WATER_DETECT: _handle_water_detect,

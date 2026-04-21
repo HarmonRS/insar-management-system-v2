@@ -31,9 +31,10 @@ def _bootstrap() -> None:
 
     from .isce2_engine import Isce2Engine
     from .landsar_engine import LandsarEngine
+    from .pyint_engine import PyintEngine
     from .sarscape_engine import SarscapeEngine
 
-    for engine in (SarscapeEngine(), Isce2Engine(), LandsarEngine()):
+    for engine in (SarscapeEngine(), Isce2Engine(), PyintEngine(), LandsarEngine()):
         register(engine)
 
 

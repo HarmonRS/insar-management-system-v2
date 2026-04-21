@@ -19,7 +19,7 @@ const getTaskTypeLabel = (taskType) => {
     case 'SCAN_HAZARD':
       return '灾害点同步';
     case 'UNPACK_ARCHIVES':
-      return 'Archive unpack';
+      return 'LT-1 解包';
     case 'IDL_IMPORT':
       return 'ENVI 数据导入';
     case 'IDL_DINSAR':

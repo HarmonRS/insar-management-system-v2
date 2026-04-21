@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-from ..config import get_env_text, read_bool_env
+from ..config import get_env_text, read_bool_env, settings
 from .base import DinsarEngine, EngineAvailability, EngineProfile, RunRequest, RunResult
 from ..services.dinsar_naming import (
     PAIR_META_FILENAME,
@@ -55,6 +55,10 @@ class Isce2Engine(DinsarEngine):
     @property
     def engine_label(self) -> str:
         return "ISCE2（WSL）"
+
+    @property
+    def default_timeout_seconds(self) -> int:
+        return max(60, int(settings.ISCE2_PER_TASK_TIMEOUT_SECONDS or 43200))
 
     # ------------------------------------------------------------------
     # Config helpers
@@ -410,11 +414,21 @@ class Isce2Engine(DinsarEngine):
         extra = self.normalize_extra(request.extra)
         validation = self.validate_root_dir(request.root_dir, request.num_to_process)
         task_dirs: List[str] = validation["task_dirs"]
+        total_tasks = len(task_dirs)
         run_started_at = datetime.utcnow()
         run_started_at_text = run_started_at.isoformat(timespec="seconds") + "Z"
         run_key = build_run_key(self.engine_code, request.profile, started_at=run_started_at)
+        progress_callback = request.progress_callback
 
-        timeout = request.timeout_seconds or 21600
+        def emit_progress(event_type: str, **payload: Any) -> None:
+            if not callable(progress_callback):
+                return
+            try:
+                progress_callback({"event": event_type, **payload})
+            except Exception:
+                return
+
+        timeout = max(60, int(request.timeout_seconds or self.default_timeout_seconds))
         force = bool(extra.get("force"))
         target_grid_size_m = int(extra.get("target_grid_size_m", DEFAULT_TARGET_GRID_SIZE_M))
         bbox = extra.get("bbox", "")
@@ -436,7 +450,7 @@ class Isce2Engine(DinsarEngine):
         pairs_processed = 0
         pairs_failed = 0
 
-        for task_dir in task_dirs:
+        for pair_index, task_dir in enumerate(task_dirs, start=1):
             task_name = os.path.basename(os.path.normpath(task_dir))
             pair_meta = find_json_sidecar(task_dir, PAIR_META_FILENAME, max_levels=0) or {}
             task_alias = str(pair_meta.get("task_alias") or task_name).strip() or task_name
@@ -450,8 +464,31 @@ class Isce2Engine(DinsarEngine):
             wsl_work_dir = windows_path_to_wsl(work_dir, distro=self._distro)
             wsl_output_dir = windows_path_to_wsl(output_dir, distro=self._distro)
             wsl_orbit_output_dir = windows_path_to_wsl(orbit_output_dir, distro=self._distro)
+            emit_progress(
+                "pair_started",
+                pair_index=pair_index,
+                pair_total=total_tasks,
+                task_name=task_name,
+                task_alias=task_alias,
+                pair_key=pair_key,
+                task_dir=task_dir,
+                work_dir=work_dir,
+                output_dir=output_dir,
+            )
             if not wsl_task_dir:
                 pairs_failed += 1
+                error_text = f"Unable to convert task dir to WSL path: {task_dir}"
+                emit_progress(
+                    "pair_finished",
+                    pair_index=pair_index,
+                    pair_total=total_tasks,
+                    task_name=task_name,
+                    task_alias=task_alias,
+                    pair_key=pair_key,
+                    success=False,
+                    returncode=-2,
+                    error=error_text,
+                )
                 task_results.append(
                     {
                         "task_name": task_name,
@@ -463,7 +500,7 @@ class Isce2Engine(DinsarEngine):
                         "output_dir": output_dir,
                         "success": False,
                         "returncode": -2,
-                        "error": f"Unable to convert task dir to WSL path: {task_dir}",
+                        "error": error_text,
                         "stdout_tail": "",
                         "stderr_tail": "",
                         "command": "",
@@ -475,6 +512,18 @@ class Isce2Engine(DinsarEngine):
                 continue
             if not wsl_work_dir or not wsl_output_dir or not wsl_orbit_output_dir:
                 pairs_failed += 1
+                error_text = "Unable to convert ISCE2 work/output paths to WSL paths."
+                emit_progress(
+                    "pair_finished",
+                    pair_index=pair_index,
+                    pair_total=total_tasks,
+                    task_name=task_name,
+                    task_alias=task_alias,
+                    pair_key=pair_key,
+                    success=False,
+                    returncode=-2,
+                    error=error_text,
+                )
                 task_results.append(
                     {
                         "task_name": task_name,
@@ -486,7 +535,7 @@ class Isce2Engine(DinsarEngine):
                         "output_dir": output_dir,
                         "success": False,
                         "returncode": -2,
-                        "error": "Unable to convert ISCE2 work/output paths to WSL paths.",
+                        "error": error_text,
                         "stdout_tail": "",
                         "stderr_tail": "",
                         "command": "",
@@ -585,6 +634,17 @@ class Isce2Engine(DinsarEngine):
             else:
                 pairs_failed += 1
 
+            emit_progress(
+                "pair_finished",
+                pair_index=pair_index,
+                pair_total=total_tasks,
+                task_name=task_name,
+                task_alias=task_alias,
+                pair_key=pair_key,
+                success=success,
+                returncode=rc,
+                error=stderr.strip() if stderr else "",
+            )
             task_results.append(
                 {
                     "task_name": task_name,

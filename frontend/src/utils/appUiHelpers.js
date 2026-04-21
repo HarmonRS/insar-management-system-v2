@@ -42,29 +42,31 @@ export const getLeftTabLabel = (tabKey, metrics = {}) => {
     case 'pairs':
       return `任务规划 (${pairCount})`;
     case 'ps_results':
-      return `PS时序栈 (${psResultCount})`;
+      return `时序候选栈 (${psResultCount})`;
     case 'batches':
       return '任务批次';
     case 'copier':
       return '数据分发';
+    case 'production_management':
+      return '生产管理';
     case 'idl':
       return 'D-InSAR生产（旧）';
     case 'dinsar_production':
-      return 'D-InSAR生产';
+      return 'D-InSAR运行';
     case 'dinsar_products':
       return 'D-InSAR产物';
     case 'ps_production':
-      return 'PS-InSAR生产';
+      return '时序InSAR运行';
     case 'ps_products':
-      return 'PS-InSAR产物';
+      return '时序InSAR产物';
     case 'dinsar_results':
       return `D-InSAR结果 (${dinsarTotal})`;
     case 'dinsar_analysis':
       return 'D-InSAR分析';
     case 'psinsar_results':
-      return 'PS-InSAR结果';
+      return '时序InSAR结果';
     case 'psinsar_analysis':
-      return 'PS-InSAR分析';
+      return '时序InSAR分析';
     case 'ai_quality':
       return 'AI质量评估';
     case 'ai_diagnosis':

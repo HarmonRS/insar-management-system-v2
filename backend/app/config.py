@@ -219,12 +219,40 @@ class Settings(BaseSettings):
     ISCE2_DEM_PATH: str = "D:\\SRTM30m\\SRTMDEM_RSP_SARscape.wgs84"
     ISCE2_WORK_ROOT: str = ""
     ISCE2_OUTPUT_ROOT: str = ""
+    ISCE2_PER_TASK_TIMEOUT_SECONDS: int = 43200
     ISCE2_SMOKE_TEST_ENABLED: bool = False
     ISCE2_STRIPMAP_APP: str = (
         "/home/administrator/miniconda3/envs/isce2/lib/python3.11/"
         "site-packages/isce/applications/stripmapApp.py"
     )
     ISCE2_PIPELINE_SCRIPT: str = ""
+    PYINT_ENABLED: bool = False
+    PYINT_WSL_DISTRO: str = ""
+    PYINT_WSL_PYTHON: str = ""
+    PYINT_HOME: str = ""
+    PYINT_APP_SCRIPT: str = ""
+    PYINT_TEMPLATE_ROOT: str = ""
+    PYINT_WORK_ROOT: str = ""
+    PYINT_OUTPUT_ROOT: str = ""
+    PYINT_DEM_ROOT: str = ""
+    PYINT_DEM_MODE: str = "local_fabdem"
+    PYINT_FABDEM_ROOT: str = ""
+    PYINT_PREPARED_DEM_PATH: str = ""
+    PYINT_OPENTOPO_DEM_TYPE: str = "SRTMGL1"
+    PYINT_OPENTOPO_API_KEY: str = ""
+    PYINT_DEM_STRICT: bool = True
+    PYINT_ORBIT_POLICY: str = "require_txt"
+    PYINT_ORBIT_POOL_TXT: str = ""
+    PYINT_RECORD_INPUT_ASSETS: bool = True
+    PYINT_LT1_PRECISE_ORBIT_ENABLED: bool = True
+    PYINT_LT1_PRECISE_ORBIT_MODE: str = "replace"
+    PYINT_LT1_PRECISE_ORBIT_STRICT: bool = True
+    PYINT_LT1_PRECISE_ORBIT_VALIDATE_WITH_ORB_FILT: bool = False
+    PYINT_LT1_PRECISE_ORBIT_BACKUP: bool = True
+    PYINT_LT1_PRECISE_ORBIT_ORB_FILT_DEGREE: int = 5
+    PYINT_GAMMA_ENV_SCRIPT: str = ""
+    PYINT_DEFAULT_TIMEOUT_SECONDS: int = 43200
+    PYINT_SMOKE_TEST_ENABLED: bool = False
     JOB_WORKER_HEALTH_TIMEOUT: int = 60
     JOB_WORKER_JOB_HEARTBEAT_INTERVAL: float = 5.0
     JOB_WORKER_STALE_RECOVER_INTERVAL: float = 15.0
@@ -330,6 +358,67 @@ class Settings(BaseSettings):
                 "ISCE2_PIPELINE_SCRIPT",
                 _windows_path_to_wsl_mount(local_pipeline),
             )
+        if not self.PYINT_WSL_DISTRO:
+            object.__setattr__(self, "PYINT_WSL_DISTRO", self.ISCE2_WSL_DISTRO)
+        if not self.PYINT_WSL_PYTHON:
+            object.__setattr__(self, "PYINT_WSL_PYTHON", self.ISCE2_PYTHON)
+        if not self.PYINT_HOME:
+            object.__setattr__(
+                self,
+                "PYINT_HOME",
+                os.path.join(project_root, "third_party", "PyINT"),
+            )
+        if not self.PYINT_APP_SCRIPT and self.PYINT_HOME:
+            object.__setattr__(
+                self,
+                "PYINT_APP_SCRIPT",
+                os.path.join(self.PYINT_HOME, "pyint", "pyintApp.py"),
+            )
+        if not self.PYINT_TEMPLATE_ROOT:
+            object.__setattr__(
+                self,
+                "PYINT_TEMPLATE_ROOT",
+                os.path.join(backend_dir, "runtime", "pyint_templates"),
+            )
+        if not self.PYINT_WORK_ROOT:
+            object.__setattr__(
+                self,
+                "PYINT_WORK_ROOT",
+                os.path.join(backend_dir, "runtime", "pyint_work"),
+            )
+        if not self.PYINT_OUTPUT_ROOT:
+            object.__setattr__(
+                self,
+                "PYINT_OUTPUT_ROOT",
+                os.path.join(backend_dir, "runtime", "pyint_output"),
+            )
+        if not self.PYINT_DEM_ROOT:
+            object.__setattr__(
+                self,
+                "PYINT_DEM_ROOT",
+                os.path.join(backend_dir, "runtime", "pyint_dem"),
+            )
+        pyint_dem_mode = str(self.PYINT_DEM_MODE or "local_fabdem").strip().lower() or "local_fabdem"
+        if pyint_dem_mode not in {"local_fabdem", "opentopo", "prepared_file"}:
+            pyint_dem_mode = "local_fabdem"
+        object.__setattr__(self, "PYINT_DEM_MODE", pyint_dem_mode)
+        if not self.PYINT_OPENTOPO_DEM_TYPE:
+            object.__setattr__(self, "PYINT_OPENTOPO_DEM_TYPE", "SRTMGL1")
+        pyint_orbit_policy = str(self.PYINT_ORBIT_POLICY or "require_txt").strip().lower() or "require_txt"
+        if pyint_orbit_policy not in {"validate_only", "require_txt", "stage_txt"}:
+            pyint_orbit_policy = "require_txt"
+        object.__setattr__(self, "PYINT_ORBIT_POLICY", pyint_orbit_policy)
+        pyint_precise_orbit_mode = str(self.PYINT_LT1_PRECISE_ORBIT_MODE or "replace").strip().lower() or "replace"
+        if pyint_precise_orbit_mode not in {"replace", "replace_and_validate"}:
+            pyint_precise_orbit_mode = "replace"
+        object.__setattr__(self, "PYINT_LT1_PRECISE_ORBIT_MODE", pyint_precise_orbit_mode)
+        object.__setattr__(
+            self,
+            "PYINT_LT1_PRECISE_ORBIT_ORB_FILT_DEGREE",
+            max(1, int(self.PYINT_LT1_PRECISE_ORBIT_ORB_FILT_DEGREE or 5)),
+        )
+        if not self.PYINT_ORBIT_POOL_TXT:
+            object.__setattr__(self, "PYINT_ORBIT_POOL_TXT", self.ORBIT_POOL_ENVI)
         if not self.TIMESERIES_WSL_DISTRO:
             object.__setattr__(self, "TIMESERIES_WSL_DISTRO", self.ISCE2_WSL_DISTRO)
         if not self.TIMESERIES_ENV_NAME:
@@ -431,6 +520,10 @@ class Settings(BaseSettings):
         os.makedirs(settings.DINSAR_PRODUCT_DIR, exist_ok=True)
         os.makedirs(settings.PSINSAR_PRODUCT_DIR, exist_ok=True)
         os.makedirs(settings.RESULT_QUARANTINE_ROOT, exist_ok=True)
+        os.makedirs(settings.PYINT_TEMPLATE_ROOT, exist_ok=True)
+        os.makedirs(settings.PYINT_WORK_ROOT, exist_ok=True)
+        os.makedirs(settings.PYINT_OUTPUT_ROOT, exist_ok=True)
+        os.makedirs(settings.PYINT_DEM_ROOT, exist_ok=True)
         os.makedirs(settings.TIMESERIES_WORK_ROOT, exist_ok=True)
 
 
@@ -600,6 +693,92 @@ def validate_runtime_config() -> dict[str, Any]:
             errors.append("ISCE2_ENABLED=true 但 ISCE2_PIPELINE_SCRIPT 未配置。")
         if not settings.ORBIT_POOL_ISCE2:
             warnings.append("ISCE2_ENABLED=true 但 ORBIT_POOL_ISCE2 未配置。")
+
+    if settings.PYINT_ENABLED:
+        if not settings.PYINT_WSL_DISTRO:
+            errors.append("PYINT_ENABLED=true but PYINT_WSL_DISTRO is not configured.")
+        if not settings.PYINT_WSL_PYTHON:
+            errors.append("PYINT_ENABLED=true but PYINT_WSL_PYTHON is not configured.")
+        if not settings.PYINT_HOME:
+            errors.append("PYINT_ENABLED=true but PYINT_HOME is not configured.")
+        if not settings.PYINT_APP_SCRIPT:
+            errors.append("PYINT_ENABLED=true but PYINT_APP_SCRIPT is not configured.")
+        _check_path(
+            label="PYINT_HOME",
+            value=settings.PYINT_HOME,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
+        )
+        _check_path(
+            label="PYINT_APP_SCRIPT",
+            value=settings.PYINT_APP_SCRIPT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=True,
+        )
+        _check_path(
+            label="PYINT_TEMPLATE_ROOT",
+            value=settings.PYINT_TEMPLATE_ROOT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
+        )
+        _check_path(
+            label="PYINT_WORK_ROOT",
+            value=settings.PYINT_WORK_ROOT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
+        )
+        _check_path(
+            label="PYINT_OUTPUT_ROOT",
+            value=settings.PYINT_OUTPUT_ROOT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
+        )
+        _check_path(
+            label="PYINT_DEM_ROOT",
+            value=settings.PYINT_DEM_ROOT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
+        )
+        if settings.PYINT_DEM_MODE == "local_fabdem":
+            _check_path(
+                label="PYINT_FABDEM_ROOT",
+                value=settings.PYINT_FABDEM_ROOT,
+                errors=errors,
+                warnings=warnings,
+                expect_file=False,
+            )
+        elif settings.PYINT_DEM_MODE == "prepared_file":
+            _check_path(
+                label="PYINT_PREPARED_DEM_PATH",
+                value=(
+                    settings.PYINT_PREPARED_DEM_PATH
+                    or settings.ISCE2_DEM_PATH
+                    or settings.IDL_DINSAR_DEM_BASE_FILE
+                ),
+                errors=errors,
+                warnings=warnings,
+                expect_file=True,
+            )
+        _check_path(
+            label="PYINT_ORBIT_POOL_TXT",
+            value=settings.PYINT_ORBIT_POOL_TXT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
+        )
+        _check_path(
+            label="PYINT_GAMMA_ENV_SCRIPT",
+            value=settings.PYINT_GAMMA_ENV_SCRIPT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=True,
+        )
 
     if settings.TIMESERIES_ENABLED:
         _check_path(

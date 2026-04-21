@@ -54,12 +54,55 @@ def get_unpack_config() -> Dict[str, Any]:
             minimum=1,
             maximum=32,
         ),
+        "max_files_per_run": module.parse_int(
+            env.get("UNPACK_MAX_FILES_PER_RUN"),
+            default=0,
+            minimum=0,
+        ),
+        "max_runtime_minutes": module.parse_int(
+            env.get("UNPACK_MAX_RUNTIME_MINUTES"),
+            default=0,
+            minimum=0,
+        ),
     }
 
 
-async def run_unpack_task(task_id: str):
+def _normalize_unpack_run_limits(raw_config: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    if not isinstance(raw_config, dict):
+        return {}
+
+    module = _load_unpack_module()
+    normalized: Dict[str, int] = {}
+
+    if raw_config.get("max_files_per_run") is not None:
+        normalized["max_files_per_run"] = module.parse_int(
+            raw_config.get("max_files_per_run"),
+            default=0,
+            minimum=0,
+        )
+    if raw_config.get("max_runtime_minutes") is not None:
+        normalized["max_runtime_minutes"] = module.parse_int(
+            raw_config.get("max_runtime_minutes"),
+            default=0,
+            minimum=0,
+        )
+
+    return normalized
+
+
+def build_unpack_run_config(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    config = get_unpack_config()
+    config.update(_normalize_unpack_run_limits(overrides))
+    return config
+
+
+async def run_unpack_task(task_id: str, task_config: Optional[Dict[str, Any]] = None):
     module = _load_unpack_module()
     loop = asyncio.get_running_loop()
+    config_overrides = _normalize_unpack_run_limits(task_config)
+    if not config_overrides:
+        task_record = await task_service.get_task(task_id)
+        config_overrides = _normalize_unpack_run_limits(getattr(task_record, "params", None))
 
     def _submit(coro):
         try:
@@ -88,14 +131,19 @@ async def run_unpack_task(task_id: str):
             module.run_unpack_job,
             log_callback=log_cb,
             progress_callback=progress_cb,
+            config_overrides=config_overrides or None,
         )
 
         if not result:
-            result = {"processed": 0, "failed": 0, "skipped": 0, "total": 0}
+            result = {"processed": 0, "failed": 0, "skipped": 0, "total": 0, "remaining": 0, "message": "completed"}
 
-        summary = (
-            "Unpack complete: processed {processed}, failed {failed}, skipped {skipped}"
-        ).format(**result)
+        summary = "Unpack complete: processed {processed}, failed {failed}, skipped {skipped}".format(**result)
+        remaining = int(result.get("remaining") or 0)
+        if remaining > 0:
+            summary = f"{summary}, remaining {remaining}"
+        message_text = str(result.get("message") or "").strip()
+        if message_text and message_text != "completed":
+            summary = f"{summary} ({message_text})"
         await task_service.update_task(task_id, status="COMPLETED", progress=100, message=summary)
     except Exception as exc:
         await task_service.update_task(task_id, status="FAILED", message=f"Unpack failed: {exc}")
