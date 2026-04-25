@@ -48,6 +48,21 @@ def _read_bool_env(name: str, default: bool = False) -> bool:
     return read_bool_env(name, default)
 
 
+def default_gamma_env_script_windows() -> str:
+    return os.path.normpath(str(Path(settings.PROJECT_ROOT, "deploy", "wsl", "profiles", "gamma_env.sh")))
+
+
+def resolve_gamma_env_script(gamma_env_script: Optional[str] = None) -> str:
+    explicit = str(gamma_env_script or _read_env("PYINT_GAMMA_ENV_SCRIPT", "")).strip()
+    if explicit:
+        return os.path.normpath(explicit)
+
+    candidate = default_gamma_env_script_windows()
+    if os.path.isfile(candidate):
+        return candidate
+    return ""
+
+
 def normalize_date_text(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -296,7 +311,7 @@ def check_pyint_environment(
     work_root_wsl = to_wsl_path(str(work_root or _read_env("PYINT_WORK_ROOT", "")))
     output_root_wsl = to_wsl_path(str(output_root or _read_env("PYINT_OUTPUT_ROOT", "")))
     dem_root_wsl = to_wsl_path(str(dem_root or _read_env("PYINT_DEM_ROOT", "")))
-    gamma_env_wsl = to_wsl_path(str(gamma_env_script or _read_env("PYINT_GAMMA_ENV_SCRIPT", "")))
+    gamma_env_wsl = to_wsl_path(resolve_gamma_env_script(gamma_env_script))
     smoke_enabled = _read_bool_env("PYINT_SMOKE_TEST_ENABLED", False) if smoke_test is None else bool(smoke_test)
     precise_orbit_enabled = _read_bool_env("PYINT_LT1_PRECISE_ORBIT_ENABLED", True)
 

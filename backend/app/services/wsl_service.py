@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +127,41 @@ def run_wsl_command(
         return -3, "", str(exc)
 
 
+def run_wsl_exec(
+    argv: Sequence[str],
+    distro: Optional[str] = None,
+    timeout: int = 30,
+    env: Optional[Dict[str, str]] = None,
+) -> Tuple[int, str, str]:
+    """Execute a structured argv in WSL via ``wsl.exe --exec``."""
+    wsl_exe = _find_wsl_executable()
+    if not wsl_exe:
+        return -2, "", "wsl.exe not found"
+
+    normalized_argv = [str(part) for part in argv if str(part)]
+    if not normalized_argv:
+        return -3, "", "WSL argv is empty"
+
+    wsl_args = [wsl_exe]
+    if distro:
+        wsl_args += ["-d", distro]
+    wsl_args += ["--exec", *normalized_argv]
+
+    try:
+        return _run_windows_command(wsl_args, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return -1, "", f"command timed out ({timeout}s)"
+    except FileNotFoundError:
+        return -2, "", "wsl.exe not found"
+    except Exception as exc:
+        return -3, "", str(exc)
+
+
 def windows_path_to_wsl(win_path: str, distro: Optional[str] = None) -> str:
     """将 Windows 路径转换为 WSL 路径（调用 wslpath）。"""
     if not win_path:
         return ""
-    rc, stdout, _ = run_wsl_command(
-        f"wslpath -u '{win_path.replace(chr(39), '')}'",
-        distro=distro,
-        timeout=10,
-    )
+    rc, stdout, _ = run_wsl_exec(["wslpath", "-u", win_path], distro=distro, timeout=10)
     return stdout if rc == 0 else ""
 
 

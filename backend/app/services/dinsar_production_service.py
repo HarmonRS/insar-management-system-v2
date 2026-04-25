@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import uuid
 from datetime import datetime
@@ -12,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import database
+from ..config import settings
 from ..models import (
     DinsarProductionExecutionORM,
     DinsarProductionRunItemORM,
@@ -24,6 +26,7 @@ from .workflow_service import workflow_service
 
 
 TASK_TYPE_DINSAR_PRODUCTION = "IDL_RUN_DINSAR"
+TASK_TYPE_ISCE2_DINSAR_PRODUCTION = "ISCE2_RUN"
 RUN_STATUS_PENDING = "PENDING"
 RUN_STATUS_RUNNING = "RUNNING"
 RUN_STATUS_COMPLETED = "COMPLETED"
@@ -40,8 +43,15 @@ EXECUTION_STATUS_RUNNING = "RUNNING"
 EXECUTION_STATUS_COMPLETED = "COMPLETED"
 EXECUTION_STATUS_FAILED = "FAILED"
 EXECUTION_STATUS_CANCELLED = "CANCELLED"
+RERUN_MODE_UNFINISHED_ONLY = "unfinished_only"
+RERUN_MODE_RERUN_ALL = "rerun_all"
+VALID_RERUN_MODES = {
+    RERUN_MODE_UNFINISHED_ONLY,
+    RERUN_MODE_RERUN_ALL,
+}
 
 CURRENT_POINTER_FILENAME = "current.json"
+CURRENT_POINTER_DIRNAME = "current"
 EXECUTION_MANIFEST_FILENAME = "execution_manifest.json"
 RUNS_STEP_ID = "execute_items"
 RUNS_STEP_NAME = "Execute ENVI D-InSAR items"
@@ -56,6 +66,34 @@ TERMINAL_ITEM_STATUSES = {
     RUN_ITEM_STATUS_SKIPPED,
     RUN_ITEM_STATUS_CANCELLED,
 }
+_SAFE_POINTER_RE = re.compile(r"[^0-9A-Za-z._-]+")
+
+
+def _task_type_for_engine(engine_code: str) -> str:
+    normalized = str(engine_code or "").strip().lower()
+    if normalized == "sarscape":
+        return TASK_TYPE_DINSAR_PRODUCTION
+    if normalized == "isce2":
+        return TASK_TYPE_ISCE2_DINSAR_PRODUCTION
+    raise ValueError(f"Unsupported engine for D-InSAR production run: {engine_code}")
+
+
+def _workflow_name_for_engine(engine_code: str) -> str:
+    normalized = str(engine_code or "").strip().lower()
+    if normalized == "sarscape":
+        return "dinsar_sarscape_production"
+    if normalized == "isce2":
+        return "dinsar_isce2_production"
+    raise ValueError(f"Unsupported engine for D-InSAR production run: {engine_code}")
+
+
+def _workflow_step_name_for_engine(engine_code: str) -> str:
+    normalized = str(engine_code or "").strip().lower()
+    if normalized == "sarscape":
+        return RUNS_STEP_NAME
+    if normalized == "isce2":
+        return "Execute ISCE2 D-InSAR items"
+    raise ValueError(f"Unsupported engine for D-InSAR production run: {engine_code}")
 
 
 def _new_session() -> AsyncSession:
@@ -100,10 +138,15 @@ def _looks_like_task_dir(path: str) -> bool:
     return os.path.isdir(os.path.join(path, "master")) and os.path.isdir(os.path.join(path, "slave"))
 
 
-def _discover_run_items(root_dir: str, num_to_process: int) -> List[Dict[str, Any]]:
+def _normalize_rerun_mode(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in VALID_RERUN_MODES:
+        return normalized
+    return RERUN_MODE_UNFINISHED_ONLY
+
+
+def _discover_run_items(root_dir: str) -> List[Dict[str, Any]]:
     task_folders = [root_dir] if _looks_like_task_dir(root_dir) else _collect_task_folders(root_dir)
-    if num_to_process > 0:
-        task_folders = task_folders[:num_to_process]
 
     items: List[Dict[str, Any]] = []
     for order_index, folder in enumerate(task_folders, start=1):
@@ -121,10 +164,117 @@ def _discover_run_items(root_dir: str, num_to_process: int) -> List[Dict[str, An
                 "policy_version": pair_meta.get("policy_version"),
                 "selection_strategy": pair_meta.get("selection_strategy"),
                 "source_task_dir": folder,
-                "results_root_dir": os.path.join(folder, "dinsar_results"),
+                "results_root_dir": os.path.join(settings.DINSAR_PRODUCT_DIR, pair_key),
             }
         )
     return items
+
+
+def _current_pointer_path_for_root(
+    results_root_dir: str,
+    *,
+    engine_code: Optional[str] = None,
+    profile_code: Optional[str] = None,
+) -> str:
+    pointer_dir = os.path.join(results_root_dir, CURRENT_POINTER_DIRNAME)
+    if engine_code or profile_code:
+        pointer_name = (
+            f"{_sanitize_pointer_fragment(engine_code or 'engine', 'engine')}__"
+            f"{_sanitize_pointer_fragment(profile_code or 'profile', 'profile')}.json"
+        )
+        return os.path.join(pointer_dir, pointer_name)
+    return os.path.join(pointer_dir, CURRENT_POINTER_FILENAME)
+
+
+def _normalize_existing_file(path: Any) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    normalized = os.path.normpath(os.path.abspath(_to_local_path(text)))
+    return normalized if os.path.isfile(normalized) else ""
+
+
+def _normalize_existing_dir(path: Any) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    normalized = os.path.normpath(os.path.abspath(_to_local_path(text)))
+    return normalized if os.path.isdir(normalized) else ""
+
+
+def _has_completed_current_result(
+    item_payload: Dict[str, Any],
+    *,
+    engine_code: str,
+    profile_code: str,
+) -> bool:
+    pointer_path = _current_pointer_path_for_root(
+        str(item_payload.get("results_root_dir") or ""),
+        engine_code=engine_code,
+        profile_code=profile_code,
+    )
+    if not os.path.isfile(pointer_path):
+        return False
+
+    try:
+        with open(pointer_path, "r", encoding="utf-8") as fp:
+            payload = json.load(fp) or {}
+    except Exception:
+        return False
+
+    if str(payload.get("status") or "").strip().upper() != EXECUTION_STATUS_COMPLETED:
+        return False
+
+    manifest_path = _normalize_existing_file(payload.get("manifest_path"))
+    if manifest_path:
+        return True
+
+    output_dir = _normalize_existing_dir(payload.get("output_dir"))
+    if output_dir and os.path.isfile(_execution_manifest_path(output_dir)):
+        return True
+
+    return False
+
+
+def _select_run_items(
+    root_dir: str,
+    *,
+    engine_code: str,
+    profile_code: str,
+    num_to_process: int,
+    rerun_mode: Optional[str],
+) -> Dict[str, Any]:
+    discovered_items = _discover_run_items(root_dir)
+    normalized_mode = _normalize_rerun_mode(rerun_mode)
+
+    skipped_completed_count = 0
+    selected_items: List[Dict[str, Any]] = []
+    for item_payload in discovered_items:
+        if (
+            normalized_mode == RERUN_MODE_UNFINISHED_ONLY
+            and _has_completed_current_result(
+                item_payload,
+                engine_code=engine_code,
+                profile_code=profile_code,
+            )
+        ):
+            skipped_completed_count += 1
+            continue
+        selected_items.append(dict(item_payload))
+
+    if num_to_process > 0:
+        selected_items = selected_items[:num_to_process]
+
+    for order_index, item_payload in enumerate(selected_items, start=1):
+        item_payload["order_index"] = order_index
+
+    return {
+        "items": selected_items,
+        "rerun_mode": normalized_mode,
+        "discovered_task_count": len(discovered_items),
+        "skipped_completed_count": skipped_completed_count,
+        "selected_task_count": len(selected_items),
+    }
 
 
 def _run_log_path(run_id: str) -> str:
@@ -179,8 +329,22 @@ def _execution_dir(item: DinsarProductionRunItemORM, run_key: str) -> str:
     return os.path.join(item.results_root_dir, "runs", run_key)
 
 
-def _current_pointer_path(item: DinsarProductionRunItemORM) -> str:
-    return os.path.join(item.results_root_dir, CURRENT_POINTER_FILENAME)
+def _sanitize_pointer_fragment(value: str, default: str) -> str:
+    text = _SAFE_POINTER_RE.sub("_", str(value or "").strip()).strip("._")
+    return text or default
+
+
+def _current_pointer_path(
+    item: DinsarProductionRunItemORM,
+    *,
+    engine_code: Optional[str] = None,
+    profile_code: Optional[str] = None,
+) -> str:
+    return _current_pointer_path_for_root(
+        item.results_root_dir,
+        engine_code=engine_code,
+        profile_code=profile_code,
+    )
 
 
 def _execution_manifest_path(execution_dir: str) -> str:
@@ -191,6 +355,15 @@ def _safe_epoch(value: Optional[datetime]) -> Optional[int]:
     if value is None:
         return None
     return int(value.timestamp())
+
+
+def _runtime_id_for_engine(engine_code: Optional[str]) -> Optional[str]:
+    normalized = str(engine_code or "").strip().lower()
+    if normalized == "isce2":
+        return settings.ISCE2_RUNTIME_ID or None
+    if normalized in {"pyint", "gamma"}:
+        return settings.PYINT_RUNTIME_ID or None
+    return None
 
 
 def _public_run_status(value: str) -> str:
@@ -249,6 +422,7 @@ class DinsarProductionService:
         profile_code: str,
         root_dir: str,
         num_to_process: int,
+        rerun_mode: Optional[str],
         timeout_seconds: Optional[int],
         extra: Optional[Dict[str, Any]],
         created_by: Optional[str],
@@ -256,26 +430,44 @@ class DinsarProductionService:
     ) -> Dict[str, Any]:
         normalized_engine = str(engine_code or "").strip().lower()
         normalized_profile = str(profile_code or "").strip()
-        if normalized_engine != "sarscape":
-            raise ValueError(f"Unsupported engine for D-InSAR production run: {engine_code}")
+        task_type = _task_type_for_engine(normalized_engine)
+        workflow_name = _workflow_name_for_engine(normalized_engine)
+        workflow_step_name = _workflow_step_name_for_engine(normalized_engine)
 
         normalized_root = _normalize_dir(root_dir, "root_dir")
-        item_payloads = await asyncio.to_thread(
-            _discover_run_items,
+        selection = await asyncio.to_thread(
+            _select_run_items,
             normalized_root,
-            max(0, int(num_to_process or 0)),
+            engine_code=normalized_engine,
+            profile_code=normalized_profile,
+            num_to_process=max(0, int(num_to_process or 0)),
+            rerun_mode=rerun_mode,
         )
+        item_payloads = selection["items"]
         if not item_payloads:
+            if (
+                selection["discovered_task_count"] > 0
+                and selection["skipped_completed_count"] > 0
+                and selection["rerun_mode"] == RERUN_MODE_UNFINISHED_ONLY
+            ):
+                raise ValueError(
+                    f"All discovered Task_* directories already have completed "
+                    f"{normalized_engine}/{normalized_profile} results under: {normalized_root}"
+                )
             raise ValueError(f"No Task_* directories found under: {normalized_root}")
 
         run_id = str(uuid.uuid4())
-        mode = "custom" if normalized_profile == "custom6" else "metatask"
+        if normalized_engine == "sarscape":
+            mode = "custom" if normalized_profile == "custom6" else "metatask"
+        else:
+            mode = "managed"
         task_name = f"D-InSAR production: {normalized_engine}/{normalized_profile}"
         task_params = {
             "engine_code": normalized_engine,
             "profile": normalized_profile,
             "root_dir": normalized_root,
             "num_to_process": int(num_to_process or 0),
+            "rerun_mode": selection["rerun_mode"],
             "timeout_seconds": timeout_seconds,
             "extra": dict(extra or {}),
             "mode": mode,
@@ -285,7 +477,7 @@ class DinsarProductionService:
         task_id: Optional[str] = None
         try:
             task_id = await task_service.create_task(
-                task_type=TASK_TYPE_DINSAR_PRODUCTION,
+                task_type=task_type,
                 task_name=task_name,
                 params=task_params,
                 db=db,
@@ -294,10 +486,12 @@ class DinsarProductionService:
             run = DinsarProductionRunORM(
                 run_id=run_id,
                 task_id=task_id,
+                product_family="dinsar",
                 engine_code=normalized_engine,
                 profile_code=normalized_profile,
                 mode=mode,
                 source_root=normalized_root,
+                publish_root_dir=settings.DINSAR_PRODUCT_DIR,
                 status=RUN_STATUS_PENDING,
                 cancel_requested=False,
                 total_items=len(item_payloads),
@@ -309,6 +503,11 @@ class DinsarProductionService:
                 summary_json={
                     "phase": "queued",
                     "selected_task_count": len(item_payloads),
+                    "discovered_task_count": selection["discovered_task_count"],
+                    "skipped_completed_count": selection["skipped_completed_count"],
+                    "rerun_mode": selection["rerun_mode"],
+                    "product_family": "dinsar",
+                    "publish_root_dir": settings.DINSAR_PRODUCT_DIR,
                 },
                 created_by=created_by,
             )
@@ -337,12 +536,12 @@ class DinsarProductionService:
             await db.flush()
 
             workflow_run_id = await workflow_service.create_run(
-                workflow_name="dinsar_sarscape_production",
+                workflow_name=workflow_name,
                 steps=[
                     {
                         "step_id": RUNS_STEP_ID,
-                        "step_name": RUNS_STEP_NAME,
-                        "job_type": TASK_TYPE_DINSAR_PRODUCTION,
+                        "step_name": workflow_step_name,
+                        "job_type": task_type,
                         "payload": {"production_run_id": run_id},
                         "task_id": task_id,
                         "max_attempts": 1,
@@ -381,7 +580,11 @@ class DinsarProductionService:
         await asyncio.to_thread(
             _append_run_log_sync,
             run_id,
-            f"[queued] run_id={run_id} profile={normalized_profile} root={normalized_root} items={len(item_payloads)}",
+            (
+                f"[queued] run_id={run_id} profile={normalized_profile} root={normalized_root} "
+                f"items={len(item_payloads)} rerun_mode={selection['rerun_mode']} "
+                f"skipped_completed={selection['skipped_completed_count']}"
+            ),
         )
         return {
             "run_id": run_id,
@@ -389,6 +592,9 @@ class DinsarProductionService:
             "workflow_run_id": run.workflow_run_id,
             "status": run.status,
             "selected_task_count": len(item_payloads),
+            "discovered_task_count": selection["discovered_task_count"],
+            "skipped_completed_count": selection["skipped_completed_count"],
+            "rerun_mode": selection["rerun_mode"],
         }
 
     async def list_runs(
@@ -434,6 +640,7 @@ class DinsarProductionService:
             "runs": [
                 {
                     "run_id": run.run_id,
+                    "product_family": run.product_family,
                     "engine": run.engine_code,
                     "profile_code": run.profile_code,
                     "status": _public_run_status(run.status),
@@ -443,6 +650,7 @@ class DinsarProductionService:
                     "task_id": run.task_id,
                     "workflow_run_id": run.workflow_run_id,
                     "root_dir": run.source_root,
+                    "publish_root_dir": run.publish_root_dir,
                     "message": run.latest_message,
                     "total_items": run.total_items,
                     "completed_items": run.completed_items,
@@ -684,15 +892,18 @@ class DinsarProductionService:
         execution: DinsarProductionExecutionORM,
         primary_file: str,
         source_files: List[str],
+        native_output_dir: Optional[str],
         metrics: Optional[Dict[str, Any]],
     ) -> str:
         manifest_payload = {
             "format_version": 1,
             "run_id": run.run_id,
+            "product_family": run.product_family or "dinsar",
             "run_key": execution.run_key,
             "task_id": run.task_id,
             "engine_code": run.engine_code,
             "profile_code": run.profile_code,
+            "runtime_id": _runtime_id_for_engine(run.engine_code),
             "mode": run.mode,
             "task_name": item.task_name,
             "task_alias": item.task_alias,
@@ -704,7 +915,10 @@ class DinsarProductionService:
             "selection_strategy": item.selection_strategy,
             "source_root": run.source_root,
             "source_task_dir": item.source_task_dir,
+            "results_root_dir": item.results_root_dir,
+            "publish_root_dir": run.publish_root_dir,
             "output_dir": execution.output_dir,
+            "native_output_dir": str(native_output_dir or execution.output_dir),
             "primary_file": primary_file,
             "source_files": source_files,
             "status": EXECUTION_STATUS_COMPLETED,
@@ -718,24 +932,36 @@ class DinsarProductionService:
     def write_current_pointer(
         self,
         *,
+        run: DinsarProductionRunORM,
         item: DinsarProductionRunItemORM,
         execution: DinsarProductionExecutionORM,
         manifest_path: str,
         primary_file: str,
         source_files: List[str],
+        native_output_dir: Optional[str],
     ) -> str:
         pointer_payload = {
             "format_version": 1,
+            "product_family": run.product_family or "dinsar",
+            "engine_code": run.engine_code,
+            "profile_code": run.profile_code,
+            "runtime_id": _runtime_id_for_engine(run.engine_code),
             "run_key": execution.run_key,
             "execution_id": execution.execution_id,
             "status": EXECUTION_STATUS_COMPLETED,
             "output_dir": execution.output_dir,
+            "native_output_dir": str(native_output_dir or execution.output_dir),
             "manifest_path": manifest_path,
             "primary_file": primary_file,
             "source_files": source_files,
             "updated_at": _utc_text(),
         }
-        return _write_json(_current_pointer_path(item), pointer_payload)
+        pointer_path = _current_pointer_path(
+            item,
+            engine_code=run.engine_code,
+            profile_code=run.profile_code,
+        )
+        return _write_json(pointer_path, pointer_payload)
 
     async def get_active_execution_by_task_id(
         self,

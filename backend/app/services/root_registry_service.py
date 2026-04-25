@@ -274,12 +274,12 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
     )
     specs.extend(
         _iter_single_root_specs(
-            env_var="PSINSAR_PRODUCT_DIR",
-            path=settings.PSINSAR_PRODUCT_DIR,
-            root_role="publish_root_psinsar",
-            display_name="PS-InSAR Publish Root",
+            env_var="TIMESERIES_PRODUCT_DIR",
+            path=settings.TIMESERIES_PRODUCT_DIR,
+            root_role="publish_root_timeseries",
+            display_name="Timeseries Publish Root",
             scan_mode="manifest_tree",
-            owner_engine="psinsar",
+            owner_engine="timeseries",
         )
     )
     specs.extend(
@@ -313,12 +313,32 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
     )
     specs.extend(
         _iter_single_root_specs(
+            env_var="WSL_BROKER_JOB_ROOT",
+            path=settings.WSL_BROKER_JOB_ROOT,
+            root_role="work_root_wsl_broker",
+            display_name="WSL Broker Root",
+            scan_mode="workspace",
+            owner_engine="wsl",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
             env_var="IDL_WORKER_RUNTIME_DIR",
             path=settings.IDL_WORKER_RUNTIME_DIR,
             root_role="work_root_idl",
             display_name="IDL Runtime Root",
             scan_mode="workspace",
             owner_engine="idl",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
+            env_var="PYINT_WORK_ROOT",
+            path=settings.PYINT_WORK_ROOT,
+            root_role="work_root_pyint",
+            display_name="Gamma / PyINT Work Root",
+            scan_mode="workspace",
+            owner_engine="pyint",
         )
     )
     return specs

@@ -335,9 +335,15 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   const databaseStatus = status?.database || {};
   const dinsarBridge = asObject(status?.dinsar_bridge);
   const dinsarResultCatalog = asObject(status?.dinsar_result_catalog || status?.result_catalog);
+  const timeseriesResultCatalog = asObject(status?.timeseries_result_catalog || status?.psinsar_result_catalog);
   const dinsarCatalogNeedsRebuild =
     typeof dinsarResultCatalog.needs_rebuild === 'boolean' ? dinsarResultCatalog.needs_rebuild : null;
+  const timeseriesCatalogNeedsRebuild =
+    typeof timeseriesResultCatalog.needs_rebuild === 'boolean' ? timeseriesResultCatalog.needs_rebuild : null;
   const sourceRoots = asObject(status?.source_roots);
+  const productPackages = asObject(status?.product_packages);
+  const wslRuntime = asObject(status?.wsl_runtime);
+  const wslRuntimeItems = asArray(wslRuntime.runtimes);
   const pairingSystem = asObject(status?.pairing_system);
   const sourceRootItems = asArray(sourceRoots.items);
   const bridgeDiagnosisIssueCount =
@@ -617,6 +623,41 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
             </div>
 
             <div className="health-card">
+              <div className="health-card-title">{en ? 'Timeseries Result Catalog' : '时序 InSAR 结果目录'}</div>
+              <div className="health-card-row">
+                <span>{en ? 'Catalog status' : '目录状态'}</span>
+                {renderBadge(
+                  isCatalogHealthy(timeseriesResultCatalog),
+                  formatCatalogStatusLabel(timeseriesResultCatalog, en)
+                )}
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Needs rebuild' : '需要重建'}</span>
+                {renderBadge(
+                  timeseriesCatalogNeedsRebuild === false,
+                  timeseriesCatalogNeedsRebuild === null
+                    ? (en ? 'Unknown' : '未知')
+                    : (timeseriesCatalogNeedsRebuild ? (en ? 'Yes' : '是') : (en ? 'No' : '否'))
+                )}
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Manifest / DB' : 'Manifest / 数据库'}</span>
+                <span>
+                  {toNumber(timeseriesResultCatalog.manifest_count)} / {toNumber(timeseriesResultCatalog.db_count)}
+                </span>
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Issue count' : '问题数量'}</span>
+                <span>{toNumber(timeseriesResultCatalog.issue_count)}</span>
+              </div>
+              <div className="health-card-note">
+                {en
+                  ? 'Managed timeseries products are indexed from canonical publish manifests.'
+                  : '时序 InSAR 产物已按标准发布包 manifest 进行索引和自检。'}
+              </div>
+            </div>
+
+            <div className="health-card">
               <div className="health-card-title">{en ? 'Pairing System' : '配对系统'}</div>
               <div className="health-card-row">
                 <span>{en ? 'Overall' : '总体状态'}</span>
@@ -808,6 +849,78 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                   {en ? 'Log in as admin to view path-level diagnostics.' : '管理员登录后可查看路径级诊断信息。'}
                 </div>
               ) : null}
+            </div>
+
+            <div className="health-card">
+              <div className="health-card-title">{en ? 'Product Packages' : '标准结果包'}</div>
+              <div className="health-card-row">
+                <span>{en ? 'Overall' : '总体状态'}</span>
+                {renderBadge(
+                  productPackages.ok,
+                  `${toNumber(productPackages.canonical_count)} / ${toNumber(productPackages.total_count)}`
+                )}
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Manifest / publish dir' : 'Manifest / 发布目录'}</span>
+                <span>
+                  {toNumber(productPackages.missing_manifest_count)} / {toNumber(productPackages.missing_publish_dir_count)}
+                </span>
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Processor / runtime' : '处理器 / 运行时'}</span>
+                <span>
+                  {toNumber(productPackages.missing_processor_count)} / {toNumber(productPackages.missing_runtime_count)}
+                </span>
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Native output trace' : '原生输出追踪'}</span>
+                <span>{toNumber(productPackages.missing_native_output_count)}</span>
+              </div>
+              <div className="health-card-note">
+                {en
+                  ? 'Catalog registration now checks canonical package metadata instead of guessing engine-native directories.'
+                  : '目录登记现在直接校验标准包元数据，不再依赖猜测引擎原生目录结构。'}
+              </div>
+            </div>
+
+            <div className="health-card">
+              <div className="health-card-title">{en ? 'WSL Runtime' : 'WSL 运行时'}</div>
+              <div className="health-card-row">
+                <span>{en ? 'Overall' : '总体状态'}</span>
+                {renderBadge(
+                  wslRuntime.ok,
+                  `${toNumber(wslRuntime.healthy_runtime_count)} / ${toNumber(wslRuntime.required_runtime_count)}`
+                )}
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Broker root' : 'Broker 根目录'}</span>
+                {renderBadge(wslRuntime.broker_job_root_exists)}
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Shared distro' : '共享发行版'}</span>
+                <span>{wslRuntime.shared_distro || '-'}</span>
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'Shared conda env' : '共享 conda 环境'}</span>
+                <span>{wslRuntime.shared_conda_env_name || '-'}</span>
+              </div>
+              {wslRuntimeItems.length > 0 && (
+                wslRuntimeItems.map((item) => (
+                  <div
+                    key={item.runtime_id || item.engine_code}
+                    className={`health-card-note ${item.ok ? 'ok' : (item.required ? 'error' : 'warn')}`}
+                  >
+                    <div style={{ fontWeight: 600 }}>
+                      {item.display_name || item.runtime_id || item.engine_code}
+                    </div>
+                    <div>
+                      {(item.required ? (en ? 'Required' : '必需') : (en ? 'Reserved' : '预留'))}
+                      {' · '}
+                      {item.runner_exists ? (en ? 'Runner OK' : 'Runner 正常') : (en ? 'Runner missing' : 'Runner 缺失')}
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
 
             <div className="health-card">

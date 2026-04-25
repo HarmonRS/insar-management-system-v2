@@ -1,7 +1,9 @@
 """ISCE2 D-InSAR engine backed by a WSL pipeline script."""
 from __future__ import annotations
 
+import json
 import os
+import shlex
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -15,6 +17,10 @@ from ..services.dinsar_naming import (
     find_json_sidecar,
     write_run_metadata,
 )
+from ..services.dinsar_result_layout_service import (
+    normalize_isce2_run_layout,
+)
+from ..services.isce2_result_validator import validate_isce2_result_files
 
 
 LT1_FIXED_WAVELENGTH = 0.23793052222222222
@@ -25,6 +31,7 @@ ORBIT_MARGIN_MIN_SEC = 60.0
 ORBIT_MARGIN_MAX_SEC = 120.0
 TARGET_GRID_SIZE_MIN_M = 5
 TARGET_GRID_SIZE_MAX_M = 100
+RERUN_MODE_UNFINISHED_ONLY = "unfinished_only"
 
 
 def _read_env(name: str, default: str = "") -> str:
@@ -45,6 +52,60 @@ def _windows_path_to_wsl_mount(path: str) -> str:
     drive_letter = drive.rstrip(":").lower()
     normalized_tail = tail.replace("\\", "/")
     return f"/mnt/{drive_letter}/{normalized_tail}"
+
+
+def _join_argv_for_log(argv: List[str]) -> str:
+    return " ".join(shlex.quote(str(item)) for item in argv if str(item))
+
+
+def _normalize_rerun_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized == RERUN_MODE_UNFINISHED_ONLY else "rerun_all"
+
+
+def _normalize_optional_path(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return os.path.normpath(os.path.abspath(text))
+
+
+def _load_json_file(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _find_isce2_export_outputs(export_dir: str) -> Dict[str, str]:
+    normalized_export_dir = _normalize_optional_path(export_dir)
+    if not normalized_export_dir or not os.path.isdir(normalized_export_dir):
+        return {}
+
+    outputs: Dict[str, str] = {}
+    with os.scandir(normalized_export_dir) as entries:
+        files = sorted(
+            [entry for entry in entries if entry.is_file()],
+            key=lambda entry: entry.name.lower(),
+        )
+    for entry in files:
+        lower_name = entry.name.lower()
+        if lower_name.endswith(("_disp_full.tif", "_disp_full.tiff")):
+            continue
+        if "disp" not in outputs and (
+            lower_name in {"disp.tif", "disp.tiff"}
+            or lower_name.endswith(("_disp.tif", "_disp.tiff"))
+        ):
+            outputs["disp"] = entry.path
+            continue
+        if "coh" not in outputs and (
+            lower_name in {"coh.tif", "coh.tiff"}
+            or lower_name.endswith(("_coh.tif", "_coh.tiff"))
+        ):
+            outputs["coh"] = entry.path
+    return outputs
 
 
 class Isce2Engine(DinsarEngine):
@@ -78,6 +139,10 @@ class Isce2Engine(DinsarEngine):
             "ISCE2_PYTHON",
             "/home/administrator/miniconda3/envs/isce2/bin/python",
         )
+
+    @property
+    def _runtime_id(self) -> str:
+        return _read_env("ISCE2_RUNTIME_ID", settings.ISCE2_RUNTIME_ID or "isce2_runtime_v1")
 
     @property
     def _dem_path(self) -> str:
@@ -315,7 +380,45 @@ class Isce2Engine(DinsarEngine):
     # Task discovery
     # ------------------------------------------------------------------
 
-    def validate_root_dir(self, root_dir: str, num_to_process: int = 0) -> Dict[str, Any]:
+    def _has_completed_task_result(self, task_dir: str, profile_code: str) -> bool:
+        task_name = os.path.basename(os.path.normpath(task_dir))
+        pair_meta = find_json_sidecar(task_dir, PAIR_META_FILENAME, max_levels=0) or {}
+        task_alias = str(pair_meta.get("task_alias") or task_name).strip() or task_name
+        pair_key = str(pair_meta.get("pair_key") or "").strip() or build_fallback_pair_key(task_alias, task_dir)
+        pointer_path = os.path.join(
+            settings.DINSAR_PRODUCT_DIR,
+            pair_key,
+            "current",
+            f"{self.engine_code}__{str(profile_code or '').strip()}.json",
+        )
+        if not os.path.isfile(pointer_path):
+            return False
+
+        payload = _load_json_file(pointer_path)
+        if str(payload.get("status") or "").strip().upper() != "COMPLETED":
+            return False
+
+        primary_file = _normalize_optional_path(payload.get("primary_file"))
+        source_files = payload.get("source_files") if isinstance(payload.get("source_files"), list) else []
+        validation = validate_isce2_result_files(primary_file, source_files)
+        if not bool(validation.get("accepted")):
+            return False
+
+        manifest_path = _normalize_optional_path(payload.get("manifest_path"))
+        if manifest_path and os.path.isfile(manifest_path):
+            return True
+
+        output_dir = _normalize_optional_path(payload.get("output_dir"))
+        if output_dir and os.path.isfile(os.path.join(output_dir, "execution_manifest.json")):
+            return True
+        return False
+
+    def validate_root_dir(
+        self,
+        root_dir: str,
+        num_to_process: int = 0,
+        rerun_mode: str = "rerun_all",
+    ) -> Dict[str, Any]:
         normalized_root = os.path.normpath(os.path.abspath(str(root_dir or "").strip()))
         if not root_dir or not os.path.isdir(normalized_root):
             raise ValueError(f"ISCE2 root_dir does not exist or is not a directory: {root_dir}")
@@ -353,16 +456,93 @@ class Isce2Engine(DinsarEngine):
                 f"{detail}"
             )
 
+        discovered_task_count = len(task_dirs)
+        skipped_completed_count = 0
+        selected_task_dirs = task_dirs
+        if _normalize_rerun_mode(rerun_mode) == RERUN_MODE_UNFINISHED_ONLY:
+            selected_task_dirs = []
+            for task_dir in task_dirs:
+                if self._has_completed_task_result(task_dir, "lt1_stripmap"):
+                    skipped_completed_count += 1
+                    continue
+                selected_task_dirs.append(task_dir)
+
         selected_count = int(num_to_process or 0)
         if selected_count > 0:
-            task_dirs = task_dirs[:selected_count]
+            selected_task_dirs = selected_task_dirs[:selected_count]
 
         return {
             "root_dir": normalized_root,
             "mode": mode,
-            "task_dirs": task_dirs,
-            "task_count": len(task_dirs),
+            "task_dirs": selected_task_dirs,
+            "task_count": len(selected_task_dirs),
+            "selected_task_count": len(selected_task_dirs),
+            "discovered_task_count": discovered_task_count,
+            "skipped_completed_count": skipped_completed_count,
             "invalid_candidates": invalid_candidates,
+        }
+
+    def _build_lt1_manifest_payload(
+        self,
+        *,
+        request: RunRequest,
+        task_dir: str,
+        task_name: str,
+        task_alias: str,
+        pair_key: str,
+        run_key: str,
+        work_dir: str,
+        output_dir: str,
+        orbit_output_dir: str,
+        wsl_task_dir: str,
+        wsl_work_dir: str,
+        wsl_output_dir: str,
+        wsl_orbit_output_dir: str,
+        wsl_orbit_root: str,
+        wsl_dem: str,
+        force: bool,
+        target_grid_size_m: int,
+        bbox: str,
+        coh_threshold: Any,
+        bbox_margin: Any,
+        wavelength: Any,
+        orbit_margin_sec: Any,
+        pair_meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "job_id": request.job_id,
+            "profile": request.profile,
+            "task_name": task_name,
+            "task_alias": task_alias,
+            "pair_key": pair_key,
+            "run_key": run_key,
+            "paths": {
+                "source_root_windows": os.path.normpath(
+                    str((request.extra or {}).get("__source_root_override") or request.root_dir)
+                ),
+                "task_dir_windows": os.path.normpath(task_dir),
+                "task_dir_wsl": wsl_task_dir,
+                "work_dir_windows": work_dir,
+                "work_dir_wsl": wsl_work_dir,
+                "output_dir_windows": output_dir,
+                "output_dir_wsl": wsl_output_dir,
+                "orbit_output_dir_windows": orbit_output_dir,
+                "orbit_output_dir_wsl": wsl_orbit_output_dir,
+                "orbit_root_windows": self._orbit_pool_isce2,
+                "orbit_root_wsl": wsl_orbit_root,
+                "dem_path_windows": self._dem_path,
+                "dem_path_wsl": wsl_dem,
+            },
+            "params": {
+                "force": bool(force),
+                "target_grid_size_m": int(target_grid_size_m),
+                "bbox": str(bbox or "").strip(),
+                "coh_threshold": coh_threshold,
+                "bbox_margin": bbox_margin,
+                "wavelength": wavelength,
+                "orbit_margin_sec": orbit_margin_sec,
+            },
+            "pair_meta": dict(pair_meta or {}),
         }
 
     @staticmethod
@@ -409,16 +589,50 @@ class Isce2Engine(DinsarEngine):
         return self._run_lt1_stripmap(request)
 
     def _run_lt1_stripmap(self, request: RunRequest) -> RunResult:
-        from ..services.wsl_service import run_wsl_command, windows_path_to_wsl
+        from ..services.wsl_broker import wsl_broker
+        from ..services.wsl_runtime_registry import get_wsl_runtime
+        from ..services.wsl_service import windows_path_to_wsl
 
         extra = self.normalize_extra(request.extra)
-        validation = self.validate_root_dir(request.root_dir, request.num_to_process)
+        validation = self.validate_root_dir(
+            request.root_dir,
+            request.num_to_process,
+            str((request.extra or {}).get("__rerun_mode") or "rerun_all"),
+        )
         task_dirs: List[str] = validation["task_dirs"]
         total_tasks = len(task_dirs)
         run_started_at = datetime.utcnow()
         run_started_at_text = run_started_at.isoformat(timespec="seconds") + "Z"
-        run_key = build_run_key(self.engine_code, request.profile, started_at=run_started_at)
+        run_key = str(extra.get("__managed_run_key") or "").strip() or build_run_key(
+            self.engine_code,
+            request.profile,
+            started_at=run_started_at,
+        )
         progress_callback = request.progress_callback
+        runtime = get_wsl_runtime(self._runtime_id)
+        managed_run_dir_override = _normalize_optional_path(extra.get("__managed_run_dir"))
+        managed_native_output_dir_override = _normalize_optional_path(extra.get("__managed_native_output_dir"))
+        managed_work_dir_override = _normalize_optional_path(extra.get("__managed_work_dir"))
+        managed_export_dir_override = _normalize_optional_path(extra.get("__managed_export_dir"))
+        managed_orbit_output_dir_override = _normalize_optional_path(extra.get("__managed_orbit_output_dir"))
+        source_root_override = _normalize_optional_path(extra.get("__source_root_override")) or os.path.normpath(request.root_dir)
+        has_managed_override = any(
+            [
+                managed_run_dir_override,
+                managed_native_output_dir_override,
+                managed_work_dir_override,
+                managed_export_dir_override,
+                managed_orbit_output_dir_override,
+            ]
+        )
+        if has_managed_override and total_tasks > 1:
+            return RunResult(
+                success=False,
+                engine_code=self.engine_code,
+                profile=request.profile,
+                job_id=request.job_id,
+                error="Managed ISCE2 directory overrides require a single task request.",
+            )
 
         def emit_progress(event_type: str, **payload: Any) -> None:
             if not callable(progress_callback):
@@ -439,11 +653,11 @@ class Isce2Engine(DinsarEngine):
 
         wsl_isce2_pool = ""
         if self._orbit_pool_isce2:
-            wsl_isce2_pool = windows_path_to_wsl(self._orbit_pool_isce2, distro=self._distro)
+            wsl_isce2_pool = windows_path_to_wsl(self._orbit_pool_isce2, distro=runtime.distro)
 
         wsl_dem = ""
         if self._dem_path:
-            wsl_dem = windows_path_to_wsl(self._dem_path, distro=self._distro)
+            wsl_dem = windows_path_to_wsl(self._dem_path, distro=runtime.distro)
 
         task_results: List[Dict[str, Any]] = []
         output_dirs: List[str] = []
@@ -455,15 +669,18 @@ class Isce2Engine(DinsarEngine):
             pair_meta = find_json_sidecar(task_dir, PAIR_META_FILENAME, max_levels=0) or {}
             task_alias = str(pair_meta.get("task_alias") or task_name).strip() or task_name
             pair_key = str(pair_meta.get("pair_key") or "").strip() or build_fallback_pair_key(task_alias, task_dir)
-            work_root = self._work_root or os.path.join(task_dir, "isce2_work")
             output_root = self._output_root or os.path.join(task_dir, "isce2_output")
-            work_dir = os.path.normpath(os.path.join(work_root, pair_key, run_key))
-            output_dir = os.path.normpath(os.path.join(output_root, pair_key, run_key, "native"))
-            orbit_output_dir = os.path.join(work_dir, "orbits")
-            wsl_task_dir = windows_path_to_wsl(task_dir, distro=self._distro)
-            wsl_work_dir = windows_path_to_wsl(work_dir, distro=self._distro)
-            wsl_output_dir = windows_path_to_wsl(output_dir, distro=self._distro)
-            wsl_orbit_output_dir = windows_path_to_wsl(orbit_output_dir, distro=self._distro)
+            run_dir = managed_run_dir_override or os.path.normpath(
+                os.path.join(output_root, pair_key, "runs", run_key)
+            )
+            native_output_dir = managed_native_output_dir_override or os.path.join(run_dir, "native")
+            work_dir = managed_work_dir_override or os.path.join(native_output_dir, "workflow")
+            export_dir = managed_export_dir_override or os.path.join(native_output_dir, "export")
+            orbit_output_dir = managed_orbit_output_dir_override or os.path.join(work_dir, "orbits")
+            wsl_task_dir = windows_path_to_wsl(task_dir, distro=runtime.distro)
+            wsl_work_dir = windows_path_to_wsl(work_dir, distro=runtime.distro)
+            wsl_output_dir = windows_path_to_wsl(export_dir, distro=runtime.distro)
+            wsl_orbit_output_dir = windows_path_to_wsl(orbit_output_dir, distro=runtime.distro)
             emit_progress(
                 "pair_started",
                 pair_index=pair_index,
@@ -473,7 +690,7 @@ class Isce2Engine(DinsarEngine):
                 pair_key=pair_key,
                 task_dir=task_dir,
                 work_dir=work_dir,
-                output_dir=output_dir,
+                output_dir=run_dir,
             )
             if not wsl_task_dir:
                 pairs_failed += 1
@@ -496,8 +713,11 @@ class Isce2Engine(DinsarEngine):
                         "pair_key": pair_key,
                         "run_key": run_key,
                         "task_dir": task_dir,
+                        "run_dir": run_dir,
+                        "native_output_dir": native_output_dir,
                         "work_dir": work_dir,
-                        "output_dir": output_dir,
+                        "output_dir": run_dir,
+                        "export_dir": export_dir,
                         "success": False,
                         "returncode": -2,
                         "error": error_text,
@@ -531,8 +751,11 @@ class Isce2Engine(DinsarEngine):
                         "pair_key": pair_key,
                         "run_key": run_key,
                         "task_dir": task_dir,
+                        "run_dir": run_dir,
+                        "native_output_dir": native_output_dir,
                         "work_dir": work_dir,
-                        "output_dir": output_dir,
+                        "output_dir": run_dir,
+                        "export_dir": export_dir,
                         "success": False,
                         "returncode": -2,
                         "error": error_text,
@@ -546,92 +769,137 @@ class Isce2Engine(DinsarEngine):
                 )
                 continue
 
-            cmd_parts = [
-                "export PROJ_DATA=/home/administrator/miniconda3/envs/isce2/share/proj",
-                f"&& {self._python} '{self._pipeline_script}' '{wsl_task_dir}'",
-                f"--task-name '{task_alias}'",
-                f"--output-prefix '{task_alias}'",
-                f"--work-dir '{wsl_work_dir}'",
-                f"--output-dir '{wsl_output_dir}'",
-                f"--orbit-output-dir '{wsl_orbit_output_dir}'",
-            ]
-            if wsl_isce2_pool:
-                cmd_parts.append(f"--orbit-root '{wsl_isce2_pool}'")
-            if wsl_dem:
-                cmd_parts.append(f"--dem '{wsl_dem}'")
-            if force:
-                cmd_parts.append("--force")
-            if target_grid_size_m:
-                cmd_parts.append(f"--target-grid-size-m {target_grid_size_m}")
-            if bbox:
-                cmd_parts.append(f"--bbox '{bbox}'")
-            if coh_threshold is not None:
-                cmd_parts.append(f"--coh-threshold {coh_threshold}")
-            if bbox_margin is not None:
-                cmd_parts.append(f"--bbox-margin {bbox_margin}")
-            if wavelength is not None:
-                cmd_parts.append(f"--wavelength {wavelength}")
-            if orbit_margin_sec is not None:
-                cmd_parts.append(f"--orbit-margin-sec {orbit_margin_sec}")
-
-            cmd = " ".join(cmd_parts)
-            rc, stdout, stderr = run_wsl_command(
-                cmd,
-                distro=self._distro,
-                timeout=timeout,
+            manifest_payload = self._build_lt1_manifest_payload(
+                request=request,
+                task_dir=task_dir,
+                task_name=task_name,
+                task_alias=task_alias,
+                pair_key=pair_key,
+                run_key=run_key,
+                work_dir=work_dir,
+                output_dir=export_dir,
+                orbit_output_dir=orbit_output_dir,
+                wsl_task_dir=wsl_task_dir,
+                wsl_work_dir=wsl_work_dir,
+                wsl_output_dir=wsl_output_dir,
+                wsl_orbit_output_dir=wsl_orbit_output_dir,
+                wsl_orbit_root=wsl_isce2_pool,
+                wsl_dem=wsl_dem,
+                force=force,
+                target_grid_size_m=target_grid_size_m,
+                bbox=bbox,
+                coh_threshold=coh_threshold,
+                bbox_margin=bbox_margin,
+                wavelength=wavelength,
+                orbit_margin_sec=orbit_margin_sec,
+                pair_meta=pair_meta,
             )
+            broker_result = wsl_broker.run_manifest(
+                runtime_id=runtime.runtime_id,
+                operation="lt1_stripmap",
+                payload=manifest_payload,
+                job_id=f"{request.job_id}_{pair_key}",
+                timeout_seconds=timeout,
+            )
+            rc = broker_result.returncode
+            stdout = broker_result.stdout
+            stderr = broker_result.stderr
+            command = _join_argv_for_log(list(broker_result.argv))
 
-            success = rc == 0
-            if success:
-                pairs_processed += 1
-                os.makedirs(output_dir, exist_ok=True)
-                write_run_metadata(
-                    output_dir,
-                    {
-                        "run_key": run_key,
-                        "pair_key": pair_key,
-                        "task_name": task_name,
-                        "task_alias": task_alias,
-                        "engine_code": self.engine_code,
-                        "profile_code": request.profile,
-                        "source_root": os.path.normpath(request.root_dir),
-                        "task_dir": os.path.normpath(task_dir),
-                        "work_dir": work_dir,
-                        "output_dir": output_dir,
-                        "orbit_output_dir": orbit_output_dir,
-                        "started_at": run_started_at_text,
-                        "finished_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                        "params": {
-                            "force": force,
-                            "target_grid_size_m": target_grid_size_m,
-                            "bbox": bbox,
-                            "coh_threshold": coh_threshold,
-                            "bbox_margin": bbox_margin,
-                            "wavelength": wavelength,
-                            "orbit_margin_sec": orbit_margin_sec,
+            success = False
+            layout_result: Dict[str, Any] = {}
+            validation_result: Dict[str, Any] = {}
+            error_text = stderr.strip() if stderr else ""
+            if rc == 0:
+                try:
+                    os.makedirs(run_dir, exist_ok=True)
+                    export_outputs = _find_isce2_export_outputs(export_dir)
+                    disp_path = export_outputs.get("disp", "")
+                    coh_path = export_outputs.get("coh", "")
+                    if not disp_path:
+                        raise FileNotFoundError(
+                            f"No ISCE2 displacement GeoTIFF found under export dir: {export_dir}"
+                        )
+
+                    source_files = [disp_path]
+                    if coh_path:
+                        source_files.append(coh_path)
+                    validation_result = validate_isce2_result_files(disp_path, source_files)
+                    if not bool(validation_result.get("accepted")):
+                        issues = validation_result.get("issues") or []
+                        issue_text = "; ".join(str(item) for item in issues[:3]) or "unknown validation error"
+                        raise RuntimeError(f"ISCE2 output validation failed: {issue_text}")
+
+                    layout_result = normalize_isce2_run_layout(
+                        run_dir,
+                        primary_file=str(validation_result.get("primary_file") or disp_path),
+                        source_files=list(validation_result.get("source_files") or source_files),
+                        rewrite_metadata=False,
+                    )
+                    write_run_metadata(
+                        run_dir,
+                        {
+                            "run_key": run_key,
+                            "pair_key": pair_key,
+                            "task_name": task_name,
+                            "task_alias": task_alias,
+                            "engine_code": self.engine_code,
+                            "profile_code": request.profile,
+                            "source_root": source_root_override,
+                            "task_dir": os.path.normpath(task_dir),
+                            "work_dir": work_dir,
+                            "export_dir": export_dir,
+                            "output_dir": run_dir,
+                            "native_output_dir": layout_result["native_output_dir"],
+                            "orbit_output_dir": orbit_output_dir,
+                            "runtime_id": runtime.runtime_id,
+                            "manifest_path_windows": broker_result.manifest.manifest_path_windows,
+                            "manifest_path_wsl": broker_result.manifest.manifest_path_wsl,
+                            "started_at": run_started_at_text,
+                            "finished_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                            "primary_file": layout_result["primary_file"],
+                            "source_files": layout_result["source_files"],
+                            "acceptance": validation_result,
+                            "params": {
+                                "force": force,
+                                "target_grid_size_m": target_grid_size_m,
+                                "bbox": bbox,
+                                "coh_threshold": coh_threshold,
+                                "bbox_margin": bbox_margin,
+                                "wavelength": wavelength,
+                                "orbit_margin_sec": orbit_margin_sec,
+                            },
+                            "master_path": pair_meta.get("master_path"),
+                            "slave_path": pair_meta.get("slave_path"),
+                            "master_satellite": pair_meta.get("master_satellite"),
+                            "slave_satellite": pair_meta.get("slave_satellite"),
+                            "master_imaging_date": pair_meta.get("master_imaging_date"),
+                            "slave_imaging_date": pair_meta.get("slave_imaging_date"),
+                            "master_imaging_mode": pair_meta.get("master_imaging_mode"),
+                            "slave_imaging_mode": pair_meta.get("slave_imaging_mode"),
+                            "master_polarization": pair_meta.get("master_polarization"),
+                            "slave_polarization": pair_meta.get("slave_polarization"),
+                            "time_baseline_days": pair_meta.get("time_baseline_days"),
+                            "spatial_baseline_meters": pair_meta.get("spatial_baseline_meters"),
+                            "scene_pair_uid": pair_meta.get("scene_pair_uid") or pair_meta.get("pair_uid"),
+                            "pair_uid": pair_meta.get("pair_uid") or pair_meta.get("scene_pair_uid"),
+                            "network_run_id": pair_meta.get("network_run_id"),
+                            "network_edge_id": pair_meta.get("network_edge_id"),
+                            "policy_version": pair_meta.get("policy_version"),
+                            "selection_strategy": pair_meta.get("selection_strategy"),
                         },
-                        "master_path": pair_meta.get("master_path"),
-                        "slave_path": pair_meta.get("slave_path"),
-                        "master_satellite": pair_meta.get("master_satellite"),
-                        "slave_satellite": pair_meta.get("slave_satellite"),
-                        "master_imaging_date": pair_meta.get("master_imaging_date"),
-                        "slave_imaging_date": pair_meta.get("slave_imaging_date"),
-                        "master_imaging_mode": pair_meta.get("master_imaging_mode"),
-                        "slave_imaging_mode": pair_meta.get("slave_imaging_mode"),
-                        "master_polarization": pair_meta.get("master_polarization"),
-                        "slave_polarization": pair_meta.get("slave_polarization"),
-                        "time_baseline_days": pair_meta.get("time_baseline_days"),
-                        "spatial_baseline_meters": pair_meta.get("spatial_baseline_meters"),
-                        "scene_pair_uid": pair_meta.get("scene_pair_uid") or pair_meta.get("pair_uid"),
-                        "pair_uid": pair_meta.get("pair_uid") or pair_meta.get("scene_pair_uid"),
-                        "network_run_id": pair_meta.get("network_run_id"),
-                        "network_edge_id": pair_meta.get("network_edge_id"),
-                        "policy_version": pair_meta.get("policy_version"),
-                        "selection_strategy": pair_meta.get("selection_strategy"),
-                    },
-                )
-                output_dirs.append(output_dir)
-            else:
+                    )
+                    output_dirs.append(run_dir)
+                    pairs_processed += 1
+                    success = True
+                except Exception as exc:
+                    error_text = str(exc)
+                    if stderr:
+                        stderr = stderr.rstrip() + "\n" + error_text
+                    else:
+                        stderr = error_text
+
+            if not success:
                 pairs_failed += 1
 
             emit_progress(
@@ -643,7 +911,7 @@ class Isce2Engine(DinsarEngine):
                 pair_key=pair_key,
                 success=success,
                 returncode=rc,
-                error=stderr.strip() if stderr else "",
+                error=error_text,
             )
             task_results.append(
                 {
@@ -652,17 +920,30 @@ class Isce2Engine(DinsarEngine):
                     "pair_key": pair_key,
                     "run_key": run_key,
                     "task_dir": task_dir,
+                    "run_dir": run_dir,
+                    "native_output_dir": (
+                        layout_result.get("native_output_dir")
+                        or native_output_dir
+                    ),
                     "work_dir": work_dir,
-                    "output_dir": output_dir,
+                    "output_dir": run_dir,
+                    "export_dir": export_dir,
+                    "primary_file": layout_result.get("primary_file", ""),
+                    "source_files": layout_result.get("source_files", []),
+                    "validation": validation_result,
                     "wsl_task_dir": wsl_task_dir,
                     "wsl_work_dir": wsl_work_dir,
                     "wsl_output_dir": wsl_output_dir,
-                    "command": cmd,
+                    "runtime_id": runtime.runtime_id,
+                    "command": command,
+                    "runner_argv": list(broker_result.argv),
+                    "manifest_path_windows": broker_result.manifest.manifest_path_windows,
+                    "manifest_path_wsl": broker_result.manifest.manifest_path_wsl,
                     "success": success,
                     "returncode": rc,
                     "stdout_tail": stdout[-3000:] if stdout else "",
                     "stderr_tail": stderr[-3000:] if stderr else "",
-                    "error": stderr.strip() if stderr else "",
+                    "error": error_text,
                 }
             )
 
@@ -706,7 +987,11 @@ class Isce2Engine(DinsarEngine):
                 "target_grid_size_m": target_grid_size_m,
                 "wavelength": wavelength,
                 "orbit_margin_sec": orbit_margin_sec,
+                "runtime_id": runtime.runtime_id,
                 "command": last_task_result.get("command", ""),
+                "runner_argv": last_task_result.get("runner_argv", []),
+                "manifest_path_windows": last_task_result.get("manifest_path_windows", ""),
+                "manifest_path_wsl": last_task_result.get("manifest_path_wsl", ""),
                 "stdout_tail": last_task_result.get("stdout_tail", ""),
                 "stderr_tail": last_task_result.get("stderr_tail", ""),
                 "wsl_task_dir": last_task_result.get("wsl_task_dir", ""),
@@ -714,7 +999,15 @@ class Isce2Engine(DinsarEngine):
                 "wsl_output_dir": last_task_result.get("wsl_output_dir", ""),
                 "wsl_orbit_pool": wsl_isce2_pool,
                 "wsl_dem": wsl_dem,
-                "wsl_work_root": windows_path_to_wsl(self._work_root, distro=self._distro) if self._work_root else "",
-                "wsl_output_root": windows_path_to_wsl(self._output_root, distro=self._distro) if self._output_root else "",
+                "wsl_work_root": (
+                    os.path.dirname(str(last_task_result.get("wsl_work_dir") or "").strip())
+                    if str(last_task_result.get("wsl_work_dir") or "").strip()
+                    else (windows_path_to_wsl(self._work_root, distro=runtime.distro) if self._work_root else "")
+                ),
+                "wsl_output_root": (
+                    os.path.dirname(str(last_task_result.get("wsl_output_dir") or "").strip())
+                    if str(last_task_result.get("wsl_output_dir") or "").strip()
+                    else (windows_path_to_wsl(self._output_root, distro=runtime.distro) if self._output_root else "")
+                ),
             },
         )

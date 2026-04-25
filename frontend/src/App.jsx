@@ -304,11 +304,16 @@ function App() {
             return undefined;
         }
 
-        const frameId = requestAnimationFrame(() => {
+        const invalidateMap = () => {
             mapRef.current?.invalidateSize(false);
-        });
+        };
+        const frameId = requestAnimationFrame(invalidateMap);
+        const timeoutId = window.setTimeout(invalidateMap, 120);
 
-        return () => cancelAnimationFrame(frameId);
+        return () => {
+            cancelAnimationFrame(frameId);
+            window.clearTimeout(timeoutId);
+        };
     }, [isStandaloneLeftPage, leftPanelWidth, rightPanelWidth]);
 
     const getVisibleLayerRefs = useCallback(() => ({
@@ -1624,32 +1629,49 @@ function App() {
                     psPanel={psPanel}
                 />
 
-                {!isStandaloneLeftPage && (
-                    <>
-                        <div className="panel-resizer" onMouseDown={(event) => startResize('left', event)} />
+                <div
+                    className="panel-resizer"
+                    onMouseDown={(event) => startResize('left', event)}
+                    style={{ display: isStandaloneLeftPage ? 'none' : undefined }}
+                />
 
-                        <AppMapWorkspace
-                            language={language}
-                            showMapRegionLocator={showMapRegionLocator}
-                            toggleMapRegionLocator={toggleMapRegionLocator}
-                            mapRegionOptions={mapRegionOptions}
-                            mapRegionSelection={mapRegionSelection}
-                            mapRegionLoading={mapRegionLoading}
-                            mapRegionLocating={mapRegionLocating}
-                            mapRegionError={mapRegionError}
-                            mapRegionLocatedName={mapRegionLocatedName}
-                            onMapRegionProvinceChange={handleMapRegionProvinceChange}
-                            onMapRegionCityChange={handleMapRegionCityChange}
-                            onLocateSelectedRegion={locateSelectedRegionOnMap}
-                            onClearMapRegionHighlight={clearMapRegionHighlight}
-                            baseLayerKey={baseLayerKey}
-                            setBaseLayerKey={setBaseLayerKey}
-                            onOpenExportModal={mapExport.openExportModal}
-                        />
-                        <div className="panel-resizer" onMouseDown={(event) => startResize('right', event)} />
-                        <AppLogPanel width={rightPanelWidth} />
-                    </>
-                )}
+                <div
+                    style={{
+                        display: isStandaloneLeftPage ? 'none' : 'flex',
+                        flex: '1 1 auto',
+                        minWidth: 0,
+                        minHeight: 0,
+                    }}
+                >
+                    <AppMapWorkspace
+                        language={language}
+                        showMapRegionLocator={showMapRegionLocator}
+                        toggleMapRegionLocator={toggleMapRegionLocator}
+                        mapRegionOptions={mapRegionOptions}
+                        mapRegionSelection={mapRegionSelection}
+                        mapRegionLoading={mapRegionLoading}
+                        mapRegionLocating={mapRegionLocating}
+                        mapRegionError={mapRegionError}
+                        mapRegionLocatedName={mapRegionLocatedName}
+                        onMapRegionProvinceChange={handleMapRegionProvinceChange}
+                        onMapRegionCityChange={handleMapRegionCityChange}
+                        onLocateSelectedRegion={locateSelectedRegionOnMap}
+                        onClearMapRegionHighlight={clearMapRegionHighlight}
+                        baseLayerKey={baseLayerKey}
+                        setBaseLayerKey={setBaseLayerKey}
+                        onOpenExportModal={mapExport.openExportModal}
+                    />
+                </div>
+
+                <div
+                    className="panel-resizer"
+                    onMouseDown={(event) => startResize('right', event)}
+                    style={{ display: isStandaloneLeftPage ? 'none' : undefined }}
+                />
+
+                <div style={{ display: isStandaloneLeftPage ? 'none' : undefined }}>
+                    <AppLogPanel width={rightPanelWidth} />
+                </div>
             </div>
 
             <AppOverlays

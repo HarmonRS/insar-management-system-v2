@@ -1,0 +1,22 @@
+{
+  "python": "/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python",
+  "python_version": "3.11.15",
+  "packages": {
+    "isce": true,
+    "rasterio": true,
+    "osgeo": true,
+    "numpy": true,
+    "scipy": true,
+    "mintpy": true
+  },
+  "versions": {
+    "rasterio": "1.4.4",
+    "gdal": "3100300",
+    "numpy": "1.26.4",
+    "scipy": "1.17.1"
+  },
+  "module_paths": {
+    "isce": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/isce/__init__.py",
+    "mintpy": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/mintpy/__init__.py"
+  }
+}

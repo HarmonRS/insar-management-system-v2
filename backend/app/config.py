@@ -30,6 +30,17 @@ def _clean_path_text(value: str | None) -> str:
     return str(value or "").strip().strip('"').strip("'")
 
 
+def _infer_conda_env_name_from_python(path: str | None) -> str:
+    text = _clean_path_text(path)
+    marker = "/envs/"
+    if not text or marker not in text:
+        return ""
+    tail = text.split(marker, 1)[1].strip("/")
+    if not tail:
+        return ""
+    return tail.split("/", 1)[0].strip()
+
+
 def _default_idl_runtime_dir() -> str:
     return os.path.join(_BACKEND_DIR, "runtime", "idl_worker")
 
@@ -56,6 +67,14 @@ def _resolve_idl_runtime_dir(value: str | None) -> str:
         return normalized
 
     return os.path.normpath(os.path.abspath(normalized))
+
+
+def _default_result_publish_root(project_root: str) -> str:
+    normalized_root = os.path.normpath(project_root)
+    drive, _tail = os.path.splitdrive(normalized_root)
+    if drive:
+        return os.path.join(drive + os.sep, "production_results")
+    return os.path.join(normalized_root, "production_results")
 
 
 def _read_env_pairs(env_path: str) -> dict[str, str]:
@@ -208,9 +227,17 @@ class Settings(BaseSettings):
 
     RESULT_PUBLISH_ROOT: str = ""
     DINSAR_PRODUCT_DIR: str = ""
+    TIMESERIES_PRODUCT_DIR: str = ""
     PSINSAR_PRODUCT_DIR: str = ""
     RESULT_QUARANTINE_ROOT: str = ""
     RESULT_CATALOG_AUTO_REBUILD_ON_STARTUP: bool = True
+
+    WSL_DISTRO: str = ""
+    WSL_SHARED_CONDA_ENV: str = ""
+    WSL_SHARED_PYTHON: str = ""
+    WSL_BROKER_JOB_ROOT: str = ""
+    ISCE2_RUNTIME_ID: str = ""
+    PYINT_RUNTIME_ID: str = ""
 
     ISCE2_ENABLED: bool = False
     ISCE2_WSL_DISTRO: str = "Ubuntu-24.04"
@@ -325,7 +352,7 @@ class Settings(BaseSettings):
             object.__setattr__(
                 self,
                 "RESULT_PUBLISH_ROOT",
-                os.path.join(backend_dir, "result_products"),
+                _default_result_publish_root(project_root),
             )
         if not self.DINSAR_PRODUCT_DIR:
             object.__setattr__(
@@ -333,17 +360,39 @@ class Settings(BaseSettings):
                 "DINSAR_PRODUCT_DIR",
                 os.path.join(self.RESULT_PUBLISH_ROOT, "dinsar"),
             )
-        if not self.PSINSAR_PRODUCT_DIR:
+        timeseries_product_dir = (
+            _clean_path_text(self.TIMESERIES_PRODUCT_DIR)
+            or _clean_path_text(self.PSINSAR_PRODUCT_DIR)
+            or os.path.join(self.RESULT_PUBLISH_ROOT, "timeseries")
+        )
+        object.__setattr__(
+            self,
+            "TIMESERIES_PRODUCT_DIR",
+            os.path.normpath(timeseries_product_dir),
+        )
+        if not self.PSINSAR_PRODUCT_DIR or _clean_path_text(self.PSINSAR_PRODUCT_DIR) != self.TIMESERIES_PRODUCT_DIR:
             object.__setattr__(
                 self,
                 "PSINSAR_PRODUCT_DIR",
-                os.path.join(self.RESULT_PUBLISH_ROOT, "psinsar"),
+                self.TIMESERIES_PRODUCT_DIR,
             )
         if not self.RESULT_QUARANTINE_ROOT:
             object.__setattr__(
                 self,
                 "RESULT_QUARANTINE_ROOT",
                 os.path.join(self.RESULT_PUBLISH_ROOT, "_quarantine"),
+            )
+        if not self.ISCE2_WORK_ROOT:
+            object.__setattr__(
+                self,
+                "ISCE2_WORK_ROOT",
+                os.path.join(backend_dir, "runtime", "isce2_work"),
+            )
+        if not self.ISCE2_OUTPUT_ROOT:
+            object.__setattr__(
+                self,
+                "ISCE2_OUTPUT_ROOT",
+                self.DINSAR_PRODUCT_DIR,
             )
         if not self.ISCE2_PIPELINE_SCRIPT:
             local_pipeline = os.path.join(
@@ -358,10 +407,45 @@ class Settings(BaseSettings):
                 "ISCE2_PIPELINE_SCRIPT",
                 _windows_path_to_wsl_mount(local_pipeline),
             )
+        if not self.WSL_DISTRO:
+            fallback_distro = str(
+                self.ISCE2_WSL_DISTRO
+                or self.PYINT_WSL_DISTRO
+                or "Ubuntu-24.04"
+            ).strip()
+            object.__setattr__(self, "WSL_DISTRO", fallback_distro)
+        if not self.WSL_SHARED_CONDA_ENV:
+            shared_conda_env = (
+                _infer_conda_env_name_from_python(self.WSL_SHARED_PYTHON)
+                or _infer_conda_env_name_from_python(self.ISCE2_PYTHON)
+                or _infer_conda_env_name_from_python(self.PYINT_WSL_PYTHON)
+                or "insar_wsl_v1"
+            )
+            object.__setattr__(self, "WSL_SHARED_CONDA_ENV", shared_conda_env)
+        if not self.WSL_SHARED_PYTHON:
+            shared_python = (
+                _clean_path_text(self.ISCE2_PYTHON)
+                or _clean_path_text(self.PYINT_WSL_PYTHON)
+                or (
+                    f"/home/administrator/miniconda3/envs/"
+                    f"{self.WSL_SHARED_CONDA_ENV}/bin/python"
+                )
+            )
+            object.__setattr__(self, "WSL_SHARED_PYTHON", shared_python)
+        if not self.WSL_BROKER_JOB_ROOT:
+            object.__setattr__(
+                self,
+                "WSL_BROKER_JOB_ROOT",
+                os.path.join(backend_dir, "runtime", "wsl_jobs"),
+            )
+        if not self.ISCE2_RUNTIME_ID:
+            object.__setattr__(self, "ISCE2_RUNTIME_ID", "isce2_runtime_v1")
+        if not self.PYINT_RUNTIME_ID:
+            object.__setattr__(self, "PYINT_RUNTIME_ID", "gamma_pyint_runtime_v1")
         if not self.PYINT_WSL_DISTRO:
-            object.__setattr__(self, "PYINT_WSL_DISTRO", self.ISCE2_WSL_DISTRO)
+            object.__setattr__(self, "PYINT_WSL_DISTRO", self.WSL_DISTRO or self.ISCE2_WSL_DISTRO)
         if not self.PYINT_WSL_PYTHON:
-            object.__setattr__(self, "PYINT_WSL_PYTHON", self.ISCE2_PYTHON)
+            object.__setattr__(self, "PYINT_WSL_PYTHON", self.WSL_SHARED_PYTHON or self.ISCE2_PYTHON)
         if not self.PYINT_HOME:
             object.__setattr__(
                 self,
@@ -390,7 +474,7 @@ class Settings(BaseSettings):
             object.__setattr__(
                 self,
                 "PYINT_OUTPUT_ROOT",
-                os.path.join(backend_dir, "runtime", "pyint_output"),
+                self.DINSAR_PRODUCT_DIR,
             )
         if not self.PYINT_DEM_ROOT:
             object.__setattr__(
@@ -420,7 +504,7 @@ class Settings(BaseSettings):
         if not self.PYINT_ORBIT_POOL_TXT:
             object.__setattr__(self, "PYINT_ORBIT_POOL_TXT", self.ORBIT_POOL_ENVI)
         if not self.TIMESERIES_WSL_DISTRO:
-            object.__setattr__(self, "TIMESERIES_WSL_DISTRO", self.ISCE2_WSL_DISTRO)
+            object.__setattr__(self, "TIMESERIES_WSL_DISTRO", self.WSL_DISTRO or self.ISCE2_WSL_DISTRO)
         if not self.TIMESERIES_ENV_NAME:
             object.__setattr__(self, "TIMESERIES_ENV_NAME", "isce2_mintpy_v1")
         if not self.TIMESERIES_PYTHON:
@@ -518,8 +602,10 @@ class Settings(BaseSettings):
         os.makedirs(settings.IDL_WORKER_RUNTIME_DIR, exist_ok=True)
         os.makedirs(settings.RESULT_PUBLISH_ROOT, exist_ok=True)
         os.makedirs(settings.DINSAR_PRODUCT_DIR, exist_ok=True)
+        os.makedirs(settings.TIMESERIES_PRODUCT_DIR, exist_ok=True)
         os.makedirs(settings.PSINSAR_PRODUCT_DIR, exist_ok=True)
         os.makedirs(settings.RESULT_QUARANTINE_ROOT, exist_ok=True)
+        os.makedirs(settings.WSL_BROKER_JOB_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_TEMPLATE_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_WORK_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_OUTPUT_ROOT, exist_ok=True)
@@ -668,6 +754,16 @@ def validate_runtime_config() -> dict[str, Any]:
     _check_path(label="MONITOR_ORBIT_DIR", value=settings.MONITOR_ORBIT_DIR, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="ORBIT_POOL_ENVI", value=settings.ORBIT_POOL_ENVI, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="ORBIT_POOL_ISCE2", value=settings.ORBIT_POOL_ISCE2, errors=errors, warnings=warnings, expect_file=False)
+    _check_path(label="RESULT_PUBLISH_ROOT", value=settings.RESULT_PUBLISH_ROOT, errors=errors, warnings=warnings, expect_file=False)
+    _check_path(label="DINSAR_PRODUCT_DIR", value=settings.DINSAR_PRODUCT_DIR, errors=errors, warnings=warnings, expect_file=False)
+    _check_path(
+        label="TIMESERIES_PRODUCT_DIR",
+        value=settings.TIMESERIES_PRODUCT_DIR,
+        errors=errors,
+        warnings=warnings,
+        expect_file=False,
+    )
+    _check_path(label="RESULT_QUARANTINE_ROOT", value=settings.RESULT_QUARANTINE_ROOT, errors=errors, warnings=warnings, expect_file=False)
 
     for label, raw_value in (
         ("UNPACK_SOURCE_DIRS", settings.UNPACK_SOURCE_DIRS),
@@ -779,6 +875,43 @@ def validate_runtime_config() -> dict[str, Any]:
             warnings=warnings,
             expect_file=True,
         )
+
+    if settings.ISCE2_ENABLED or settings.PYINT_ENABLED:
+        info.append(
+            "WSL shared runtime: "
+            f"distro={settings.WSL_DISTRO or '<empty>'}, "
+            f"conda_env={settings.WSL_SHARED_CONDA_ENV or '<empty>'}, "
+            f"isce2_runtime={settings.ISCE2_RUNTIME_ID}, "
+            f"pyint_runtime={settings.PYINT_RUNTIME_ID}"
+        )
+        _check_path(
+            label="WSL_BROKER_JOB_ROOT",
+            value=settings.WSL_BROKER_JOB_ROOT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
+        )
+        if settings.ISCE2_PYTHON and settings.WSL_SHARED_PYTHON:
+            isce_python = _clean_path_text(settings.ISCE2_PYTHON)
+            shared_python = _clean_path_text(settings.WSL_SHARED_PYTHON)
+            if isce_python != shared_python:
+                warnings.append(
+                    "ISCE2_PYTHON differs from WSL_SHARED_PYTHON. "
+                    "Legacy execution path and new shared runtime are not aligned."
+                )
+        if settings.PYINT_WSL_PYTHON and settings.WSL_SHARED_PYTHON:
+            pyint_python = _clean_path_text(settings.PYINT_WSL_PYTHON)
+            shared_python = _clean_path_text(settings.WSL_SHARED_PYTHON)
+            if pyint_python != shared_python:
+                warnings.append(
+                    "PYINT_WSL_PYTHON differs from WSL_SHARED_PYTHON. "
+                    "Gamma/PyINT still depends on a legacy Python path override."
+                )
+        if settings.PYINT_GAMMA_ENV_SCRIPT:
+            warnings.append(
+                "PYINT_GAMMA_ENV_SCRIPT is still configured. "
+                "Gamma runtime has not been fully migrated to the fixed profile model."
+            )
 
     if settings.TIMESERIES_ENABLED:
         _check_path(

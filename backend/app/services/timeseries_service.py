@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from ..models import (
     WorkflowStepORM,
 )
 from .psinsar_catalog_service import psinsar_catalog_service
+from .product_packaging import upgrade_timeseries_package_manifest
 from .task_service import task_service
 from .workflow_service import workflow_service
 from .wsl_service import run_wsl_command
@@ -71,6 +73,7 @@ STACK_RUN_FILE_SEQUENCE = (
     "run_07_grid_baseline",
     "run_08_igram",
 )
+_SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z._-]+")
 
 
 def _utcnow() -> datetime:
@@ -102,6 +105,16 @@ def _normalize_date(value: Optional[str]) -> Optional[str]:
 
 def _normalize_lookup_key(path: Optional[str]) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(str(path or "").strip())))
+
+
+def _stable_digest(*parts: Any, length: int = 10) -> str:
+    payload = "||".join(str(part or "") for part in parts)
+    return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:length]
+
+
+def _slug_fragment(value: Optional[str], *, default: str) -> str:
+    text = _SAFE_NAME_RE.sub("_", str(value or "").strip()).strip("._").lower()
+    return text or default
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -190,6 +203,28 @@ def _build_stack_slug(
     )
 
 
+def _build_stack_key(group_key: Optional[str]) -> str:
+    parts = [str(item or "").strip() for item in str(group_key or "").split("|")]
+    while len(parts) < 5:
+        parts.append("")
+    satellite, imaging_mode, polarization, orbit_direction, tile_key = parts[:5]
+    return "_".join(
+        [
+            _slug_fragment(satellite, default="sat"),
+            _slug_fragment(imaging_mode, default="mode"),
+            _slug_fragment(polarization, default="pol"),
+            _slug_fragment(orbit_direction, default="dir"),
+            _slug_fragment(str(tile_key or "").replace(".", "p"), default="tile"),
+            _stable_digest(group_key, length=10),
+        ]
+    )
+
+
+def _compose_publish_dir(run_id: str, stack_key: Optional[str]) -> str:
+    stack_fragment = _slug_fragment(stack_key, default="unsorted")
+    return _normalize_path(os.path.join(settings.TIMESERIES_PRODUCT_DIR, stack_fragment, "runs", run_id))
+
+
 def _common_source_root(paths: List[str]) -> Optional[str]:
     normalized = [_normalize_path(path) for path in paths if str(path or "").strip()]
     if not normalized:
@@ -207,10 +242,9 @@ def _write_step_logs(logs_dir: Path, step_name: str, stdout: str, stderr: str) -
 
 
 class TimeseriesService:
-    def _derive_paths(self, run_id: str) -> Dict[str, str]:
-        year = _utcnow().strftime("%Y")
+    def _derive_paths(self, run_id: str, *, stack_key: Optional[str] = None) -> Dict[str, str]:
         work_root_windows = _normalize_path(os.path.join(settings.TIMESERIES_WORK_ROOT, run_id))
-        publish_dir_windows = _normalize_path(os.path.join(settings.PSINSAR_PRODUCT_DIR, year, run_id))
+        publish_dir_windows = _compose_publish_dir(run_id, stack_key)
         return {
             "work_root_windows": work_root_windows,
             "work_root_wsl": _windows_path_to_wsl_mount(work_root_windows) or "",
@@ -380,6 +414,7 @@ class TimeseriesService:
             orbit_direction=first.get("orbit_direction"),
             tile_key=manifest_tile_key,
         )
+        stack_key = _build_stack_key(manifest_group_key)
         slug = _build_stack_slug(
             satellite=first.get("satellite"),
             imaging_mode=first.get("imaging_mode"),
@@ -394,6 +429,7 @@ class TimeseriesService:
             "source_root_windows": source_root,
             "source_root_wsl": _windows_path_to_wsl_mount(source_root) if source_root else None,
             "group_key": manifest_group_key,
+            "stack_key": stack_key,
             "tile_key": manifest_tile_key,
             "scene_count": len(scene_payloads),
             "reference_strategy": REFERENCE_STRATEGY_MIDDLE_BY_DATE,
@@ -496,7 +532,7 @@ class TimeseriesService:
     def _publish_manifest_path(self, run: PsTimeseriesRunORM) -> Path:
         publish_dir = Path(
             run.publish_dir_windows
-            or _normalize_path(os.path.join(settings.PSINSAR_PRODUCT_DIR, _utcnow().strftime("%Y"), run.run_id))
+            or _compose_publish_dir(run.run_id, run.stack_key)
         )
         return publish_dir / "manifest.json"
 
@@ -641,9 +677,12 @@ class TimeseriesService:
             "mintpy_config_path_wsl": _windows_path_to_wsl_mount(str(mintpy_cfg_path)),
             "mintpy_work_dir_windows": str(mintpy_work_dir),
             "mintpy_work_dir_wsl": _windows_path_to_wsl_mount(str(mintpy_work_dir)),
+            "publish_dir_windows": str(run.publish_dir_windows or ""),
+            "publish_dir_wsl": _windows_path_to_wsl_mount(str(run.publish_dir_windows or "")),
         }
-        payload.update(
-            {
+        payload = upgrade_timeseries_package_manifest(
+            payload,
+            run_context={
                 "run_id": run.run_id,
                 "run_name": run.run_name,
                 "batch_id": run.batch_id,
@@ -652,6 +691,8 @@ class TimeseriesService:
                 "mode": run.mode,
                 "engine_code": run.engine_code,
                 "processor_code": run.processor_code,
+                "runtime_id": run.runtime_id,
+                "stack_key": run.stack_key or payload.get("stack_key") or report.get("stack_key"),
                 "group_key": payload.get("group_key") or report.get("group_key"),
                 "reference_date": payload.get("reference_date") or run.reference_date,
                 "stack_dates": (
@@ -668,13 +709,16 @@ class TimeseriesService:
                 ),
                 "published_at": payload.get("published_at") or now_text,
                 "produced_at": payload.get("produced_at") or now_text,
+                "publish_dir": run.publish_dir_windows,
+                "native_output_dir": str(mintpy_work_dir),
                 "runtime": {
+                    "runtime_id": run.runtime_id,
                     "env_name": self._effective_env_name(run),
                     "wsl_distro": self._effective_wsl_distro(run),
                     "water_mask_mode": run.water_mask_mode,
                 },
-                "source_summary": source_summary,
-            }
+            },
+            source_summary=source_summary,
         )
         _write_json(manifest_path, payload)
         return payload
@@ -750,11 +794,14 @@ class TimeseriesService:
         return {
             "run_id": run.run_id,
             "batch_id": run.batch_id,
+            "product_family": run.product_family,
             "run_name": run.run_name,
             "catalog_name": run.catalog_name,
+            "stack_key": run.stack_key,
             "mode": run.mode,
             "engine_code": run.engine_code,
             "processor_code": run.processor_code,
+            "runtime_id": run.runtime_id,
             "env_name": run.env_name,
             "wsl_distro": run.wsl_distro,
             "status": run.status,
@@ -884,7 +931,18 @@ class TimeseriesService:
 
         run_id = str(uuid.uuid4())
         run_name_text = str(run_name or "").strip() or f"SBAS_{normalized_batch_id}_{run_id[:8]}"
-        paths = self._derive_paths(run_id)
+        work_root_windows = _normalize_path(os.path.join(settings.TIMESERIES_WORK_ROOT, run_id))
+        stack_preview = await self._resolve_stack_scene_records(
+            items=items,
+            batch_direction=batch.direction,
+            run_id=run_id,
+            work_root_windows=work_root_windows,
+            db=db,
+        )
+        stack_key = str(stack_preview.get("stack_key") or "").strip() or _build_stack_key(
+            stack_preview.get("group_key")
+        )
+        paths = self._derive_paths(run_id, stack_key=stack_key)
         selected_manifest_path = Path(paths["work_root_windows"]) / "input" / "selected_stack_manifest.json"
         task_name = f"SBAS timeseries run {run_name_text}"
         task_id: Optional[str] = None
@@ -904,11 +962,14 @@ class TimeseriesService:
             run = PsTimeseriesRunORM(
                 run_id=run_id,
                 batch_id=normalized_batch_id,
+                product_family="timeseries",
                 run_name=run_name_text,
                 catalog_name=CATALOG_NAME_PSINSAR,
+                stack_key=stack_key,
                 mode="sbas",
                 engine_code="isce2",
                 processor_code="isce2_stack_mintpy",
+                runtime_id=settings.ISCE2_RUNTIME_ID or None,
                 env_name=settings.TIMESERIES_ENV_NAME or None,
                 wsl_distro=settings.TIMESERIES_WSL_DISTRO or None,
                 status=STATUS_PENDING,
@@ -934,10 +995,14 @@ class TimeseriesService:
                     "water_mask_mode": normalized_water_mask_mode,
                     "notes": str(notes or "").strip() or None,
                     "stack_workflow": settings.TIMESERIES_STACK_WORKFLOW,
+                    "group_key": stack_preview.get("group_key"),
+                    "stack_key": stack_key,
                 },
                 summary_json={
                     "phase": "queued",
                     "workflow": settings.TIMESERIES_STACK_WORKFLOW,
+                    "group_key": stack_preview.get("group_key"),
+                    "stack_key": stack_key,
                     "stack_dates": stack_dates,
                     "task_name": task_name,
                 },
@@ -946,7 +1011,10 @@ class TimeseriesService:
                     "batch_name": batch.name,
                     "direction": batch.direction,
                     "scene_count": len(items),
+                    "group_key": stack_preview.get("group_key"),
+                    "stack_key": stack_key,
                     "stack_dates": stack_dates,
+                    "source_root_windows": stack_preview.get("source_root_windows"),
                     "items": self._scene_payload(items),
                 },
                 orbit_summary_json={
@@ -976,8 +1044,10 @@ class TimeseriesService:
                 },
                 tags={
                     "catalog_name": CATALOG_NAME_PSINSAR,
+                    "product_family": "timeseries",
                     "processor_code": "isce2_stack_mintpy",
                     "batch_id": normalized_batch_id,
+                    "stack_key": stack_key,
                 },
                 created_by=created_by,
                 db=db,
@@ -1065,8 +1135,13 @@ class TimeseriesService:
         _write_json(selected_manifest_path, selected_manifest)
 
         run.status = STATUS_PREPARED
+        run.product_family = run.product_family or "timeseries"
+        run.stack_key = str(selected_manifest.get("stack_key") or run.stack_key or "").strip() or run.stack_key
         run.reference_date = effective_reference_date
         run.stack_size = len(stack_dates)
+        if run.stack_key:
+            run.publish_dir_windows = _compose_publish_dir(run.run_id, run.stack_key)
+            run.publish_dir_wsl = _windows_path_to_wsl_mount(run.publish_dir_windows)
         run.manifest_path_windows = str(selected_manifest_path)
         run.manifest_path_wsl = _windows_path_to_wsl_mount(str(selected_manifest_path))
         run.input_snapshot_json = {
@@ -1075,6 +1150,7 @@ class TimeseriesService:
             "scene_count": len(stack_dates),
             "stack_dates": stack_dates,
             "group_key": selected_manifest.get("group_key"),
+            "stack_key": selected_manifest.get("stack_key"),
             "tile_key": selected_manifest.get("tile_key"),
             "source_root_windows": selected_manifest.get("source_root_windows"),
             "selected_manifest_path_windows": str(selected_manifest_path),
@@ -1097,6 +1173,7 @@ class TimeseriesService:
             "phase": "prepared",
             "workflow": settings.TIMESERIES_STACK_WORKFLOW,
             "group_key": selected_manifest.get("group_key"),
+            "stack_key": selected_manifest.get("stack_key"),
             "tile_key": selected_manifest.get("tile_key"),
             "reference_date": effective_reference_date,
             "stack_dates": stack_dates,
@@ -1223,6 +1300,10 @@ class TimeseriesService:
 
         run.manifest_path_windows = str(generated_manifest_path)
         run.manifest_path_wsl = _windows_path_to_wsl_mount(str(generated_manifest_path))
+        run.stack_key = str(report.get("stack_key") or run.stack_key or "").strip() or run.stack_key
+        if run.stack_key:
+            run.publish_dir_windows = _compose_publish_dir(run.run_id, run.stack_key)
+            run.publish_dir_wsl = _windows_path_to_wsl_mount(run.publish_dir_windows)
         run.reference_date = str(report.get("reference_date") or run.reference_date or "").strip() or run.reference_date
         run.stack_size = int(report.get("scene_count") or len(stack_dates) or run.stack_size or 0)
         run.orbit_summary_json = {
@@ -1239,6 +1320,7 @@ class TimeseriesService:
             "phase": "stack_ready" if (refresh and ready) else "stack_prepared",
             "workflow": report.get("processing_workflow") or settings.TIMESERIES_STACK_WORKFLOW,
             "group_key": report.get("group_key"),
+            "stack_key": report.get("stack_key"),
             "tile_key": report.get("tile_key"),
             "reference_date": report.get("reference_date"),
             "stack_dates": stack_dates,
@@ -1655,6 +1737,7 @@ class TimeseriesService:
                 "publish_dir_wsl": publish_dir_wsl,
                 "manifest_path_windows": str(publish_manifest_path),
                 "manifest_path_wsl": _windows_path_to_wsl_mount(str(publish_manifest_path)),
+                "stack_key": publish_manifest.get("stack_key"),
                 "group_key": publish_manifest.get("group_key"),
                 "export_runner": export_result,
             },
@@ -1812,10 +1895,14 @@ class TimeseriesService:
                 "product_id": product.product_id,
                 "display_name": product.display_name,
                 "run_key": product.run_key,
+                "package_schema": product.package_schema,
+                "processor_code": product.processor_code,
+                "runtime_id": product.runtime_id,
                 "status": product.status,
                 "health_status": product.health_status,
                 "publish_dir": product.publish_dir,
                 "manifest_path": product.manifest_path,
+                "native_output_dir": product.native_output_dir,
                 "preview_path": product.preview_path,
                 "primary_asset_path": product.primary_asset_path,
                 "reference_date": summary.get("reference_date"),

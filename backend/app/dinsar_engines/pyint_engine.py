@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -25,12 +26,15 @@ from ..services.pyint_service import (
     infer_scene_date_from_archives,
     infer_task_identity,
     quote_shell,
+    resolve_gamma_env_script,
     resolve_time_baseline_days,
     to_wsl_path,
     validate_pyint_root_dir,
 )
 from ..services.wsl_service import run_wsl_command
 from .base import DinsarEngine, EngineAvailability, EngineProfile, RunRequest, RunResult
+
+RERUN_MODE_UNFINISHED_ONLY = "unfinished_only"
 
 
 def _read_env(name: str, default: str = "") -> str:
@@ -51,6 +55,11 @@ def _windows_path_to_wsl_mount(path: str) -> str:
     drive_letter = drive.rstrip(":").lower()
     normalized_tail = tail.replace("\\", "/")
     return f"/mnt/{drive_letter}/{normalized_tail}"
+
+
+def _normalize_rerun_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized == RERUN_MODE_UNFINISHED_ONLY else "rerun_all"
 
 
 class PyintEngine(DinsarEngine):
@@ -138,7 +147,7 @@ class PyintEngine(DinsarEngine):
 
     @property
     def _gamma_env_script(self) -> str:
-        return _read_env("PYINT_GAMMA_ENV_SCRIPT", "")
+        return resolve_gamma_env_script()
 
     @property
     def _lt1_precise_orbit_enabled(self) -> bool:
@@ -269,8 +278,70 @@ class PyintEngine(DinsarEngine):
 
         return normalized
 
-    def validate_root_dir(self, root_dir: str, num_to_process: int = 0) -> Dict[str, Any]:
-        return validate_pyint_root_dir(root_dir, num_to_process)
+    def _has_completed_task_result(self, task_dir: str, profile_code: str) -> bool:
+        task_identity = infer_task_identity(task_dir)
+        pair_key = task_identity["pair_key"]
+        output_root = self._output_root or os.path.join(task_dir, "pyint_output")
+        runs_root = os.path.join(output_root, pair_key, "runs")
+        if not os.path.isdir(runs_root):
+            return False
+
+        with os.scandir(runs_root) as entries:
+            run_dirs = [entry.path for entry in entries if entry.is_dir()]
+        run_dirs.sort(key=lambda path: os.path.basename(path).lower(), reverse=True)
+
+        for run_dir in run_dirs:
+            metadata_path = os.path.join(run_dir, "native", ".dinsar_run.json")
+            if not os.path.isfile(metadata_path):
+                metadata_path = os.path.join(run_dir, ".dinsar_run.json")
+                if not os.path.isfile(metadata_path):
+                    continue
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as fp:
+                    metadata = json.load(fp) or {}
+            except Exception:
+                continue
+            if str(metadata.get("engine_code") or "").strip().lower() != self.engine_code:
+                continue
+            if str(metadata.get("profile_code") or "").strip() != str(profile_code or "").strip():
+                continue
+            output_dir = str(metadata.get("output_dir") or os.path.join(run_dir, "native")).strip()
+            if output_dir and os.path.isdir(output_dir):
+                return True
+        return False
+
+    def validate_root_dir(
+        self,
+        root_dir: str,
+        num_to_process: int = 0,
+        rerun_mode: str = "rerun_all",
+    ) -> Dict[str, Any]:
+        validation = validate_pyint_root_dir(root_dir, 0)
+        task_dirs: List[str] = list(validation.get("task_dirs") or [])
+        discovered_task_count = len(task_dirs)
+        skipped_completed_count = 0
+
+        if _normalize_rerun_mode(rerun_mode) == RERUN_MODE_UNFINISHED_ONLY:
+            filtered_task_dirs: List[str] = []
+            for task_dir in task_dirs:
+                if self._has_completed_task_result(task_dir, "lt1_gamma_dinsar"):
+                    skipped_completed_count += 1
+                    continue
+                filtered_task_dirs.append(task_dir)
+            task_dirs = filtered_task_dirs
+
+        selected_count = int(num_to_process or 0)
+        if selected_count > 0:
+            task_dirs = task_dirs[:selected_count]
+
+        return {
+            **validation,
+            "task_dirs": task_dirs,
+            "task_count": len(task_dirs),
+            "selected_task_count": len(task_dirs),
+            "discovered_task_count": discovered_task_count,
+            "skipped_completed_count": skipped_completed_count,
+        }
 
     def check_available(self) -> EngineAvailability:
         report = check_pyint_environment(
@@ -333,7 +404,11 @@ class PyintEngine(DinsarEngine):
 
     def _run_lt1_gamma_dinsar(self, request: RunRequest) -> RunResult:
         extra = self.normalize_extra(request.extra)
-        validation = self.validate_root_dir(request.root_dir, request.num_to_process)
+        validation = self.validate_root_dir(
+            request.root_dir,
+            request.num_to_process,
+            str((request.extra or {}).get("__rerun_mode") or "rerun_all"),
+        )
         task_dirs: List[str] = validation["task_dirs"]
         total_tasks = len(task_dirs)
         run_started_at = datetime.utcnow()
@@ -383,7 +458,7 @@ class PyintEngine(DinsarEngine):
             slave_date = task_identity["slave_date"]
 
             work_run_root = os.path.normpath(os.path.join(self._work_root, pair_key, run_key))
-            output_dir = os.path.normpath(os.path.join(self._output_root, pair_key, run_key, "native"))
+            output_dir = os.path.normpath(os.path.join(self._output_root, pair_key, "runs", run_key, "native"))
             template_root = os.path.normpath(os.path.join(self._template_root, pair_key, run_key))
             project_name = build_project_name(pair_key, run_key)
             project_dir = os.path.join(work_run_root, project_name)

@@ -19,26 +19,14 @@ from .manifest_snapshot_service import (
     evaluate_manifest_reconcile,
     iter_manifest_paths,
 )
+from .product_package_schema import build_canonical_descriptor, normalize_package_manifest
 
 
 PSINSAR_CATALOG_NAME = "psinsar"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
 TASK_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
 
-_ARTIFACT_ROLE_MAP = {
-    "timeseries_cube": "timeseries_cube",
-    "velocity_map": "velocity_map",
-    "velocity_geotiff": "velocity_geotiff",
-    "temporal_coherence": "temporal_coherence",
-    "temporal_coherence_geotiff": "temporal_coherence_geotiff",
-    "quality_mask": "quality_mask",
-    "quality_mask_geotiff": "quality_mask_geotiff",
-    "preview_png": "preview_png",
-    "diagnostic_png": "diagnostic_png",
-}
-_PRIMARY_PRODUCT_TYPES = {"timeseries_cube", "velocity_geotiff"}
 _PREFERRED_PRIMARY_PRODUCT_TYPES = ("velocity_geotiff", "timeseries_cube", "velocity_map")
-_PREVIEW_PRODUCT_TYPES = {"preview_png"}
 
 
 def _utcnow() -> datetime:
@@ -162,7 +150,7 @@ def _derive_bbox_from_summary(manifest: Dict[str, Any]) -> Dict[str, Optional[fl
 
 class PsinsarCatalogService:
     def get_publish_root(self, publish_root: Optional[str] = None) -> str:
-        root = publish_root or settings.PSINSAR_PRODUCT_DIR
+        root = publish_root or settings.TIMESERIES_PRODUCT_DIR
         normalized = _normalize_path(root)
         os.makedirs(normalized, exist_ok=True)
         return normalized
@@ -183,6 +171,7 @@ class PsinsarCatalogService:
         if state is None:
             state = ResultCatalogStateORM(
                 catalog_name=PSINSAR_CATALOG_NAME,
+                product_family="timeseries",
                 storage_root=root,
                 status="READY",
                 needs_rebuild=False,
@@ -191,6 +180,8 @@ class PsinsarCatalogService:
             await db.flush()
         elif state.storage_root != root:
             state.storage_root = root
+        if state.product_family != "timeseries":
+            state.product_family = "timeseries"
         return state
 
     def _iter_manifest_paths(self, publish_root: str) -> List[str]:
@@ -199,13 +190,13 @@ class PsinsarCatalogService:
     def _load_manifest(self, manifest_path: str) -> Dict[str, Any]:
         with open(manifest_path, "r", encoding="utf-8") as fp:
             payload = json.load(fp)
-        schema_version = str(payload.get("schema_version") or "").strip().lower()
-        catalog_name = str(payload.get("catalog_name") or "").strip().lower()
-        if schema_version != "psinsar.publish.v1":
-            raise ValueError("manifest schema_version is not psinsar.publish.v1")
+        normalized = normalize_package_manifest(payload)
+        catalog_name = str(normalized.get("catalog_name") or "").strip().lower()
+        if str(normalized.get("product_family") or "").strip().lower() != "timeseries":
+            raise ValueError("manifest product_family is not timeseries")
         if catalog_name != PSINSAR_CATALOG_NAME:
             raise ValueError("manifest catalog_name is not psinsar")
-        return payload
+        return normalized
 
     def _build_rows_from_manifest(
         self,
@@ -215,11 +206,28 @@ class PsinsarCatalogService:
         package_dir = _normalize_path(os.path.dirname(manifest_path))
         basename = os.path.basename(package_dir)
         group_key = str(manifest.get("group_key") or "").strip() or None
-        reference_date = str(manifest.get("reference_date") or "").strip() or None
-        stack_dates = [str(item).strip() for item in (manifest.get("stack_dates") or []) if str(item).strip()]
+        stack_key = str(manifest.get("stack_key") or "").strip() or group_key or basename
+        temporal = manifest.get("temporal") or {}
+        reference_date = str(
+            temporal.get("reference_date")
+            or manifest.get("reference_date")
+            or ""
+        ).strip() or None
+        stack_dates = [
+            str(item).strip()
+            for item in (
+                temporal.get("stack_dates")
+                or manifest.get("stack_dates")
+                or []
+            )
+            if str(item).strip()
+        ]
         run_key = str(manifest.get("run_id") or "").strip() or basename
-        display_name = group_key or basename
-        product_id = "psinsar_" + _stable_digest(package_dir, run_key, reference_date, length=20)
+        display_name = stack_key or group_key or basename
+        product_id = (
+            str(manifest.get("product_id") or "").strip()
+            or "psinsar_" + _stable_digest(package_dir, run_key, reference_date, length=20)
+        )
         bbox = _derive_bbox_from_summary(manifest)
         poly = _build_bbox_polygon(
             bbox.get("min_lon"),
@@ -227,19 +235,29 @@ class PsinsarCatalogService:
             bbox.get("max_lon"),
             bbox.get("max_lat"),
         )
+        processor_payload = manifest.get("processor") or {}
+        runtime_payload = manifest.get("runtime") or {}
+        canonical_payload = manifest.get("canonical") or build_canonical_descriptor(
+            manifest.get("assets") or [],
+            product_family="timeseries",
+        )
 
         summary_json = {
+            "product_family": "timeseries",
+            "stack_key": stack_key,
             "group_key": group_key,
             "reference_date": reference_date,
             "reference_point": manifest.get("reference_point"),
             "stack_dates": stack_dates,
             "stack_size": len(stack_dates),
             "mode": manifest.get("mode"),
-            "processor_code": manifest.get("processor_code"),
+            "processor_code": processor_payload.get("code") or manifest.get("processor_code"),
             "quality": manifest.get("quality"),
             "summaries": manifest.get("summaries"),
+            "canonical": canonical_payload,
+            "runtime": runtime_payload,
         }
-        published_at = _parse_datetime(manifest.get("published_at"))
+        published_at = _parse_datetime(temporal.get("published_at") or manifest.get("published_at"))
         if published_at is None:
             try:
                 published_at = datetime.utcfromtimestamp(os.path.getmtime(manifest_path))
@@ -249,20 +267,27 @@ class PsinsarCatalogService:
         product = ResultProductORM(
             product_id=product_id,
             catalog_name=PSINSAR_CATALOG_NAME,
-            product_type="psinsar_bundle",
+            product_family="timeseries",
+            product_type=str(manifest.get("product_type") or "timeseries_bundle").strip() or "timeseries_bundle",
             display_name=display_name,
             task_name=display_name,
-            task_alias=group_key or basename,
+            task_alias=stack_key or group_key or basename,
             pair_key=None,
+            stack_key=stack_key,
             run_key=run_key,
-            profile_code=str(manifest.get("processor_code") or "").strip() or None,
-            engine_code=str(manifest.get("engine_code") or "unknown"),
-            engine_version=None,
+            profile_code=str(processor_payload.get("profile_code") or manifest.get("processor_code") or "").strip() or None,
+            engine_code=str(((manifest.get("engine") or {}).get("code")) or manifest.get("engine_code") or "unknown"),
+            engine_version=str(((manifest.get("engine") or {}).get("version")) or "") or None,
+            package_schema=str(manifest.get("schema_version") or "").strip() or None,
+            package_layout=str(manifest.get("package_layout") or "").strip() or None,
+            processor_code=str(processor_payload.get("code") or manifest.get("processor_code") or "").strip() or None,
+            runtime_id=str(runtime_payload.get("runtime_id") or manifest.get("runtime_id") or "").strip() or None,
             status="READY",
             health_status="OK",
             publish_dir=package_dir,
             manifest_path=_normalize_path(manifest_path),
             source_primary_path=None,
+            native_output_dir=((manifest.get("source") or {}).get("native_output_dir")),
             preview_path=None,
             primary_asset_path=None,
             summary_json=summary_json,
@@ -282,25 +307,30 @@ class PsinsarCatalogService:
                     [bbox["min_lon"], bbox["min_lat"]],
                 ]],
             } if None not in (bbox["min_lon"], bbox["min_lat"], bbox["max_lon"], bbox["max_lat"]) else None,
-            produced_at=_parse_datetime(manifest.get("produced_at")) or published_at,
+            produced_at=_parse_datetime(temporal.get("produced_at") or manifest.get("produced_at")) or published_at,
             published_at=published_at,
             registered_at=_utcnow(),
         )
 
         has_warn = False
         has_error = False
-        artifacts = manifest.get("artifacts") or []
+        assets_payload = manifest.get("assets") or []
         chosen_primary_path = None
-        for candidate_type in _PREFERRED_PRIMARY_PRODUCT_TYPES:
-            for artifact in artifacts:
-                if str(artifact.get("product_type") or "").strip() == candidate_type:
-                    chosen_primary_path = str(artifact.get("path") or "").strip()
+        preferred_primary_roles = [
+            str(canonical_payload.get("primary_asset_role") or "").strip(),
+            *_PREFERRED_PRIMARY_PRODUCT_TYPES,
+        ]
+        for candidate_type in preferred_primary_roles:
+            for asset in assets_payload:
+                if str(asset.get("role") or "").strip() == candidate_type:
+                    chosen_primary_path = str(asset.get("relative_path") or "").strip()
                     break
             if chosen_primary_path:
                 break
 
-        for artifact in artifacts:
-            relative_path = str(artifact.get("path") or "").strip()
+        preview_role = str(canonical_payload.get("preview_asset_role") or "").strip()
+        for asset_payload in assets_payload:
+            relative_path = str(asset_payload.get("relative_path") or "").strip()
             if not relative_path:
                 continue
             absolute_path = _resolve_relative_path(package_dir, relative_path)
@@ -310,28 +340,27 @@ class PsinsarCatalogService:
             except OSError:
                 file_size = None
 
-            product_type = str(artifact.get("product_type") or "asset").strip()
-            asset_role = _ARTIFACT_ROLE_MAP.get(product_type, product_type or "asset")
-            is_required = product_type in _PRIMARY_PRODUCT_TYPES or product_type in _PREVIEW_PRODUCT_TYPES
+            asset_role = str(asset_payload.get("role") or "asset").strip()
+            is_required = bool(asset_payload.get("is_required"))
             is_primary = relative_path == chosen_primary_path
             asset = ResultAssetORM(
                 asset_role=asset_role,
                 asset_name=os.path.basename(relative_path) or asset_role,
                 relative_path=relative_path,
                 absolute_path=absolute_path,
-                format=_artifact_format(relative_path),
-                media_type=_artifact_media_type(relative_path),
+                format=asset_payload.get("format") or _artifact_format(relative_path),
+                media_type=asset_payload.get("media_type") or _artifact_media_type(relative_path),
                 is_required=is_required,
                 is_primary=is_primary,
                 exists_flag=exists_flag,
                 file_size=file_size,
             )
             product.assets.append(asset)
-            if product_type == "timeseries_cube" and exists_flag:
+            if asset_role == "timeseries_cube" and exists_flag:
                 product.source_primary_path = absolute_path
             if is_primary and exists_flag:
                 product.primary_asset_path = absolute_path
-            if product_type in _PREVIEW_PRODUCT_TYPES and exists_flag:
+            if preview_role and asset_role == preview_role and exists_flag:
                 product.preview_path = absolute_path
             if is_required and not exists_flag:
                 has_error = True
@@ -394,12 +423,12 @@ class PsinsarCatalogService:
         root = self.get_publish_root(publish_root)
         normalized_manifest_path = _normalize_path(manifest_path)
         if not os.path.isfile(normalized_manifest_path):
-            raise FileNotFoundError(f"PS-InSAR manifest not found: {normalized_manifest_path}")
+            raise FileNotFoundError(f"Timeseries manifest not found: {normalized_manifest_path}")
         if not (
             normalized_manifest_path == root
             or normalized_manifest_path.startswith(root + os.sep)
         ):
-            raise ValueError("Manifest path is outside the configured PS-InSAR publish root.")
+            raise ValueError("Manifest path is outside the configured timeseries publish root.")
 
         state = await self._get_or_create_catalog_state(db, storage_root=root)
         state.status = "UPDATING"
@@ -598,6 +627,9 @@ class PsinsarCatalogService:
                     "run_key": item.run_key,
                     "profile_code": item.profile_code,
                     "engine_code": item.engine_code,
+                    "package_schema": item.package_schema,
+                    "processor_code": item.processor_code,
+                    "runtime_id": item.runtime_id,
                     "status": item.status,
                     "health_status": item.health_status,
                     "preview_path": item.preview_path,
@@ -649,11 +681,16 @@ class PsinsarCatalogService:
             "run_key": product.run_key,
             "profile_code": product.profile_code,
             "engine_code": product.engine_code,
+            "package_schema": product.package_schema,
+            "package_layout": product.package_layout,
+            "processor_code": product.processor_code,
+            "runtime_id": product.runtime_id,
             "status": product.status,
             "health_status": product.health_status,
             "publish_dir": product.publish_dir,
             "manifest_path": product.manifest_path,
             "source_primary_path": product.source_primary_path,
+            "native_output_dir": product.native_output_dir,
             "preview_path": product.preview_path,
             "primary_asset_path": product.primary_asset_path,
             "reference_date": summary.get("reference_date"),
@@ -717,6 +754,7 @@ class PsinsarCatalogService:
         db_count = int(db_count_result.scalar_one() or 0)
         payload = {
             "catalog_name": state.catalog_name,
+            "product_family": state.product_family,
             "storage_root": state.storage_root,
             "status": state.status,
             "needs_rebuild": state.needs_rebuild,

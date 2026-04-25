@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import time
 import uuid
@@ -27,8 +26,14 @@ from .dinsar_compat_service import dinsar_compat_service
 from .dinsar_naming import build_run_key
 from .dinsar_production_service import dinsar_production_service
 from .dinsar_read_service import dinsar_read_service
+from .dinsar_result_layout_service import (
+    get_run_disp_asset_paths,
+    get_run_native_output_dir,
+    normalize_envi_run_layout,
+)
 from .dinsar_scan_service import dinsar_scan_service
 from .engine_lock_service import engine_lock_service
+from .envi_service import build_envi_runner_command, get_envi_runner_cwd, get_envi_runner_env
 from .psinsar_catalog_service import psinsar_catalog_service
 from .result_catalog_service import result_catalog_service
 from .task_service import task_service
@@ -875,9 +880,9 @@ def _get_envi_progress_file(job_id: str) -> str:
 
 
 def _get_envi_runtime_cwd() -> str:
-    runtime_dir = os.path.normpath(os.path.abspath(settings.IDL_WORKER_RUNTIME_DIR))
-    os.makedirs(runtime_dir, exist_ok=True)
-    return runtime_dir
+    # The ENVI runner is launched via `python -m backend.app.services.envi_runner_cli`,
+    # so its import root must be the project root rather than the runtime directory.
+    return get_envi_runner_cwd()
 
 
 # Stale threshold: no progress file update AND no output file activity
@@ -992,18 +997,18 @@ def _clear_envi_progress_file(job_id: Optional[str]) -> None:
 def _find_latest_envi_result(output_dir: str) -> Dict[str, Any]:
     matches: List[tuple[float, str]] = []
     try:
-        for entry in os.scandir(output_dir):
-            if not entry.is_file():
-                continue
-            if entry.name.lower().endswith((".hdr", ".sml")):
-                continue
-            if not _ENVI_RESULT_NAME_RE.match(entry.name):
-                continue
-            try:
-                stat = entry.stat()
-                matches.append((max(stat.st_mtime, stat.st_ctime), entry.path))
-            except OSError:
-                matches.append((0.0, entry.path))
+        for current_root, _dirs, files in os.walk(output_dir):
+            for name in files:
+                if name.lower().endswith((".hdr", ".sml")):
+                    continue
+                if not _ENVI_RESULT_NAME_RE.match(name):
+                    continue
+                path = os.path.join(current_root, name)
+                try:
+                    stat = os.stat(path)
+                    matches.append((max(stat.st_mtime, stat.st_ctime), path))
+                except OSError:
+                    matches.append((0.0, path))
     except OSError as exc:
         raise RuntimeError(f"Failed to scan ENVI output directory: {output_dir}: {exc}") from exc
 
@@ -1021,6 +1026,77 @@ def _find_latest_envi_result(output_dir: str) -> Dict[str, Any]:
         "primary_file": primary_file,
         "source_files": source_files,
     }
+
+
+def _is_path_within(base_dir: str, candidate_path: str) -> bool:
+    try:
+        return os.path.commonpath(
+            [
+                os.path.normpath(os.path.abspath(str(base_dir or "").strip())),
+                os.path.normpath(os.path.abspath(str(candidate_path or "").strip())),
+            ]
+        ) == os.path.normpath(os.path.abspath(str(base_dir or "").strip()))
+    except ValueError:
+        return False
+
+
+def _normalize_managed_envi_output_dir(output_dir: str) -> Dict[str, Any]:
+    normalized_output_dir = os.path.normpath(os.path.abspath(str(output_dir or "").strip()))
+    if not normalized_output_dir or not os.path.isdir(normalized_output_dir):
+        raise FileNotFoundError(f"Managed ENVI output directory not found: {output_dir}")
+
+    managed_root = os.path.normpath(os.path.abspath(str(settings.DINSAR_PRODUCT_DIR or "").strip()))
+    if not managed_root or not _is_path_within(managed_root, normalized_output_dir):
+        result_files = _find_latest_envi_result(normalized_output_dir)
+        return {
+            "run_dir": normalized_output_dir,
+            "native_output_dir": normalized_output_dir,
+            "primary_file": result_files["primary_file"],
+            "source_files": result_files["source_files"],
+            "promoted_files": [],
+            "moved_entries": [],
+        }
+
+    disp_paths = get_run_disp_asset_paths(normalized_output_dir)
+    if os.path.isfile(disp_paths["primary"]):
+        source_files = [disp_paths["primary"]]
+        for ext in (".hdr", ".sml"):
+            sidecar = disp_paths["primary"] + ext
+            if os.path.isfile(sidecar):
+                source_files.append(sidecar)
+        return {
+            "run_dir": normalized_output_dir,
+            "native_output_dir": get_run_native_output_dir(normalized_output_dir),
+            "primary_file": disp_paths["primary"],
+            "source_files": source_files,
+            "promoted_files": [],
+            "moved_entries": [],
+        }
+
+    native_output_dir = get_run_native_output_dir(normalized_output_dir)
+    search_dirs = []
+    if os.path.isdir(native_output_dir):
+        search_dirs.append(native_output_dir)
+    search_dirs.append(normalized_output_dir)
+
+    last_error: Optional[Exception] = None
+    result_files: Optional[Dict[str, Any]] = None
+    for search_dir in search_dirs:
+        try:
+            result_files = _find_latest_envi_result(search_dir)
+            break
+        except Exception as exc:
+            last_error = exc
+    if not result_files:
+        raise RuntimeError(
+            f"Failed to locate ENVI displacement result under managed run directory: {normalized_output_dir}"
+        ) from last_error
+
+    return normalize_envi_run_layout(
+        normalized_output_dir,
+        primary_file=result_files["primary_file"],
+        source_files=result_files["source_files"],
+    )
 
 
 async def _run_envi_runner_command(
@@ -1065,6 +1141,7 @@ async def _run_envi_runner_command(
                 stdout=stdout_fd,
                 stderr=stderr_fd,
                 cwd=_get_envi_runtime_cwd(),
+                env=get_envi_runner_env(),
             )
             proc_state["pid"] = proc.pid
             loop.call_soon_threadsafe(pid_ready.set)
@@ -1232,10 +1309,7 @@ async def _run_envi_workflow_job(
         message=f"Launching ENVI worker subprocess... (tasks={task_folder_count}, timeout={effective_absolute_timeout}s)",
     )
 
-    runner_cmd = [
-        sys.executable,
-        "-m",
-        "backend.app.services.envi_runner_cli",
+    runner_cmd = build_envi_runner_command(
         "--workflow",
         workflow,
         "--root-dir",
@@ -1244,7 +1318,7 @@ async def _run_envi_workflow_job(
         str(num_to_process),
         "--job-id",
         str(job.job_id),
-    ]
+    )
     if timeout_seconds is not None:
         runner_cmd.extend(["--timeout-seconds", str(int(timeout_seconds))])
 
@@ -1304,6 +1378,7 @@ async def _run_envi_workflow_job(
                 stdout=stdout_fd,
                 stderr=stderr_fd,
                 cwd=_get_envi_runtime_cwd(),
+                env=get_envi_runner_env(),
             )
             # Close our copy of the fds; the child process has its own.
             os.close(stdout_fd)
@@ -1443,6 +1518,11 @@ async def _run_envi_workflow_job(
     if workflow in {"dinsar", "dinsar_custom"}:
         output_dirs = _dedupe_existing_dirs(run_meta.get("output_dirs"))
         if output_dirs:
+            normalized_output_dirs: List[str] = []
+            for output_dir in output_dirs:
+                layout_result = await asyncio.to_thread(_normalize_managed_envi_output_dir, output_dir)
+                normalized_output_dirs.append(layout_result["run_dir"])
+            output_dirs = _dedupe_existing_dirs(normalized_output_dirs)
             await task_service.update_task(
                 job.task_id,
                 progress=92,
@@ -1575,10 +1655,7 @@ async def _run_dinsar_production_controller(job: SystemJobORM) -> None:
                     db=db,
                 )
 
-                runner_cmd = [
-                    sys.executable,
-                    "-m",
-                    "backend.app.services.envi_runner_cli",
+                runner_cmd = build_envi_runner_command(
                     "--workflow",
                     workflow,
                     "--task-dir",
@@ -1593,7 +1670,7 @@ async def _run_dinsar_production_controller(job: SystemJobORM) -> None:
                     str(run_key),
                     "--profile-code",
                     str(run.profile_code),
-                ]
+                )
                 if timeout_seconds is not None:
                     runner_cmd.extend(["--timeout-seconds", str(timeout_seconds)])
 
@@ -1638,7 +1715,10 @@ async def _run_dinsar_production_controller(job: SystemJobORM) -> None:
                         keepalive_formatter=_keepalive_formatter,
                         register_pid=_register_pid,
                     )
-                    result_files = await asyncio.to_thread(_find_latest_envi_result, execution.output_dir)
+                    layout_result = await asyncio.to_thread(
+                        _normalize_managed_envi_output_dir,
+                        execution.output_dir,
+                    )
                     metrics = {
                         "duration_seconds": run_meta.get("duration_seconds"),
                         "summary": run_meta.get("summary") or {},
@@ -1651,17 +1731,20 @@ async def _run_dinsar_production_controller(job: SystemJobORM) -> None:
                         run=run,
                         item=item,
                         execution=execution,
-                        primary_file=result_files["primary_file"],
-                        source_files=result_files["source_files"],
+                        primary_file=layout_result["primary_file"],
+                        source_files=layout_result["source_files"],
+                        native_output_dir=layout_result["native_output_dir"],
                         metrics=metrics,
                     )
                     await asyncio.to_thread(
                         dinsar_production_service.write_current_pointer,
+                        run=run,
                         item=item,
                         execution=execution,
                         manifest_path=manifest_path,
-                        primary_file=result_files["primary_file"],
-                        source_files=result_files["source_files"],
+                        primary_file=layout_result["primary_file"],
+                        source_files=layout_result["source_files"],
+                        native_output_dir=layout_result["native_output_dir"],
                     )
                     await dinsar_production_service.mark_item_completed(
                         run=run,
@@ -1894,6 +1977,8 @@ async def _handle_queued_engine_run(
     timeout_seconds = payload.get("timeout_seconds")
     extra = payload.get("extra", {})
     selected_task_count = max(1, int(extra.get("__validated_task_count") or 0 or 1))
+    rerun_mode = str(payload.get("rerun_mode") or extra.get("__rerun_mode") or "rerun_all").strip()
+    skipped_completed_count = int(extra.get("__skipped_completed_count") or 0)
     pair_timeout_seconds = int(timeout_seconds or fallback_timeout_seconds)
 
     await task_service.start_task(
@@ -1903,7 +1988,10 @@ async def _handle_queued_engine_run(
     await task_service.add_log(
         job.task_id,
         "INFO",
-        f"{engine_title} job accepted. root_dir={root_dir}, profile={profile}, timeout={pair_timeout_seconds}s, extra={extra}",
+        (
+            f"{engine_title} job accepted. root_dir={root_dir}, profile={profile}, "
+            f"rerun_mode={rerun_mode}, timeout={pair_timeout_seconds}s, extra={extra}"
+        ),
     )
     await task_service.add_log(
         job.task_id,
@@ -1911,6 +1999,7 @@ async def _handle_queued_engine_run(
         (
             f"{engine_title} batch contains {selected_task_count} pair task(s). "
             f"Pairs run sequentially and each pair uses timeout={pair_timeout_seconds}s."
+            f"{f' Skipped completed={skipped_completed_count}.' if skipped_completed_count > 0 else ''}"
         ),
     )
     from ..dinsar_engines.base import RunRequest
@@ -2114,6 +2203,18 @@ async def _handle_queued_engine_run(
                 "INFO",
                 f"WSL command [{item.get('task_name')}]: {item.get('command')}",
             )
+        if item.get("runtime_id"):
+            await task_service.add_log(
+                job.task_id,
+                "INFO",
+                f"WSL runtime [{item.get('task_name')}]: {item.get('runtime_id')}",
+            )
+        if item.get("manifest_path_windows"):
+            await task_service.add_log(
+                job.task_id,
+                "INFO",
+                f"WSL manifest [{item.get('task_name')}]: {item.get('manifest_path_windows')}",
+            )
         if item.get("stdout_tail"):
             await task_service.add_log(
                 job.task_id,
@@ -2162,6 +2263,18 @@ async def _handle_queued_engine_run(
             job.task_id,
             "INFO",
             f"WSL command: {detail['command']}",
+        )
+    if detail.get("runtime_id"):
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"WSL runtime: {detail['runtime_id']}",
+        )
+    if detail.get("manifest_path_windows"):
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"WSL manifest: {detail['manifest_path_windows']}",
         )
     if detail.get("stdout_tail"):
         await task_service.add_log(
@@ -2243,7 +2356,532 @@ async def _handle_queued_engine_run(
         )
 
 
+async def _run_wsl_dinsar_production_controller(
+    job: SystemJobORM,
+    *,
+    engine_code: str,
+    engine_title: str,
+    fallback_timeout_seconds: int,
+) -> None:
+    if not job.task_id:
+        raise ValueError(f"{engine_title} production controller requires task_id.")
+
+    payload = job.payload or {}
+    production_run_id = str(payload.get("production_run_id") or "").strip()
+    if not production_run_id:
+        raise ValueError(f"{engine_title} production controller requires production_run_id.")
+
+    from ..dinsar_engines import registry
+    from ..dinsar_engines.base import RunRequest
+
+    engine = registry.get_engine(engine_code)
+    if engine is None:
+        raise RuntimeError(f"Engine '{engine_code}' is not registered.")
+
+    async with AsyncSessionLocal() as db:
+        run = await dinsar_production_service.get_run(production_run_id, db)
+        if run is None:
+            raise ValueError(f"D-InSAR production run not found: {production_run_id}")
+
+        items = await dinsar_production_service.list_run_items(run.run_id, db)
+        if not items:
+            raise ValueError(f"D-InSAR production run has no items: {production_run_id}")
+
+        params = run.params_json or {}
+        user_extra = dict(params.get("extra") or {})
+        timeout_seconds_raw = params.get("timeout_seconds")
+        if timeout_seconds_raw not in (None, ""):
+            per_task_timeout = int(timeout_seconds_raw)
+        else:
+            per_task_timeout = int(
+                getattr(engine, "default_timeout_seconds", None)
+                or fallback_timeout_seconds
+                or 0
+            )
+        total_items = len(items)
+        run_log = dinsar_production_service.append_run_log
+
+        async def _refresh_cancel_state() -> bool:
+            await db.refresh(run)
+            current_task = await task_service.get_task(job.task_id)
+            task_cancelled = bool(current_task and current_task.status == "CANCELLED")
+            if task_cancelled and not run.cancel_requested:
+                run.cancel_requested = True
+                await db.commit()
+            return bool(run.cancel_requested or task_cancelled)
+
+        await task_service.start_task(
+            job.task_id,
+            message=f"Starting {engine_title} D-InSAR production run {run.run_id} ({total_items} items)...",
+        )
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            (
+                f"{engine_title} D-InSAR production controller started. run_id={run.run_id} "
+                f"profile={run.profile_code} items={total_items}"
+            ),
+        )
+        await dinsar_production_service.mark_run_started(
+            run,
+            db=db,
+            message=f"Preparing {total_items} {engine_title} item(s)",
+        )
+        run_log(
+            run.run_id,
+            f"[start] engine={engine_code} items={total_items} source_root={run.source_root}",
+        )
+
+        successful_output_dirs: List[str] = []
+        async with engine_lock_service.acquire(f"wsl_dinsar_{engine_code}"):
+            await task_service.update_task(
+                job.task_id,
+                progress=5,
+                message=f"{engine_title} engine acquired. Preparing {total_items} item(s)...",
+            )
+            for item_index, item in enumerate(items, start=1):
+                if await _refresh_cancel_state():
+                    await task_service.add_log(
+                        job.task_id,
+                        "WARNING",
+                        f"Cancellation detected before item {item.task_alias or item.task_name}.",
+                    )
+                    break
+
+                await db.refresh(item)
+                if str(item.status or "").upper() in {"COMPLETED", "FAILED", "SKIPPED", "CANCELLED"}:
+                    if item.status == "COMPLETED" and item.latest_output_dir and os.path.isdir(item.latest_output_dir):
+                        successful_output_dirs.append(item.latest_output_dir)
+                    continue
+
+                run_key = (
+                    f"{build_run_key(engine_code, run.profile_code, started_at=datetime.utcnow())}"
+                    f"_{item.id}_{uuid.uuid4().hex[:6]}"
+                )
+                execution = await dinsar_production_service.begin_item_execution(
+                    run=run,
+                    item=item,
+                    run_key=run_key,
+                    db=db,
+                )
+
+                managed_run_dir = os.path.normpath(execution.output_dir)
+                managed_native_output_dir = os.path.join(managed_run_dir, "native")
+                managed_work_dir = os.path.join(managed_native_output_dir, "workflow")
+                managed_export_dir = os.path.join(managed_native_output_dir, "export")
+                managed_orbit_output_dir = os.path.join(managed_work_dir, "orbits")
+                item_label = item.task_alias or item.task_name
+                base_progress = min(95, 5 + int(((item_index - 1) / max(1, total_items)) * 90))
+                progress_state: Dict[str, Any] = {
+                    "progress": base_progress,
+                    "message": f"[{engine_code}/{run.profile_code}] Running {item_index}/{total_items}: {item_label}",
+                    "started_monotonic": time.monotonic(),
+                }
+                progress_queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
+                loop = asyncio.get_running_loop()
+
+                def _emit_progress(event: Dict[str, Any]) -> None:
+                    if not event:
+                        return
+                    try:
+                        loop.call_soon_threadsafe(progress_queue.put_nowait, dict(event))
+                    except RuntimeError:
+                        return
+
+                async def _consume_progress() -> None:
+                    while True:
+                        event = await progress_queue.get()
+                        if event is None:
+                            return
+                        event_type = str(event.get("event") or "").strip().lower()
+                        if event_type == "pair_started":
+                            progress_state["message"] = (
+                                f"[{engine_code}/{run.profile_code}] Running "
+                                f"{item_index}/{total_items}: {item_label}"
+                            )
+                            progress_state["started_monotonic"] = time.monotonic()
+                            await task_service.add_log(
+                                job.task_id,
+                                "INFO",
+                                f"[{item_index}/{total_items}] {engine_title} started {item_label}",
+                            )
+                        elif event_type == "pair_finished":
+                            if bool(event.get("success")):
+                                progress_state["progress"] = min(
+                                    98,
+                                    5 + int((item_index / max(1, total_items)) * 90),
+                                )
+                                progress_state["message"] = (
+                                    f"[{engine_code}/{run.profile_code}] Finished "
+                                    f"{item_index}/{total_items}: {item_label}"
+                                )
+                            else:
+                                progress_state["message"] = (
+                                    f"[{engine_code}/{run.profile_code}] Failed "
+                                    f"{item_index}/{total_items}: {item_label}"
+                                )
+
+                async def _task_keepalive() -> None:
+                    while True:
+                        await asyncio.sleep(30)
+                        try:
+                            message = str(progress_state.get("message") or "")
+                            started_monotonic = progress_state.get("started_monotonic")
+                            if isinstance(started_monotonic, (int, float)):
+                                elapsed_seconds = max(0, int(time.monotonic() - float(started_monotonic)))
+                                message = f"{message} (elapsed={elapsed_seconds}s)"
+                            await task_service.update_task(
+                                job.task_id,
+                                progress=int(progress_state.get("progress") or base_progress),
+                                message=message,
+                            )
+                        except Exception as exc:
+                            logger.warning("keepalive update failed for %s item %s: %s", engine_title, item_label, exc)
+
+                progress_task = asyncio.create_task(_consume_progress())
+                keepalive_task = asyncio.create_task(_task_keepalive())
+                await task_service.add_log(
+                    job.task_id,
+                    "INFO",
+                    f"[{item_index}/{total_items}] Launching {item_label} -> {managed_run_dir}",
+                )
+                run_log(
+                    run.run_id,
+                    f"[item-start] {item_index}/{total_items} {item_label} run_key={run_key} output={managed_run_dir}",
+                )
+
+                request = RunRequest(
+                    engine_code=engine_code,
+                    profile=run.profile_code,
+                    root_dir=str(item.source_task_dir),
+                    job_id=job.job_id,
+                    num_to_process=1,
+                    timeout_seconds=per_task_timeout or None,
+                    extra={
+                        **user_extra,
+                        "__managed_run_dir": managed_run_dir,
+                        "__managed_native_output_dir": managed_native_output_dir,
+                        "__managed_work_dir": managed_work_dir,
+                        "__managed_export_dir": managed_export_dir,
+                        "__managed_orbit_output_dir": managed_orbit_output_dir,
+                        "__managed_run_key": run_key,
+                        "__source_root_override": run.source_root,
+                        "__rerun_mode": "rerun_all",
+                    },
+                    progress_callback=_emit_progress,
+                )
+
+                result = None
+                run_exception_text = ""
+                try:
+                    result = await asyncio.to_thread(engine.run, request)
+                except Exception as exc:
+                    run_exception_text = str(exc)
+                finally:
+                    keepalive_task.cancel()
+                    try:
+                        await keepalive_task
+                    except asyncio.CancelledError:
+                        pass
+                    await progress_queue.put(None)
+                    await progress_task
+
+                detail = result.detail or {} if result else {}
+                task_result = ((detail.get("task_results") or [{}])[0]) if result else {}
+
+                try:
+                    if not result or not result.success or not bool(task_result.get("success", result.success if result else False)):
+                        error_message = (
+                            str(task_result.get("error") or "").strip()
+                            or str(result.error or "").strip()
+                            or run_exception_text
+                            or str(task_result.get("stderr_tail") or "").strip()
+                            or f"{engine_title} run failed."
+                        )
+                        raise RuntimeError(error_message)
+
+                    run_dir = os.path.normpath(
+                        str(task_result.get("run_dir") or task_result.get("output_dir") or execution.output_dir)
+                    )
+                    if run_dir != managed_run_dir:
+                        raise RuntimeError(
+                            f"{engine_title} managed run dir mismatch: expected {managed_run_dir}, got {run_dir}"
+                        )
+
+                    primary_file = str(task_result.get("primary_file") or "").strip()
+                    source_files = [
+                        str(path)
+                        for path in (task_result.get("source_files") or [])
+                        if str(path or "").strip()
+                    ]
+                    native_output_dir = str(
+                        task_result.get("native_output_dir") or managed_native_output_dir
+                    ).strip() or managed_native_output_dir
+                    if not primary_file or not os.path.isfile(primary_file):
+                        raise RuntimeError(f"{engine_title} primary output is missing: {primary_file or '<empty>'}")
+                    if not source_files:
+                        source_files = [primary_file]
+
+                    metrics = {
+                        "result_detail": detail,
+                        "task_result": task_result,
+                    }
+                    manifest_path = await asyncio.to_thread(
+                        dinsar_production_service.build_execution_manifest,
+                        run=run,
+                        item=item,
+                        execution=execution,
+                        primary_file=primary_file,
+                        source_files=source_files,
+                        native_output_dir=native_output_dir,
+                        metrics=metrics,
+                    )
+                    await asyncio.to_thread(
+                        dinsar_production_service.write_current_pointer,
+                        run=run,
+                        item=item,
+                        execution=execution,
+                        manifest_path=manifest_path,
+                        primary_file=primary_file,
+                        source_files=source_files,
+                        native_output_dir=native_output_dir,
+                    )
+                    await dinsar_production_service.mark_item_completed(
+                        run=run,
+                        item=item,
+                        execution=execution,
+                        manifest_path=manifest_path,
+                        metrics=metrics,
+                        db=db,
+                    )
+                    successful_output_dirs.append(managed_run_dir)
+                    await task_service.add_log(
+                        job.task_id,
+                        "INFO",
+                        f"[{item_index}/{total_items}] Completed {item_label}",
+                    )
+                    run_log(run.run_id, f"[item-ok] {item_index}/{total_items} {item_label}")
+                except Exception as exc:
+                    cancelled = await _refresh_cancel_state()
+                    error_message = str(exc)
+                    if cancelled:
+                        await dinsar_production_service.mark_item_cancelled(
+                            run=run,
+                            item=item,
+                            execution=execution,
+                            error_message=f"Cancelled while processing {item_label}",
+                            db=db,
+                        )
+                        await task_service.add_log(
+                            job.task_id,
+                            "WARNING",
+                            f"[{item_index}/{total_items}] Cancelled {item_label}: {error_message}",
+                        )
+                        run_log(
+                            run.run_id,
+                            f"[item-cancelled] {item_index}/{total_items} {item_label}: {error_message}",
+                        )
+                        break
+
+                    await dinsar_production_service.mark_item_failed(
+                        run=run,
+                        item=item,
+                        execution=execution,
+                        error_message=error_message,
+                        db=db,
+                    )
+                    await task_service.add_log(
+                        job.task_id,
+                        "WARNING",
+                        f"[{item_index}/{total_items}] Failed {item_label}: {error_message}",
+                    )
+                    run_log(
+                        run.run_id,
+                        f"[item-failed] {item_index}/{total_items} {item_label}: {error_message}",
+                    )
+                    if task_result.get("command"):
+                        await task_service.add_log(
+                            job.task_id,
+                            "INFO",
+                            f"WSL command [{item_label}]: {task_result.get('command')}",
+                        )
+                    if task_result.get("stdout_tail"):
+                        await task_service.add_log(
+                            job.task_id,
+                            "INFO",
+                            f"WSL stdout tail [{item_label}]:\n{task_result.get('stdout_tail')}",
+                        )
+                    if task_result.get("stderr_tail"):
+                        await task_service.add_log(
+                            job.task_id,
+                            "WARNING",
+                            f"WSL stderr tail [{item_label}]:\n{task_result.get('stderr_tail')}",
+                        )
+
+        publish_result = None
+        rebuild_result = None
+        publish_error = None
+        publish_dirs = _dedupe_existing_dirs(successful_output_dirs)
+        if publish_dirs:
+            await task_service.update_task(
+                job.task_id,
+                progress=99,
+                message=f"Publishing {len(publish_dirs)} successful {engine_title} result package(s)...",
+            )
+            try:
+                publish_result = await result_catalog_service.publish_from_sources(db, publish_dirs)
+                processed_count = int(publish_result.get("processed", 0) or 0)
+                failed_count = int(publish_result.get("failed", 0) or 0)
+                expected_count = len(publish_dirs)
+                if processed_count > 0:
+                    rebuild_result = await result_catalog_service.rebuild_catalog(
+                        db,
+                        full_rebuild=True,
+                    )
+                if processed_count != expected_count or failed_count != 0:
+                    raise RuntimeError(
+                        f"Expected to publish {expected_count} {engine_title} result package(s), "
+                        f"but processed={processed_count}, failed={failed_count}"
+                    )
+                await task_service.add_log(
+                    job.task_id,
+                    "INFO",
+                    (
+                        f"Published {publish_result.get('processed', 0)} {engine_title} result package(s). "
+                        f"issues={rebuild_result.get('issue_count', 0) if rebuild_result else 0}"
+                    ),
+                )
+                run_log(
+                    run.run_id,
+                    (
+                        f"[publish] processed={publish_result.get('processed', 0)} "
+                        f"failed={publish_result.get('failed', 0)} "
+                        f"issues={rebuild_result.get('issue_count', 0) if rebuild_result else 0}"
+                    ),
+                )
+            except Exception as exc:
+                publish_error = str(exc)
+                await task_service.add_log(
+                    job.task_id,
+                    "WARNING",
+                    f"Result catalog publish failed: {publish_error}",
+                )
+                run_log(run.run_id, f"[publish-failed] {publish_error}")
+
+        cancelled = await _refresh_cancel_state()
+        await dinsar_production_service.refresh_run_counters(run, db=db)
+        if publish_error:
+            final_status = "FAILED"
+            latest_message = f"Result catalog publish failed: {publish_error}"
+        elif cancelled:
+            final_status = "CANCELLED"
+            latest_message = (
+                f"{engine_title} D-InSAR production cancelled. completed={run.completed_items} "
+                f"failed={run.failed_items} total={run.total_items}"
+            )
+        elif int(run.failed_items or 0) > 0:
+            final_status = "FAILED"
+            latest_message = (
+                f"{engine_title} D-InSAR production finished with failures. completed={run.completed_items} "
+                f"failed={run.failed_items} total={run.total_items}"
+            )
+        else:
+            final_status = "COMPLETED"
+            latest_message = (
+                f"{engine_title} D-InSAR production completed. completed={run.completed_items} "
+                f"failed={run.failed_items} total={run.total_items}"
+            )
+
+        summary_payload = {
+            "workflow": f"dinsar_{engine_code}",
+            "engine_code": run.engine_code,
+            "profile_code": run.profile_code,
+            "mode": run.mode,
+            "total_items": run.total_items,
+            "completed_items": run.completed_items,
+            "failed_items": run.failed_items,
+            "skipped_items": run.skipped_items,
+            "publish": publish_result,
+            "rebuild": rebuild_result,
+            "publish_error": publish_error,
+            "published_output_dirs": publish_dirs,
+        }
+        await dinsar_production_service.finalize_run(
+            run,
+            db=db,
+            status=final_status,
+            summary_payload=summary_payload,
+            latest_message=latest_message,
+        )
+        run_log(run.run_id, f"[finish] status={final_status} message={latest_message}")
+
+        if final_status == "COMPLETED":
+            await task_service.update_task(
+                job.task_id,
+                status="COMPLETED",
+                progress=100,
+                message=latest_message,
+            )
+            return
+
+        task_status = "CANCELLED" if final_status == "CANCELLED" else "FAILED"
+        await task_service.update_task(
+            job.task_id,
+            status=task_status,
+            progress=100,
+            message=latest_message,
+        )
+        raise RuntimeError(latest_message)
+
+
 async def _handle_isce2_run(job: SystemJobORM) -> None:
+    payload = job.payload or {}
+    production_run_id = str(payload.get("production_run_id") or "").strip()
+    if production_run_id:
+        try:
+            await _run_wsl_dinsar_production_controller(
+                job,
+                engine_code="isce2",
+                engine_title="ISCE2",
+                fallback_timeout_seconds=settings.ISCE2_PER_TASK_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            latest_message = f"ISCE2 D-InSAR production controller failed: {exc}"
+            try:
+                async with AsyncSessionLocal() as db:
+                    run = await dinsar_production_service.get_run(production_run_id, db)
+                    if run is not None and str(run.status or "").strip().upper() not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                        summary_payload = dict(run.summary_json or {})
+                        summary_payload["controller_error"] = str(exc)
+                        await dinsar_production_service.finalize_run(
+                            run,
+                            db=db,
+                            status="FAILED",
+                            summary_payload=summary_payload,
+                            latest_message=latest_message,
+                        )
+                        dinsar_production_service.append_run_log(
+                            run.run_id,
+                            f"[controller-failed] {exc}",
+                        )
+            except Exception:
+                pass
+
+            try:
+                current_task = await task_service.get_task(job.task_id)
+                if current_task and current_task.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                    await task_service.add_log(job.task_id, "ERROR", latest_message)
+                    await task_service.update_task(
+                        job.task_id,
+                        status="FAILED",
+                        progress=100,
+                        message=latest_message,
+                    )
+            except Exception:
+                pass
+            raise
+        return
+
     await _handle_queued_engine_run(
         job,
         engine_title="ISCE2",

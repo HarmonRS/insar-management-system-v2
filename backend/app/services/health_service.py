@@ -17,7 +17,9 @@ from ..models import (
     SystemWorkerHeartbeatORM,
 )
 from ..idl_service import get_idl_status
+from .product_package_schema import CANONICAL_PACKAGE_SCHEMA
 from .pairing_state_service import pairing_state_service
+from .wsl_runtime_registry import wsl_runtime_registry
 
 
 DEFAULT_WORKER_TIMEOUT_SECONDS = 60
@@ -282,12 +284,16 @@ async def _check_result_catalog() -> Dict[str, Any]:
     )
 
 
-async def _check_psinsar_result_catalog() -> Dict[str, Any]:
+async def _check_timeseries_result_catalog() -> Dict[str, Any]:
     return await _check_catalog(
         catalog_name="psinsar",
-        storage_root=settings.PSINSAR_PRODUCT_DIR,
+        storage_root=settings.TIMESERIES_PRODUCT_DIR,
         enabled=bool(settings.TIMESERIES_ENABLED),
     )
+
+
+async def _check_psinsar_result_catalog() -> Dict[str, Any]:
+    return await _check_timeseries_result_catalog()
 
 
 async def _check_nginx() -> Dict[str, Any]:
@@ -351,6 +357,30 @@ def _sanitize_source_roots_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _sanitize_product_package_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ok": bool(payload.get("ok")),
+        "total_count": int(payload.get("total_count") or 0),
+        "canonical_count": int(payload.get("canonical_count") or 0),
+        "missing_manifest_count": int(payload.get("missing_manifest_count") or 0),
+        "missing_publish_dir_count": int(payload.get("missing_publish_dir_count") or 0),
+        "missing_processor_count": int(payload.get("missing_processor_count") or 0),
+        "missing_runtime_count": int(payload.get("missing_runtime_count") or 0),
+        "missing_native_output_count": int(payload.get("missing_native_output_count") or 0),
+    }
+
+
+def _sanitize_wsl_runtime_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ok": bool(payload.get("ok")),
+        "broker_job_root_exists": bool(payload.get("broker_job_root_exists")),
+        "required_runtime_count": int(payload.get("required_runtime_count") or 0),
+        "healthy_runtime_count": int(payload.get("healthy_runtime_count") or 0),
+        "shared_distro": payload.get("shared_distro"),
+        "shared_conda_env_name": payload.get("shared_conda_env_name"),
+    }
+
+
 def _sanitize_pairing_system_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "ok": bool(payload.get("ok")),
@@ -374,18 +404,26 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     worker = payload.get("worker", {}) or {}
     result_catalog = payload.get("result_catalog", {}) or {}
     dinsar_result_catalog = payload.get("dinsar_result_catalog", {}) or result_catalog
-    psinsar_result_catalog = payload.get("psinsar_result_catalog", {}) or {}
+    timeseries_result_catalog = (
+        payload.get("timeseries_result_catalog", {}) or payload.get("psinsar_result_catalog", {}) or {}
+    )
+    psinsar_result_catalog = timeseries_result_catalog
     dinsar_bridge = payload.get("dinsar_bridge", {}) or {}
     source_roots = payload.get("source_roots", {}) or {}
+    product_packages = payload.get("product_packages", {}) or {}
+    wsl_runtime = payload.get("wsl_runtime", {}) or {}
     pairing_system = payload.get("pairing_system", {}) or {}
     idl = payload.get("idl", {}) or {}
     idl_status = idl.get("status", {}) or {}
     ollama = payload.get("ollama", {}) or {}
     nginx = payload.get("nginx", {}) or {}
     sanitized_dinsar_catalog = _sanitize_catalog_status(dinsar_result_catalog)
-    sanitized_psinsar_catalog = _sanitize_catalog_status(psinsar_result_catalog)
+    sanitized_timeseries_catalog = _sanitize_catalog_status(timeseries_result_catalog)
+    sanitized_psinsar_catalog = sanitized_timeseries_catalog
     sanitized_dinsar_bridge = _sanitize_bridge_status(dinsar_bridge)
     sanitized_source_roots = _sanitize_source_roots_status(source_roots)
+    sanitized_product_packages = _sanitize_product_package_status(product_packages)
+    sanitized_wsl_runtime = _sanitize_wsl_runtime_status(wsl_runtime)
     sanitized_pairing_system = _sanitize_pairing_system_status(pairing_system)
 
     return {
@@ -403,13 +441,17 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         },
         "result_catalog": sanitized_dinsar_catalog,
         "dinsar_result_catalog": sanitized_dinsar_catalog,
+        "timeseries_result_catalog": sanitized_timeseries_catalog,
         "psinsar_result_catalog": sanitized_psinsar_catalog,
         "catalogs": {
             "dinsar": sanitized_dinsar_catalog,
+            "timeseries": sanitized_timeseries_catalog,
             "psinsar": sanitized_psinsar_catalog,
         },
         "dinsar_bridge": sanitized_dinsar_bridge,
         "source_roots": sanitized_source_roots,
+        "product_packages": sanitized_product_packages,
+        "wsl_runtime": sanitized_wsl_runtime,
         "pairing_system": sanitized_pairing_system,
         "idl": {
             "ok": bool(idl.get("ok")),
@@ -787,6 +829,141 @@ async def _check_source_roots() -> Dict[str, Any]:
     }
 
 
+async def _check_product_packages() -> Dict[str, Any]:
+    status = {
+        "ok": False,
+        "canonical_schema": CANONICAL_PACKAGE_SCHEMA,
+        "total_count": 0,
+        "canonical_count": 0,
+        "missing_manifest_count": 0,
+        "missing_publish_dir_count": 0,
+        "missing_processor_count": 0,
+        "missing_runtime_count": 0,
+        "missing_native_output_count": 0,
+        "by_family": {},
+        "by_engine": {},
+        "error": None,
+    }
+    try:
+        session_factory = _get_session_factory()
+        async with session_factory() as db:
+            result = await db.execute(
+                select(
+                    ResultProductORM.product_family,
+                    ResultProductORM.engine_code,
+                    ResultProductORM.package_schema,
+                    ResultProductORM.processor_code,
+                    ResultProductORM.runtime_id,
+                    ResultProductORM.manifest_path,
+                    ResultProductORM.publish_dir,
+                    ResultProductORM.native_output_dir,
+                )
+            )
+            rows = result.all()
+
+        status["total_count"] = len(rows)
+        for (
+            product_family,
+            engine_code,
+            package_schema,
+            processor_code,
+            runtime_id,
+            manifest_path,
+            publish_dir,
+            native_output_dir,
+        ) in rows:
+            family_key = str(product_family or "unknown").strip() or "unknown"
+            engine_key = str(engine_code or "unknown").strip() or "unknown"
+            status["by_family"][family_key] = int(status["by_family"].get(family_key, 0)) + 1
+            status["by_engine"][engine_key] = int(status["by_engine"].get(engine_key, 0)) + 1
+
+            if str(package_schema or "").strip() == CANONICAL_PACKAGE_SCHEMA:
+                status["canonical_count"] += 1
+            if not str(manifest_path or "").strip() or not os.path.isfile(str(manifest_path)):
+                status["missing_manifest_count"] += 1
+            if not str(publish_dir or "").strip() or not os.path.isdir(str(publish_dir)):
+                status["missing_publish_dir_count"] += 1
+            if not str(processor_code or "").strip():
+                status["missing_processor_count"] += 1
+            if engine_key in {"isce2", "pyint", "gamma"} and not str(runtime_id or "").strip():
+                status["missing_runtime_count"] += 1
+            if not str(native_output_dir or "").strip():
+                status["missing_native_output_count"] += 1
+
+        status["ok"] = all(
+            [
+                status["missing_manifest_count"] == 0,
+                status["missing_publish_dir_count"] == 0,
+                status["missing_processor_count"] == 0,
+                status["missing_runtime_count"] == 0,
+                status["missing_native_output_count"] == 0,
+                status["canonical_count"] == status["total_count"],
+            ]
+        )
+    except Exception as exc:
+        status["error"] = str(exc)
+    return status
+
+
+async def _check_wsl_runtime() -> Dict[str, Any]:
+    status = {
+        "ok": False,
+        "shared_distro": wsl_runtime_registry.shared_distro,
+        "shared_conda_env_name": wsl_runtime_registry.shared_conda_env_name,
+        "shared_python_path": wsl_runtime_registry.shared_python_path,
+        "broker_job_root_windows": wsl_runtime_registry.broker_job_root_windows,
+        "broker_job_root_exists": os.path.isdir(wsl_runtime_registry.broker_job_root_windows),
+        "required_runtime_count": 0,
+        "healthy_runtime_count": 0,
+        "runtimes": [],
+        "error": None,
+    }
+    try:
+        required_by_engine = {
+            "isce2": bool(settings.ISCE2_ENABLED or settings.TIMESERIES_ENABLED),
+            "pyint": bool(settings.PYINT_ENABLED),
+        }
+        for runtime in wsl_runtime_registry.runtimes.values():
+            required = bool(required_by_engine.get(runtime.engine_code, False))
+            runner_exists = os.path.isfile(runtime.runner_path_windows)
+            env_profile_exists = None
+            if str(runtime.env_profile_path_windows or "").strip():
+                env_profile_exists = os.path.isfile(runtime.env_profile_path_windows)
+            python_matches_shared = str(runtime.python_path or "").strip() == str(
+                wsl_runtime_registry.shared_python_path or ""
+            ).strip()
+            distro_matches_shared = str(runtime.distro or "").strip() == str(
+                wsl_runtime_registry.shared_distro or ""
+            ).strip()
+            runtime_ok = runner_exists and python_matches_shared and distro_matches_shared
+            if env_profile_exists is False and required:
+                runtime_ok = False
+            if required:
+                status["required_runtime_count"] += 1
+                if runtime_ok:
+                    status["healthy_runtime_count"] += 1
+            status["runtimes"].append(
+                {
+                    "runtime_id": runtime.runtime_id,
+                    "engine_code": runtime.engine_code,
+                    "display_name": runtime.display_name,
+                    "required": required,
+                    "ok": runtime_ok,
+                    "runner_exists": runner_exists,
+                    "env_profile_exists": env_profile_exists,
+                    "python_matches_shared": python_matches_shared,
+                    "distro_matches_shared": distro_matches_shared,
+                    "allowed_operations": list(runtime.allowed_operations or ()),
+                }
+            )
+        status["ok"] = bool(status["broker_job_root_exists"]) and (
+            status["healthy_runtime_count"] >= status["required_runtime_count"]
+        )
+    except Exception as exc:
+        status["error"] = str(exc)
+    return status
+
+
 async def get_health_status(
     include_external: bool = True,
     include_details: bool = False,
@@ -807,9 +984,12 @@ async def get_health_status(
         ollama_status = await _check_ollama()
 
     result_catalog_status = await _check_result_catalog()
-    psinsar_result_catalog_status = await _check_psinsar_result_catalog()
+    timeseries_result_catalog_status = await _check_timeseries_result_catalog()
+    psinsar_result_catalog_status = timeseries_result_catalog_status
     dinsar_bridge_status = await _check_dinsar_bridge()
     source_roots_status = await _check_source_roots()
+    product_packages_status = await _check_product_packages()
+    wsl_runtime_status = await _check_wsl_runtime()
     pairing_system_status = await pairing_state_service.get_pairing_system_status()
     engines_status = {"ok": None, "overall": None, "engines": []}
     if full or include_details:
@@ -824,8 +1004,10 @@ async def get_health_status(
             result_catalog_status.get("ok"),
             dinsar_bridge_status.get("ok"),
             source_roots_status.get("ok"),
+            product_packages_status.get("ok"),
+            wsl_runtime_status.get("ok"),
             pairing_system_status.get("ok"),
-            (not settings.TIMESERIES_ENABLED) or psinsar_result_catalog_status.get("ok"),
+            (not settings.TIMESERIES_ENABLED) or timeseries_result_catalog_status.get("ok"),
         ]
     )
 
@@ -836,13 +1018,17 @@ async def get_health_status(
         "worker": worker_status,
         "result_catalog": result_catalog_status,
         "dinsar_result_catalog": result_catalog_status,
+        "timeseries_result_catalog": timeseries_result_catalog_status,
         "psinsar_result_catalog": psinsar_result_catalog_status,
         "catalogs": {
             "dinsar": result_catalog_status,
+            "timeseries": timeseries_result_catalog_status,
             "psinsar": psinsar_result_catalog_status,
         },
         "dinsar_bridge": dinsar_bridge_status,
         "source_roots": source_roots_status,
+        "product_packages": product_packages_status,
+        "wsl_runtime": wsl_runtime_status,
         "pairing_system": pairing_system_status,
         "idl": {
             "ok": idl_ok,

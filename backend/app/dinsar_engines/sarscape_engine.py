@@ -50,6 +50,7 @@ class SarscapeEngine(DinsarEngine):
         status_raw = envi_service.get_status()
         idl_ok: bool = status_raw.get("idl_installed", False)
         dem_ok: bool = status_raw.get("dem_exists", False)
+        runner_ok: bool = status_raw.get("runner_ready", False)
 
         checks = [
             {
@@ -62,12 +63,30 @@ class SarscapeEngine(DinsarEngine):
                 "ok": dem_ok,
                 "detail": status_raw.get("dem_base_file", ""),
             },
+            {
+                "name": "Python Runner",
+                "ok": runner_ok,
+                "detail": (
+                    status_raw.get("runner_message")
+                    or status_raw.get("runner_python")
+                    or ""
+                ),
+            },
         ]
 
-        if idl_ok and dem_ok:
+        if idl_ok and dem_ok and runner_ok:
             status = "ok"
             available = True
             message = "ENVI/SARscape 可用"
+        elif not idl_ok:
+            status = "unavailable"
+            available = False
+            message = "IDL/ENVI 未安装或路径错误"
+        elif not runner_ok:
+            status = "unavailable"
+            available = False
+            runner_message = str(status_raw.get("runner_message") or "").strip()
+            message = runner_message or "ENVI Python runner unavailable."
         elif idl_ok:
             status = "degraded"
             available = True
@@ -75,7 +94,7 @@ class SarscapeEngine(DinsarEngine):
         else:
             status = "unavailable"
             available = False
-            message = "IDL/ENVI 未安装或路径错误"
+            message = "ENVI/SARscape unavailable."
 
         return EngineAvailability(
             engine_code=self.engine_code,

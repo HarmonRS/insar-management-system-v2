@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -43,6 +43,10 @@ class RunJobRequest(BaseModel):
     profile: str = Field(..., description="Engine profile, for example custom6 / lt1_stripmap / lt1_gamma_dinsar")
     root_dir: str = Field(..., description="Windows root directory")
     num_to_process: int = Field(default=0, ge=0, description="How many tasks to process; 0 means all")
+    rerun_mode: Literal["unfinished_only", "rerun_all"] = Field(
+        default="unfinished_only",
+        description="unfinished_only = only run unfinished tasks; rerun_all = rerun everything",
+    )
     timeout_seconds: Optional[int] = Field(default=None, ge=60)
     extra: Dict[str, Any] = Field(default_factory=dict, description="Engine-specific parameters")
 
@@ -178,9 +182,23 @@ async def submit_run(
                 engine.validate_root_dir,
                 req.root_dir,
                 req.num_to_process,
+                req.rerun_mode,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if int(validation_summary.get("task_count", 0) or 0) <= 0:
+            if (
+                req.rerun_mode == "unfinished_only"
+                and int(validation_summary.get("skipped_completed_count", 0) or 0) > 0
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"All discovered Task_* directories already have completed "
+                        f"{req.engine_code}/{req.profile} results under: {req.root_dir}"
+                    ),
+                )
+            raise HTTPException(status_code=400, detail="No valid task directories selected.")
 
     effective_timeout_seconds = req.timeout_seconds
     if effective_timeout_seconds is None:
@@ -189,7 +207,13 @@ async def submit_run(
             effective_timeout_seconds = int(engine_default_timeout)
 
     pyint_preview = None
-    if req.engine_code == "pyint":
+    skip_pyint_submit_preview = (
+        req.engine_code == "pyint"
+        and req.rerun_mode == "unfinished_only"
+        and validation_summary is not None
+        and int(validation_summary.get("skipped_completed_count", 0) or 0) > 0
+    )
+    if req.engine_code == "pyint" and not skip_pyint_submit_preview:
         try:
             pyint_preview = await asyncio.to_thread(
                 build_pyint_input_preview,
@@ -216,36 +240,43 @@ async def submit_run(
         "profile": req.profile,
         "root_dir": req.root_dir,
         "num_to_process": req.num_to_process,
+        "rerun_mode": req.rerun_mode,
         "timeout_seconds": effective_timeout_seconds,
         "extra": dict(req.extra or {}),
     }
 
     from ..services.job_handlers import JOB_TYPE_IDL_RUN_DINSAR, JOB_TYPE_ISCE2_RUN, JOB_TYPE_PYINT_RUN
+    create_managed_run = False
+    normalized_extra = dict(payload["extra"])
 
     if req.engine_code == "sarscape":
         payload["mode"] = "custom" if req.profile == "custom6" else "metatask"
         job_type = JOB_TYPE_IDL_RUN_DINSAR
         max_attempts = DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS
+        create_managed_run = True
     elif req.engine_code in {"isce2", "pyint"}:
         if hasattr(engine, "normalize_extra"):
             try:
                 payload["extra"] = engine.normalize_extra(payload["extra"])
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        normalized_extra = dict(payload["extra"])
         if req.engine_code == "isce2":
             job_type = JOB_TYPE_ISCE2_RUN
             max_attempts = ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS
+            create_managed_run = True
         else:
             job_type = JOB_TYPE_PYINT_RUN
             max_attempts = PYINT_PRODUCTION_JOB_MAX_ATTEMPTS
         if validation_summary is not None:
             validated_task_count = validation_summary.get("task_count", 0)
-            if pyint_preview is not None:
-                validated_task_count = int(pyint_preview.get("selected_task_count", validated_task_count) or 0)
             payload["extra"].update(
                 {
                     "__validated_task_count": validated_task_count,
                     "__validated_mode": validation_summary.get("mode", ""),
+                    "__rerun_mode": req.rerun_mode,
+                    "__discovered_task_count": int(validation_summary.get("discovered_task_count", validated_task_count) or 0),
+                    "__skipped_completed_count": int(validation_summary.get("skipped_completed_count", 0) or 0),
                 }
             )
     else:
@@ -255,15 +286,16 @@ async def submit_run(
         )
 
     try:
-        if req.engine_code == "sarscape":
+        if create_managed_run:
             async with _new_session() as db:
                 result = await dinsar_production_service.create_run(
                     engine_code=req.engine_code,
                     profile_code=req.profile,
                     root_dir=req.root_dir,
                     num_to_process=req.num_to_process,
+                    rerun_mode=req.rerun_mode,
                     timeout_seconds=req.timeout_seconds,
-                    extra=req.extra,
+                    extra=normalized_extra,
                     created_by=getattr(current_user, "username", None),
                     db=db,
                 )
@@ -276,6 +308,9 @@ async def submit_run(
                 "engine_code": req.engine_code,
                 "profile": req.profile,
                 "selected_task_count": result.get("selected_task_count", 0),
+                "discovered_task_count": result.get("discovered_task_count", result.get("selected_task_count", 0)),
+                "skipped_completed_count": result.get("skipped_completed_count", 0),
+                "rerun_mode": result.get("rerun_mode", req.rerun_mode),
                 "message": "Task queued.",
             }
 
@@ -303,6 +338,13 @@ async def submit_run(
         "engine_code": req.engine_code,
         "profile": req.profile,
         "selected_task_count": validation_summary.get("task_count", 1) if validation_summary else 1,
+        "discovered_task_count": (
+            validation_summary.get("discovered_task_count", validation_summary.get("task_count", 1))
+            if validation_summary
+            else 1
+        ),
+        "skipped_completed_count": validation_summary.get("skipped_completed_count", 0) if validation_summary else 0,
+        "rerun_mode": req.rerun_mode,
         "message": "Task queued.",
     }
 

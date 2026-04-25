@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
         ps_catalog_bootstrap = await psinsar_catalog_service.bootstrap_catalog_on_startup_clean()
     except Exception as exc:
         ps_catalog_bootstrap = {
-            "storage_root": settings.PSINSAR_PRODUCT_DIR,
+            "storage_root": settings.TIMESERIES_PRODUCT_DIR,
             "manifest_count": 0,
             "db_count": 0,
             "needs_rebuild": False,
@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI):
     if catalog_bootstrap.get("compat_error"):
         print(f">>> [Catalog Compat] Startup sync failed: {catalog_bootstrap['compat_error']}")
     print(
-        ">>> [PS Catalog] root={0} manifests={1} db={2} rebuild={3} queued={4}".format(
+        ">>> [Timeseries Catalog] root={0} manifests={1} db={2} rebuild={3} queued={4}".format(
             ps_catalog_bootstrap.get("storage_root") or "?",
             ps_catalog_bootstrap.get("manifest_count", 0),
             ps_catalog_bootstrap.get("db_count", 0),
@@ -172,7 +172,7 @@ async def lifespan(app: FastAPI):
         )
     )
     if ps_catalog_bootstrap.get("error"):
-        print(f">>> [PS Catalog] Startup bootstrap failed: {ps_catalog_bootstrap['error']}")
+        print(f">>> [Timeseries Catalog] Startup bootstrap failed: {ps_catalog_bootstrap['error']}")
     print(
         ">>> [Pairing] status={0} scenes={1} pairs={2} dirty={3} metric={4} rebuild={5}".format(
             pairing_bootstrap.get("status") or "?",
@@ -195,16 +195,23 @@ async def lifespan(app: FastAPI):
         schema_ok = health.get("database", {}).get("schema_ok")
         worker_ok = health.get("worker", {}).get("ok")
         dinsar_catalog_ok = health.get("dinsar_result_catalog", {}).get("ok")
-        psinsar_catalog_ok = health.get("psinsar_result_catalog", {}).get("ok")
+        psinsar_catalog_ok = (
+            health.get("timeseries_result_catalog", {})
+            or health.get("psinsar_result_catalog", {})
+        ).get("ok")
         pairing_ok = health.get("pairing_system", {}).get("ok")
         idl_ok = health.get("idl", {}).get("ok")
+        product_packages_ok = health.get("product_packages", {}).get("ok")
+        wsl_runtime_ok = health.get("wsl_runtime", {}).get("ok")
         print(
-            ">>> [Health] DB:{0} Schema:{1} Worker:{2} DInSAR-Catalog:{3} PSInSAR-Catalog:{4} Pairing:{5} IDL:{6}".format(
+            ">>> [Health] DB:{0} Schema:{1} Worker:{2} DInSAR-Catalog:{3} Timeseries-Catalog:{4} Packages:{5} WSL:{6} Pairing:{7} IDL:{8}".format(
                 "OK" if db_ok else "FAIL",
                 "OK" if schema_ok else "FAIL",
                 "OK" if worker_ok else "FAIL",
                 "OK" if dinsar_catalog_ok else "FAIL",
                 "OK" if psinsar_catalog_ok else "FAIL",
+                "OK" if product_packages_ok else "FAIL",
+                "OK" if wsl_runtime_ok else "FAIL",
                 "OK" if pairing_ok else "FAIL",
                 "OK" if idl_ok else "FAIL",
             )

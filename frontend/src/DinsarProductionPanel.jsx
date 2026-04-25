@@ -74,6 +74,24 @@ const PYINT_PRECISE_ORBIT_MODE_LABEL = {
   replace_and_validate: '替换并校验',
 };
 
+const RERUN_MODE_LABEL = {
+  unfinished_only: '只跑未完成',
+  rerun_all: '全部重跑',
+};
+
+const RERUN_MODE_OPTIONS = [
+  {
+    value: 'unfinished_only',
+    label: '只跑未完成',
+    description: '按当前引擎和当前模板检查已有结果，已完成任务会跳过。',
+  },
+  {
+    value: 'rerun_all',
+    label: '全部重跑',
+    description: '忽略已有结果，对本次选中的任务全部重新执行。',
+  },
+];
+
 function formatEngineLabel(engineCode, engineLabel = '') {
   return engineLabel || ENGINE_LABEL[engineCode] || engineCode || '-';
 }
@@ -312,6 +330,8 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState('');
   const [submitError, setSubmitError] = useState(false);
+  const [submitDialogOpen, setSubmitDialogOpen] = useState(false);
+  const [rerunMode, setRerunMode] = useState('unfinished_only');
   const [pyintPreview, setPyintPreview] = useState(null);
   const [pyintPreviewLoading, setPyintPreviewLoading] = useState(false);
   const [pyintPreviewFeedback, setPyintPreviewFeedback] = useState({ message: '', error: false });
@@ -523,7 +543,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   }, [numToProcess, rootDir]);
 
-  const handleSubmit = async () => {
+  const handleOpenSubmitDialog = useCallback(() => {
     if (!rootDir.trim()) {
       setSubmitError(true);
       setSubmitMsg('请输入根目录。');
@@ -534,23 +554,37 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
       setSubmitMsg('PyINT 输入资产预检未通过，请先修复阻塞项。');
       return;
     }
+    setSubmitError(false);
+    setSubmitMsg('');
+    setSubmitDialogOpen(true);
+  }, [pyintPreviewBlocksSubmit, rootDir]);
 
+  const handleCloseSubmitDialog = useCallback(() => {
+    if (submitting) return;
+    setSubmitDialogOpen(false);
+  }, [submitting]);
+
+  const handleSubmit = async () => {
     setSubmitting(true);
     setSubmitMsg('');
     setSubmitError(false);
     try {
       const extra = buildExtraPayload(currentParamSchema, engineExtraParams);
+      setSubmitDialogOpen(false);
       const result = await submitRun({
         engine_code: selectedEngine,
         profile: selectedProfile,
         root_dir: rootDir.trim(),
         num_to_process: Number(numToProcess) || 0,
+        rerun_mode: rerunMode,
         timeout_seconds: timeoutSec ? Number(timeoutSec) : null,
         extra,
       });
       const taskCount = result?.selected_task_count ? `，选中 ${result.selected_task_count} 个任务` : '';
+      const skippedCompleted = Number(result?.skipped_completed_count || 0);
+      const skippedText = skippedCompleted > 0 ? `，跳过 ${skippedCompleted} 个已完成任务` : '';
       setSubmitError(false);
-      setSubmitMsg(`任务已入队：${result.task_id}${taskCount}`);
+      setSubmitMsg(`任务已入队：${result.task_id}${taskCount}${skippedText}`);
       if (onJobQueued) onJobQueued(result.task_id);
       await refreshMonitor();
     } catch (err) {
@@ -621,6 +655,135 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             >
               {logModal.loading ? '加载中...' : logModal.content || '（日志为空）'}
             </pre>
+          </div>
+        </div>
+      )}
+
+      {submitDialogOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15,23,42,0.42)',
+            zIndex: 9998,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 20,
+          }}
+        >
+          <div
+            style={{
+              width: 'min(560px, 100%)',
+              background: '#fff',
+              borderRadius: 14,
+              border: '1px solid #cbd5e1',
+              boxShadow: '0 20px 60px rgba(15, 23, 42, 0.24)',
+              padding: 20,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+              <strong style={{ fontSize: 16, color: '#0f172a' }}>提交生产任务</strong>
+              <button
+                onClick={handleCloseSubmitDialog}
+                disabled={submitting}
+                style={{
+                  border: 'none',
+                  background: 'none',
+                  color: '#64748b',
+                  cursor: submitting ? 'not-allowed' : 'pointer',
+                  fontSize: 13,
+                }}
+              >
+                关闭
+              </button>
+            </div>
+
+            <div style={{ fontSize: 12, color: '#475569', lineHeight: 1.6, marginBottom: 12 }}>
+              选择本次批处理策略。任务数量限制会在“只跑未完成”过滤之后再生效，按当前引擎和当前模板判断已完成状态。
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
+              {RERUN_MODE_OPTIONS.map(option => {
+                const selected = rerunMode === option.value;
+                return (
+                  <label
+                    key={option.value}
+                    style={{
+                      display: 'flex',
+                      gap: 12,
+                      alignItems: 'flex-start',
+                      padding: 12,
+                      borderRadius: 10,
+                      border: selected ? '2px solid #3b82f6' : '1px solid #dbeafe',
+                      background: selected ? '#eff6ff' : '#f8fafc',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="rerun-mode"
+                      checked={selected}
+                      onChange={() => setRerunMode(option.value)}
+                    />
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: '#0f172a', marginBottom: 4 }}>{option.label}</div>
+                      <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.5 }}>{option.description}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+
+            <div
+              style={{
+                marginBottom: 16,
+                padding: '10px 12px',
+                borderRadius: 10,
+                border: '1px solid #e2e8f0',
+                background: '#f8fafc',
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                gap: 8,
+              }}
+            >
+              <div style={{ fontSize: 12, color: '#475569' }}>引擎：{formatEngineLabel(selectedEngine, currentEngineObj?.engine_label)}</div>
+              <div style={{ fontSize: 12, color: '#475569' }}>模板：{currentProfileObj?.label || selectedProfile}</div>
+              <div style={{ fontSize: 12, color: '#475569' }}>任务数量：{Number(numToProcess) > 0 ? Number(numToProcess) : '全部'}</div>
+              <div style={{ fontSize: 12, color: '#475569' }}>执行策略：{RERUN_MODE_LABEL[rerunMode] || rerunMode}</div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button
+                onClick={handleCloseSubmitDialog}
+                disabled={submitting}
+                style={{
+                  padding: '6px 14px',
+                  borderRadius: 6,
+                  border: '1px solid #cbd5e1',
+                  background: '#fff',
+                  color: '#0f172a',
+                  cursor: submitting ? 'not-allowed' : 'pointer',
+                }}
+              >
+                取消
+              </button>
+              <button
+                onClick={handleSubmit}
+                disabled={submitting}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  border: 'none',
+                  background: '#2563eb',
+                  color: '#fff',
+                  cursor: submitting ? 'not-allowed' : 'pointer',
+                  fontWeight: 600,
+                }}
+              >
+                {submitting ? '提交中...' : `确认 ${RERUN_MODE_LABEL[rerunMode] || ''}`}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -967,7 +1130,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <button
-            onClick={handleSubmit}
+            onClick={handleOpenSubmitDialog}
             disabled={isSubmitDisabled}
             style={{
               padding: '6px 20px',

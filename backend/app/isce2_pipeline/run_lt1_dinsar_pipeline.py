@@ -29,6 +29,7 @@ class Scene:
     tiff_path: Path
     meta_path: Path
     date_yyyymmdd: str
+    satellite: str
     orbit_xml_path: Path
 
 
@@ -158,6 +159,16 @@ def parse_args() -> argparse.Namespace:
         help="Delete an existing work directory before rerunning",
     )
     parser.add_argument(
+        "--reference-satellite",
+        default=None,
+        help="Optional LT-1 satellite for the reference/master scene (LT1A or LT1B)",
+    )
+    parser.add_argument(
+        "--secondary-satellite",
+        default=None,
+        help="Optional LT-1 satellite for the secondary/slave scene (LT1A or LT1B)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Resolve inputs and print the planned configuration without running ISCE2",
@@ -209,10 +220,17 @@ def choose_scene_tiff(scene_dir: Path, scene_glob: str, prefer_scene_keyword: st
 
 
 def scene_meta_from_tiff(tiff_path: Path) -> Path:
-    meta_path = Path(str(tiff_path).replace(".tiff", ".meta.xml"))
-    if not meta_path.exists():
-        raise FileNotFoundError(f"Missing meta XML for {tiff_path}: {meta_path}")
-    return meta_path
+    candidates = [tiff_path.with_suffix(".meta.xml")]
+    legacy_path = Path(str(tiff_path).replace(".tiff", ".meta.xml"))
+    if legacy_path not in candidates:
+        candidates.append(legacy_path)
+
+    for meta_path in candidates:
+        if meta_path.exists():
+            return meta_path
+
+    searched = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(f"Missing meta XML for {tiff_path}. Searched: {searched}")
 
 
 def extract_scene_date(name: str) -> str:
@@ -224,8 +242,71 @@ def extract_scene_date(name: str) -> str:
     return match.group(1)
 
 
+def normalize_lt1_satellite(value: str | None) -> str:
+    text = str(value or "").strip().upper().replace("-", "").replace("_", "")
+    if "LT1A" in text or text in {"A", "LTA"}:
+        return "LT1A"
+    if "LT1B" in text or text in {"B", "LTB"}:
+        return "LT1B"
+    return ""
+
+
+def extract_scene_satellite_from_name(name: str) -> str:
+    match = re.search(r"(LT1[AB])", str(name or ""), re.IGNORECASE)
+    return normalize_lt1_satellite(match.group(1) if match else "")
+
+
+def extract_scene_satellite_from_meta(meta_path: Path) -> str:
+    try:
+        root = ET.parse(meta_path).getroot()
+    except Exception:
+        return ""
+
+    for element in root.iter():
+        tag = str(element.tag or "").rsplit("}", 1)[-1].strip().lower()
+        if tag not in {"mission", "satellite", "platform", "platformid", "missionid"}:
+            continue
+        satellite = normalize_lt1_satellite(element.text)
+        if satellite:
+            return satellite
+    return ""
+
+
+def resolve_scene_satellite(
+    tiff_path: Path,
+    meta_path: Path,
+    explicit_satellite: str | None = None,
+) -> str:
+    explicit = normalize_lt1_satellite(explicit_satellite)
+    name_satellite = extract_scene_satellite_from_name(tiff_path.name)
+    meta_satellite = extract_scene_satellite_from_meta(meta_path)
+
+    if explicit:
+        if name_satellite and name_satellite != explicit:
+            raise ValueError(
+                f"Explicit satellite {explicit} does not match filename for {tiff_path.name}: {name_satellite}"
+            )
+        if meta_satellite and meta_satellite != explicit:
+            raise ValueError(
+                f"Explicit satellite {explicit} does not match metadata for {meta_path.name}: {meta_satellite}"
+            )
+        return explicit
+
+    if name_satellite and meta_satellite and name_satellite != meta_satellite:
+        raise ValueError(
+            f"Satellite mismatch between filename and metadata for {tiff_path.name}: "
+            f"{name_satellite} vs {meta_satellite}"
+        )
+    if name_satellite:
+        return name_satellite
+    if meta_satellite:
+        return meta_satellite
+    raise ValueError(f"Unable to resolve LT-1 satellite from {tiff_path} / {meta_path}")
+
+
 def ensure_orbit_xml(
     date_yyyymmdd: str,
+    satellite: str,
     annotation_xml: Path,
     orbit_root: Path,
     orbit_out_dir: Path,
@@ -233,7 +314,7 @@ def ensure_orbit_xml(
 ) -> Path:
     resolution = ensure_lt1_orbit_xml(
         date_yyyymmdd=date_yyyymmdd,
-        satellite="LT1A",
+        satellite=satellite,
         annotation_xml=annotation_xml,
         orbit_root=orbit_root,
         orbit_output_dir=orbit_out_dir,
@@ -268,8 +349,14 @@ def resolve_task(
     slave_dir_name: str,
     scene_glob: str,
     prefer_scene_keyword: str,
+    reference_satellite: str | None = None,
+    secondary_satellite: str | None = None,
 ) -> tuple[Scene, Scene]:
     scenes: list[Scene] = []
+    satellite_hints = {
+        "master": reference_satellite,
+        "slave": secondary_satellite,
+    }
     for role, subdir in (("master", master_dir_name), ("slave", slave_dir_name)):
         scene_dir = task_dir / subdir
         if not scene_dir.exists():
@@ -278,8 +365,14 @@ def resolve_task(
         tiff_path = choose_scene_tiff(scene_dir, scene_glob, prefer_scene_keyword)
         meta_path = scene_meta_from_tiff(tiff_path)
         date_yyyymmdd = extract_scene_date(tiff_path.name)
+        satellite = resolve_scene_satellite(
+            tiff_path=tiff_path,
+            meta_path=meta_path,
+            explicit_satellite=satellite_hints.get(role),
+        )
         orbit_xml_path = ensure_orbit_xml(
             date_yyyymmdd=date_yyyymmdd,
+            satellite=satellite,
             annotation_xml=meta_path,
             orbit_root=orbit_root,
             orbit_out_dir=orbit_out_dir,
@@ -291,6 +384,7 @@ def resolve_task(
                 tiff_path=tiff_path,
                 meta_path=meta_path,
                 date_yyyymmdd=date_yyyymmdd,
+                satellite=satellite,
                 orbit_xml_path=orbit_xml_path,
             )
         )
@@ -467,8 +561,8 @@ def print_summary(
     print(f"Work dir:     {work_dir}")
     print(f"Output dir:   {output_dir}")
     print(f"DEM:          {config.dem_path}")
-    print(f"Reference:    {config.reference.tiff_path}")
-    print(f"Secondary:    {config.secondary.tiff_path}")
+    print(f"Reference:    {config.reference.tiff_path} [{config.reference.satellite}]")
+    print(f"Secondary:    {config.secondary.tiff_path} [{config.secondary.satellite}]")
     print(f"Ref orbit:    {config.reference.orbit_xml_path}")
     print(f"Sec orbit:    {config.secondary.orbit_xml_path}")
     print(f"BBox:         {config.bbox if config.bbox is not None else 'auto'}")
@@ -510,6 +604,8 @@ def main() -> int:
         slave_dir_name=args.slave_dir_name,
         scene_glob=args.scene_glob,
         prefer_scene_keyword=args.prefer_scene_keyword,
+        reference_satellite=args.reference_satellite,
+        secondary_satellite=args.secondary_satellite,
     )
     dem_path = resolve_dem(args.dem)
     bbox = parse_bbox_arg(args.bbox)

@@ -66,10 +66,12 @@ class DinsarResult(BaseModel):
     id: int
     product_id: Optional[str] = None
     compat_result_id: Optional[int] = None
+    product_family: Optional[str] = None
     name: str
     task_name: Optional[str] = None
     task_alias: Optional[str] = None
     pair_key: Optional[str] = None
+    stack_key: Optional[str] = None
     pair_uid: Optional[str] = None
     run_key: Optional[str] = None
     network_run_id: Optional[str] = None
@@ -472,11 +474,14 @@ class PsTaskItem(BaseModel):
 class PsTimeseriesRun(BaseModel):
     run_id: str
     batch_id: str
+    product_family: Optional[str] = None
     run_name: str
     catalog_name: str
+    stack_key: Optional[str] = None
     mode: str
     engine_code: str
     processor_code: str
+    runtime_id: Optional[str] = None
     env_name: Optional[str] = None
     wsl_distro: Optional[str] = None
     status: str

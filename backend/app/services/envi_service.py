@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import subprocess
+import sys
 import time
 import defusedxml.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -25,6 +27,7 @@ from .dinsar_naming import (
     find_json_sidecar,
     write_run_metadata,
 )
+from .dinsar_result_layout_service import get_run_native_output_dir
 
 _BACKEND_DIR = type(settings).BACKEND_DIR
 
@@ -55,6 +58,93 @@ def _to_local_path(value: Any) -> str:
     if not raw:
         return ""
     return os.path.normpath(raw.replace("/", os.sep))
+
+
+def get_envi_runner_python() -> str:
+    configured = _to_local_path(getattr(settings, "PYTHON_PATH", "") or "")
+    if configured:
+        return configured
+    return os.path.normpath(sys.executable)
+
+
+def get_envi_runner_cwd() -> str:
+    return os.path.normpath(os.path.abspath(type(settings).PROJECT_ROOT))
+
+
+def get_envi_runner_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    project_root = get_envi_runner_cwd()
+    existing = [part for part in str(env.get("PYTHONPATH") or "").split(os.pathsep) if str(part).strip()]
+    ordered = [project_root, *existing]
+    deduped: List[str] = []
+    seen = set()
+    for raw_path in ordered:
+        try:
+            key = os.path.normcase(os.path.normpath(os.path.abspath(str(raw_path))))
+        except Exception:
+            key = str(raw_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(str(raw_path))
+    env["PYTHONPATH"] = os.pathsep.join(deduped)
+    return env
+
+
+def build_envi_runner_command(*args: Any) -> List[str]:
+    command = [
+        get_envi_runner_python(),
+        "-m",
+        "backend.app.services.envi_runner_cli",
+    ]
+    command.extend(str(arg) for arg in args if arg is not None)
+    return command
+
+
+def probe_envi_runner() -> Dict[str, Any]:
+    python_path = get_envi_runner_python()
+    project_root = get_envi_runner_cwd()
+    result: Dict[str, Any] = {
+        "python_path": python_path,
+        "cwd": project_root,
+        "ready": False,
+        "returncode": None,
+        "message": "",
+    }
+    if not python_path:
+        result["message"] = "PYTHON_PATH is empty."
+        return result
+    if not os.path.isfile(python_path):
+        result["message"] = f"Python executable not found: {python_path}"
+        return result
+    if not os.path.isdir(project_root):
+        result["message"] = f"Project root not found: {project_root}"
+        return result
+
+    try:
+        completed = subprocess.run(
+            build_envi_runner_command("--help"),
+            cwd=project_root,
+            env=get_envi_runner_env(),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except Exception as exc:
+        result["message"] = str(exc)
+        return result
+
+    result["returncode"] = int(completed.returncode)
+    if completed.returncode == 0:
+        result["ready"] = True
+        result["message"] = "Runner entrypoint is available."
+        return result
+
+    stderr_text = str(completed.stderr or "").strip()
+    stdout_text = str(completed.stdout or "").strip()
+    result["message"] = (stderr_text or stdout_text or f"returncode={completed.returncode}")[:1000]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +335,7 @@ def _write_envi_run_sidecar(
     started_at: str,
     params: Dict[str, Any],
     metrics: Dict[str, Any],
+    native_output_dir: Optional[str] = None,
 ) -> None:
     write_run_metadata(
         output_dir,
@@ -258,6 +349,7 @@ def _write_envi_run_sidecar(
             "source_root": os.path.normpath(root_dir),
             "task_dir": os.path.normpath(task_dir),
             "output_dir": os.path.normpath(output_dir),
+            "native_output_dir": os.path.normpath(native_output_dir or output_dir),
             "started_at": started_at,
             "finished_at": _utc_now_text(),
             "params": params,
@@ -1632,17 +1724,20 @@ def run_single_task_workflow(
     if not DEM_BASE_FILE:
         raise ValueError("DEM path not configured. Set IDL_DINSAR_DEM_BASE_FILE in .env")
 
+    native_output_dir = get_run_native_output_dir(output_dir)
     master_dir = os.path.join(task_dir, "master")
     slave_dir = os.path.join(task_dir, "slave")
     if not os.path.isdir(master_dir) or not os.path.isdir(slave_dir):
         raise RuntimeError(f"{task_name}: master/slave dir missing")
 
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(native_output_dir, exist_ok=True)
     log_lines: List[str] = [
         f"[envi] single task workflow={normalized_workflow}",
         f"[envi] source_root={source_root}",
         f"[envi] task_dir={task_dir}",
         f"[envi] output_dir={output_dir}",
+        f"[envi] native_output_dir={native_output_dir}",
         f"[envi] dem={DEM_BASE_FILE}",
     ]
     auto_imported = 0
@@ -1689,7 +1784,7 @@ def run_single_task_workflow(
                 "REFERENCE_SARSCAPEDATA": _build_sarscapedata(master_base),
                 "SECONDARY_SARSCAPEDATA": _build_sarscapedata(slave_base),
                 "DEM_SARSCAPEDATA": _build_sarscapedata(DEM_BASE_FILE),
-                "OUTPUT_FOLDER": _normalize_path(output_dir),
+                "OUTPUT_FOLDER": _normalize_path(native_output_dir),
             },
         )
         _write_progress(job_id, 1, 1, "Completed", output_dir, 1, 1, task_name)
@@ -1698,7 +1793,7 @@ def run_single_task_workflow(
             master_base,
             slave_base,
             DEM_BASE_FILE,
-            os.path.join(output_dir, "workflow"),
+            os.path.join(native_output_dir, "workflow"),
             log_lines,
             job_id=job_id,
             pair_index=1,
@@ -1746,6 +1841,7 @@ def run_single_task_workflow(
         metrics={
             "elapsed_seconds": elapsed,
         },
+        native_output_dir=native_output_dir,
     )
     return {
         "summary": {
@@ -1764,6 +1860,7 @@ def run_single_task_workflow(
                 "run_key": resolved_run_key,
                 "task_dir": task_dir,
                 "output_dir": output_dir,
+                "native_output_dir": native_output_dir,
                 "success": True,
                 "status": "ok",
                 "elapsed_seconds": elapsed,
@@ -1917,6 +2014,7 @@ def get_status() -> Dict[str, Any]:
     """Return ENVI/IDL system status and DEM configuration."""
     idl_installed = bool(IDL_EXECUTABLE and os.path.isfile(IDL_EXECUTABLE))
     is_running = is_any_process_running(["idl.exe", "idlde.exe", "taskengine.exe"])
+    runner_status = probe_envi_runner()
 
     dem_ok = bool(
         DEM_BASE_FILE
@@ -1930,6 +2028,11 @@ def get_status() -> Dict[str, Any]:
         "idl_running": is_running,
         "dem_base_file": DEM_BASE_FILE or "(not configured)",
         "dem_exists": dem_ok,
+        "runner_python": runner_status.get("python_path", ""),
+        "runner_cwd": runner_status.get("cwd", ""),
+        "runner_ready": bool(runner_status.get("ready")),
+        "runner_returncode": runner_status.get("returncode"),
+        "runner_message": runner_status.get("message", ""),
     }
 
 
