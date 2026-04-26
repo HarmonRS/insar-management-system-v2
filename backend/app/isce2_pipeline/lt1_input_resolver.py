@@ -250,4 +250,4 @@ def _prepared_dem_variants(value: str | Path) -> tuple[str | Path, ...]:
         return ()
     if text.lower().endswith(".wgs84"):
         return (value,)
-    return (value, f"{text}.wgs84")
+    return (f"{text}.wgs84", value)

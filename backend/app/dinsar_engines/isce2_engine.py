@@ -32,6 +32,7 @@ ORBIT_MARGIN_MAX_SEC = 120.0
 TARGET_GRID_SIZE_MIN_M = 5
 TARGET_GRID_SIZE_MAX_M = 100
 RERUN_MODE_UNFINISHED_ONLY = "unfinished_only"
+RESUME_STAGE_CHOICES = {"", "unwrap", "geocode", "export"}
 
 
 def _read_env(name: str, default: str = "") -> str:
@@ -68,6 +69,16 @@ def _normalize_optional_path(value: Any) -> str:
     if not text:
         return ""
     return os.path.normpath(os.path.abspath(text))
+
+
+def _prefer_prepared_dem_variant(path: str) -> str:
+    normalized = _normalize_optional_path(path)
+    if not normalized or normalized.lower().endswith(".wgs84"):
+        return normalized
+    prepared = normalized + ".wgs84"
+    if os.path.isfile(prepared) and os.path.isfile(prepared + ".xml"):
+        return prepared
+    return normalized
 
 
 def _load_json_file(path: str) -> Dict[str, Any]:
@@ -146,11 +157,11 @@ class Isce2Engine(DinsarEngine):
 
     @property
     def _dem_path(self) -> str:
-        explicit = _read_env("ISCE2_DEM_PATH", "")
+        explicit = _prefer_prepared_dem_variant(_read_env("ISCE2_DEM_PATH", ""))
         if explicit:
             return explicit
         base = _read_env("IDL_DINSAR_DEM_BASE_FILE", "")
-        return f"{base}.wgs84" if base else ""
+        return _prefer_prepared_dem_variant(base) if base else ""
 
     @property
     def _orbit_pool_isce2(self) -> str:
@@ -319,6 +330,18 @@ class Isce2Engine(DinsarEngine):
                     f"精轨裁剪时间余量必须在 {int(ORBIT_MARGIN_MIN_SEC)} 到 {int(ORBIT_MARGIN_MAX_SEC)} 秒之间。"
                 )
             normalized["orbit_margin_sec"] = orbit_margin
+
+        if "full_geocode" in normalized:
+            normalized["full_geocode"] = bool(normalized["full_geocode"])
+
+        if "resume_from" in normalized and normalized["resume_from"] is not None:
+            resume_from = str(normalized["resume_from"]).strip().lower()
+            if resume_from not in RESUME_STAGE_CHOICES:
+                raise ValueError("resume_from must be one of: unwrap, geocode, export")
+            normalized["resume_from"] = resume_from
+
+        if bool(normalized.get("force")) and str(normalized.get("resume_from") or "").strip():
+            raise ValueError("force cannot be used together with resume_from")
 
         return normalized
 
@@ -507,6 +530,8 @@ class Isce2Engine(DinsarEngine):
         bbox_margin: Any,
         wavelength: Any,
         orbit_margin_sec: Any,
+        full_geocode: bool,
+        resume_from: str,
         pair_meta: Dict[str, Any],
     ) -> Dict[str, Any]:
         return {
@@ -541,6 +566,8 @@ class Isce2Engine(DinsarEngine):
                 "bbox_margin": bbox_margin,
                 "wavelength": wavelength,
                 "orbit_margin_sec": orbit_margin_sec,
+                "full_geocode": bool(full_geocode),
+                "resume_from": str(resume_from or "").strip(),
             },
             "pair_meta": dict(pair_meta or {}),
         }
@@ -650,6 +677,8 @@ class Isce2Engine(DinsarEngine):
         bbox_margin = extra.get("bbox_margin")
         wavelength = LT1_FIXED_WAVELENGTH
         orbit_margin_sec = extra.get("orbit_margin_sec")
+        full_geocode = bool(extra.get("full_geocode"))
+        resume_from = str(extra.get("resume_from") or "").strip().lower()
 
         wsl_isce2_pool = ""
         if self._orbit_pool_isce2:
@@ -792,6 +821,8 @@ class Isce2Engine(DinsarEngine):
                 bbox_margin=bbox_margin,
                 wavelength=wavelength,
                 orbit_margin_sec=orbit_margin_sec,
+                full_geocode=full_geocode,
+                resume_from=resume_from,
                 pair_meta=pair_meta,
             )
             broker_result = wsl_broker.run_manifest(

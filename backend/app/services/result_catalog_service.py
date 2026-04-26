@@ -32,6 +32,7 @@ from .manifest_snapshot_service import (
     iter_manifest_paths,
 )
 from .image_service import image_service
+from .dinsar_completion_files import repair_managed_completion_files
 from .dinsar_naming import (
     PAIR_META_FILENAME,
     RUN_META_FILENAME,
@@ -809,6 +810,7 @@ class ResultCatalogService:
                 disp_dir = os.path.join(package_dir, "assets", "disp")
                 preview_dir = _ensure_directory(os.path.join(package_dir, "preview"))
                 asset_rows: List[Dict[str, Any]] = []
+                completion_files_result: Optional[Dict[str, Any]] = None
 
                 if candidate["engine_code"] == "envi":
                     source_primary = _normalize_path(candidate["source_files"][0])
@@ -866,6 +868,7 @@ class ResultCatalogService:
                             }
                         )
                 else:
+                    target_source_files: List[str] = []
                     if in_place_source:
                         target_primary = _normalize_path(primary_file)
                     else:
@@ -878,6 +881,7 @@ class ResultCatalogService:
                             overwritten += 1
                         else:
                             skipped += 1
+                    target_source_files.append(target_primary)
                     asset_rows.append(
                         {
                             "role": "disp",
@@ -904,6 +908,7 @@ class ResultCatalogService:
                                 overwritten += 1
                             else:
                                 skipped += 1
+                        target_source_files.append(target_coh)
                         asset_rows.append(
                             {
                                 "role": "coh",
@@ -953,6 +958,15 @@ class ResultCatalogService:
                 manifest_path = os.path.join(package_dir, "manifest.json")
                 with open(manifest_path, "w", encoding="utf-8") as fp:
                     json.dump(manifest, fp, ensure_ascii=False, indent=2)
+                if candidate["engine_code"] == "isce2" and in_place_source:
+                    try:
+                        completion_files_result = repair_managed_completion_files(
+                            package_dir,
+                            primary_file=target_primary,
+                            source_files=target_source_files,
+                        )
+                    except FileNotFoundError:
+                        completion_files_result = None
 
                 details.append(
                     {
@@ -965,6 +979,16 @@ class ResultCatalogService:
                         "package_dir": package_dir,
                         "in_place": in_place_source,
                         "thumb_created": thumb_ok,
+                        "execution_manifest_path": (
+                            completion_files_result.get("execution_manifest_path")
+                            if completion_files_result
+                            else None
+                        ),
+                        "current_pointer_path": (
+                            completion_files_result.get("current_pointer_path")
+                            if completion_files_result
+                            else None
+                        ),
                         "status": "ok",
                     }
                 )

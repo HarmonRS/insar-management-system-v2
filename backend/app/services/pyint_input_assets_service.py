@@ -106,12 +106,13 @@ def _prepared_dem_variants(value: Any) -> List[str]:
     if not normalized:
         return []
 
-    candidates = [normalized]
     root, ext = os.path.splitext(normalized)
     if ext.lower() == ".wgs84":
-        candidates.append(root)
+        candidates = [normalized, root]
     elif not ext:
-        candidates.append(normalized + ".wgs84")
+        candidates = [normalized + ".wgs84", normalized]
+    else:
+        candidates = [normalized]
 
     unique: List[str] = []
     seen: set[str] = set()

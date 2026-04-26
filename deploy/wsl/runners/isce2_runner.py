@@ -68,8 +68,11 @@ def _build_pipeline_argv(payload: Mapping[str, Any], *, dry_run: bool = False) -
     _append_optional(argv, "--bbox-margin", params.get("bbox_margin"))
     _append_optional(argv, "--wavelength", params.get("wavelength"))
     _append_optional(argv, "--orbit-margin-sec", params.get("orbit_margin_sec"))
+    _append_optional(argv, "--resume-from", params.get("resume_from"))
     _append_optional(argv, "--reference-satellite", pair_meta.get("master_satellite"))
     _append_optional(argv, "--secondary-satellite", pair_meta.get("slave_satellite"))
+    if bool(params.get("full_geocode")):
+        argv.append("--full-geocode")
     if dry_run:
         argv.append("--dry-run")
     return argv
@@ -81,6 +84,7 @@ def _build_child_env() -> Dict[str, str]:
     proj_data = env_root / "share" / "proj"
     if proj_data.exists():
         env["PROJ_DATA"] = proj_data.as_posix()
+        env["PROJ_LIB"] = proj_data.as_posix()
     return env
 
 

@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +23,13 @@ from lt1_input_resolver import (
 
 DEFAULT_TARGET_GRID_SIZE_M = 10
 METERS_PER_DEGREE = 111320.0
+LARGE_BASE_DEM_PIXEL_THRESHOLD = 200_000_000
+PIPELINE_STAGE_ORDER = ("filter", "unwrap", "geocode", "export")
+RESUME_STAGE_CHOICES = PIPELINE_STAGE_ORDER[1:]
+DEFAULT_EXPORT_GEOCODE_PRODUCTS = [
+    "interferogram/filt_topophase.unw",
+    "interferogram/topophase.cor",
+]
 
 
 @dataclass
@@ -43,6 +52,7 @@ class PipelineConfig:
     bbox: list[float] | None
     target_grid_size_m: int
     geo_posting_deg: float
+    geocode_products: list[str] | None
 
 
 def parse_args() -> argparse.Namespace:
@@ -148,6 +158,17 @@ def parse_args() -> argparse.Namespace:
         help="Also export the unmasked displacement GeoTIFF for debugging",
     )
     parser.add_argument(
+        "--full-geocode",
+        action="store_true",
+        help="Let ISCE2 geocode its full default product list instead of the reduced export-only list.",
+    )
+    parser.add_argument(
+        "--resume-from",
+        choices=RESUME_STAGE_CHOICES,
+        default=None,
+        help="Resume from an existing work directory starting at the given stage.",
+    )
+    parser.add_argument(
         "--wavelength",
         type=float,
         default=DEFAULT_WAVELENGTH,
@@ -178,6 +199,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--orbit-margin-sec must be between 60 and 120 seconds")
     if args.target_grid_size_m <= 0:
         raise ValueError("--target-grid-size-m must be greater than 0")
+    if args.force and args.resume_from:
+        raise ValueError("--force cannot be used together with --resume-from")
     return args
 
 
@@ -340,6 +363,55 @@ def resolve_dem(dem_value: str | None) -> Path:
     )
 
 
+def _read_xml_property_value(root: ET.Element, name: str) -> str:
+    for prop in root.findall("property"):
+        if str(prop.get("name") or "").strip() != name:
+            continue
+        return str(prop.findtext("value") or "").strip()
+    return ""
+
+
+def read_dem_dimensions(dem_path: Path) -> tuple[int, int] | None:
+    xml_path = Path(str(dem_path) + ".xml")
+    if not xml_path.exists():
+        return None
+    root = ET.fromstring(xml_path.read_text(encoding="utf-8", errors="ignore"))
+    width_text = _read_xml_property_value(root, "width")
+    length_text = _read_xml_property_value(root, "length")
+    if not width_text or not length_text:
+        return None
+    try:
+        return int(float(width_text)), int(float(length_text))
+    except ValueError:
+        return None
+
+
+def has_prepared_dem_sibling(dem_path: Path) -> bool:
+    if dem_path.as_posix().lower().endswith(".wgs84"):
+        return True
+    sibling = Path(str(dem_path) + ".wgs84")
+    return sibling.exists() and Path(str(sibling) + ".xml").exists()
+
+
+def guard_large_unprepared_base_dem(dem_path: Path) -> None:
+    if has_prepared_dem_sibling(dem_path):
+        return
+    dimensions = read_dem_dimensions(dem_path)
+    if dimensions is None:
+        return
+    width, length = dimensions
+    pixel_count = width * length
+    if pixel_count < LARGE_BASE_DEM_PIXEL_THRESHOLD:
+        return
+    raise RuntimeError(
+        "Configured DEM resolves to a large base raster without a prepared '.wgs84' sibling. "
+        f"Selected DEM: {dem_path} ({width}x{length}, {pixel_count} pixels). "
+        "A fresh ISCE2 run would spend a very long time rebuilding the geoid-corrected DEM during "
+        "verifyDEM/topo. Prepare '<dem>.wgs84' once, or point ISCE2_DEM_PATH directly to the "
+        "prepared file before starting a fresh run."
+    )
+
+
 def resolve_task(
     task_dir: Path,
     orbit_root: Path,
@@ -399,12 +471,20 @@ def render_bbox(bbox: list[float] | None) -> str:
     return f'    <property name="geocode bounding box">[{values}]</property>\n'
 
 
+def render_string_list(name: str, values: list[str] | None) -> str:
+    if not values:
+        return ""
+    rendered = ", ".join(repr(str(value)) for value in values if str(value).strip())
+    return f'    <property name="{name}">[{rendered}]</property>\n' if rendered else ""
+
+
 def meters_to_geoposting_degrees(target_grid_size_m: int) -> float:
     return float(target_grid_size_m) / METERS_PER_DEGREE
 
 
 def write_stripmap_xml(xml_path: Path, config: PipelineConfig) -> None:
     bbox_xml = render_bbox(config.bbox)
+    geocode_list_xml = render_string_list("geocode list", config.geocode_products)
     text = (
         "<stripmapApp>\n"
         "  <component name=\"stripmapApp\">\n"
@@ -417,6 +497,7 @@ def write_stripmap_xml(xml_path: Path, config: PipelineConfig) -> None:
         f"    <property name=\"posting\">{config.target_grid_size_m}</property>\n"
         f"    <property name=\"geoPosting\">{config.geo_posting_deg:.12f}</property>\n"
         f"{bbox_xml}"
+        f"{geocode_list_xml}"
         f"    <property name=\"demFilename\">{config.dem_path.as_posix()}</property>\n"
         "\n"
         "    <component name=\"Reference\">\n"
@@ -436,13 +517,24 @@ def write_stripmap_xml(xml_path: Path, config: PipelineConfig) -> None:
     xml_path.write_text(text, encoding="utf-8")
 
 
-def run_logged(cmd: list[str], cwd: Path, log_path: Path) -> None:
+def run_logged(stage_name: str, cmd: list[str], cwd: Path, log_path: Path) -> None:
+    started_monotonic = time.monotonic()
+    started_text = time.strftime("%Y-%m-%d %H:%M:%S")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    print("Running:")
-    print("  " + " ".join(cmd))
-    print(f"Log: {log_path}")
+    print(f"[{stage_name}] Starting at {started_text}", flush=True)
+    print("Running:", flush=True)
+    print("  " + " ".join(cmd), flush=True)
+    print(f"Log: {log_path}", flush=True)
 
     with log_path.open("w", encoding="utf-8") as handle:
+        handle.write(f"[{stage_name}] Starting at {started_text}\n")
+        handle.write("Running:\n")
+        handle.write("  " + " ".join(cmd) + "\n")
+        handle.write(f"Log: {log_path}\n")
+        handle.flush()
+
+        child_env = os.environ.copy()
+        child_env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
@@ -450,14 +542,25 @@ def run_logged(cmd: list[str], cwd: Path, log_path: Path) -> None:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=child_env,
         )
 
         assert proc.stdout is not None
         for line in proc.stdout:
             sys.stdout.write(line)
+            sys.stdout.flush()
             handle.write(line)
+            handle.flush()
 
         status = proc.wait()
+        elapsed_seconds = time.monotonic() - started_monotonic
+        handle.write(f"[{stage_name}] Finished with exit code {status} after {elapsed_seconds:.1f}s\n")
+        handle.flush()
+
+    print(
+        f"[{stage_name}] Finished with exit code {status} after {elapsed_seconds:.1f}s",
+        flush=True,
+    )
 
     if status != 0:
         raise RuntimeError(f"Command failed with exit code {status}: {' '.join(cmd)}")
@@ -492,6 +595,119 @@ def expand_bbox(bbox: list[float], margin: float) -> list[float]:
         max(-180.0, west - margin),
         min(180.0, east + margin),
     ]
+
+
+def resolve_auto_geocode_bbox(work_dir: Path, bbox_margin: float) -> tuple[list[float], list[float]]:
+    topo_xml = work_dir / "PICKLE" / "topo.xml"
+    if not topo_xml.exists():
+        raise FileNotFoundError("topo step output is missing; cannot resolve the geocode bounding box.")
+    estimated_bbox = load_estimated_bbox(topo_xml)
+    return estimated_bbox, expand_bbox(estimated_bbox, bbox_margin)
+
+
+def ensure_geocode_bbox(work_dir: Path, config: PipelineConfig, bbox_margin: float) -> None:
+    if config.bbox is not None:
+        return
+    estimated_bbox, expanded_bbox = resolve_auto_geocode_bbox(work_dir, bbox_margin)
+    config.bbox = expanded_bbox
+    print(f"Auto bbox from topo: {estimated_bbox}")
+    print(f"Expanded bbox used for geocode: {config.bbox}")
+
+
+def cleanup_geocode_outputs(work_dir: Path, geocode_products: list[str] | None) -> None:
+    if not geocode_products:
+        return
+
+    removed: list[Path] = []
+    for product in geocode_products:
+        base_path = work_dir / product
+        for suffix in (".geo", ".geo.xml", ".geo.vrt", ".geo.aux.xml"):
+            candidate = Path(str(base_path) + suffix)
+            if candidate.exists():
+                candidate.unlink()
+                removed.append(candidate)
+
+    if removed:
+        print(f"Removed {len(removed)} stale geocode output file(s).")
+
+
+def cleanup_dem_subset_outputs(base_path: Path) -> None:
+    for suffix in ("", ".hdr", ".xml", ".vrt", ".aux.xml"):
+        candidate = Path(str(base_path) + suffix)
+        if candidate.exists():
+            candidate.unlink()
+
+
+def prepare_geocode_dem_subset(work_dir: Path, source_dem_path: Path, bbox: list[float]) -> Path:
+    import isce  # noqa: F401  # Ensures the bundled ISCE packages are initialized on sys.path.
+    import isceobj
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+
+    source_xml = Path(str(source_dem_path) + ".xml")
+    if not source_xml.exists():
+        raise FileNotFoundError(f"Missing DEM XML sidecar: {source_xml}")
+
+    source_vrt = Path(str(source_dem_path) + ".vrt")
+    source_open_path = source_vrt if source_vrt.exists() else source_dem_path
+    if not source_open_path.exists():
+        raise FileNotFoundError(f"Missing DEM source for geocode subset: {source_open_path}")
+
+    subset_base = work_dir / "geocode_dem"
+    cleanup_dem_subset_outputs(subset_base)
+
+    south, north, west, east = bbox
+    ds = gdal.Translate(
+        subset_base.as_posix(),
+        source_open_path.as_posix(),
+        format="ENVI",
+        projWin=[west, north, east, south],
+    )
+    if ds is None:
+        raise RuntimeError(f"Failed to crop DEM subset from {source_open_path}")
+
+    width = int(ds.RasterXSize or 0)
+    length = int(ds.RasterYSize or 0)
+    geotransform = ds.GetGeoTransform(can_return_null=True)
+    ds = None
+
+    if width <= 0 or length <= 0 or geotransform is None:
+        raise RuntimeError("Cropped DEM subset is empty or missing georeferencing metadata.")
+
+    source_dem = isceobj.createDemImage()
+    source_dem.load(source_xml.as_posix())
+    dem_reference = str(source_dem.reference or "").strip() or "UNKNOWN"
+
+    source_dem.filename = subset_base.as_posix()
+    source_dem.width = width
+    source_dem.length = length
+    source_dem.coord1.coordStart = geotransform[0]
+    source_dem.coord1.coordDelta = geotransform[1]
+    source_dem.coord1.coordSize = width
+    source_dem.coord2.coordStart = geotransform[3]
+    source_dem.coord2.coordDelta = geotransform[5]
+    source_dem.coord2.coordSize = length
+    source_dem.dump(subset_base.as_posix() + ".xml")
+    source_dem.renderVRT()
+
+    print(
+        "Prepared geocode DEM subset: "
+        f"{subset_base} ({width}x{length}, reference={dem_reference})"
+    )
+    return subset_base
+
+
+def prepare_geocode_dem(work_dir: Path, config: PipelineConfig) -> None:
+    if config.bbox is None:
+        raise ValueError("Cannot prepare a geocode DEM subset without a resolved bbox.")
+    config.dem_path = prepare_geocode_dem_subset(work_dir, config.dem_path, config.bbox)
+
+
+def should_run_stage(start_stage: str, stage_name: str) -> bool:
+    start_index = PIPELINE_STAGE_ORDER.index(start_stage)
+    stage_index = PIPELINE_STAGE_ORDER.index(stage_name)
+    return stage_index >= start_index
 
 
 def prepare_snaphu_resume(work_dir: Path, bbox: list[float] | None) -> None:
@@ -568,10 +784,20 @@ def print_summary(
     print(f"BBox:         {config.bbox if config.bbox is not None else 'auto'}")
     print(f"Target grid:  {config.target_grid_size_m} m")
     print(f"Geo posting:  {config.geo_posting_deg:.12f} deg")
+    print(
+        "Geocode list: "
+        + (
+            ", ".join(config.geocode_products)
+            if config.geocode_products
+            else "ISCE2 default"
+        )
+    )
 
 
 def main() -> int:
     args = parse_args()
+    resume_from = str(args.resume_from or "").strip().lower()
+    start_stage = resume_from or PIPELINE_STAGE_ORDER[0]
     task_dir = normalize_linux_path(args.task_dir).resolve()
     if not task_dir.exists():
         raise FileNotFoundError(f"Task directory not found: {task_dir}")
@@ -589,9 +815,16 @@ def main() -> int:
     )
 
     if work_dir.exists():
-        if not args.force:
+        if resume_from:
+            pass
+        elif args.force:
+            shutil.rmtree(work_dir)
+        else:
             raise FileExistsError(f"Work directory already exists: {work_dir}. Use --force to recreate it.")
-        shutil.rmtree(work_dir)
+    elif resume_from:
+        raise FileNotFoundError(
+            f"Resume requested from {resume_from}, but work directory does not exist: {work_dir}"
+        )
 
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -620,7 +853,16 @@ def main() -> int:
         bbox=bbox,
         target_grid_size_m=args.target_grid_size_m,
         geo_posting_deg=geo_posting_deg,
+        geocode_products=None if args.full_geocode else list(DEFAULT_EXPORT_GEOCODE_PRODUCTS),
     )
+    if start_stage == PIPELINE_STAGE_ORDER[0]:
+        guard_large_unprepared_base_dem(config.dem_path)
+
+    if resume_from in {"unwrap", "geocode", "export"}:
+        ensure_geocode_bbox(work_dir, config, args.bbox_margin)
+        if should_run_stage(start_stage, "geocode"):
+            prepare_geocode_dem(work_dir, config)
+
     print_summary(task_dir=task_dir, work_dir=work_dir, output_dir=output_dir, config=config)
 
     xml_path = work_dir / f"{task_name}_stripmap.xml"
@@ -632,45 +874,52 @@ def main() -> int:
 
     app_py = locate_stripmap_app()
 
-    run_logged(
-        [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--end=filter"],
-        cwd=work_dir,
-        log_path=work_dir / "01_to_filter.log",
-    )
+    if should_run_stage(start_stage, "filter"):
+        run_logged(
+            "01_to_filter",
+            [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--end=filter"],
+            cwd=work_dir,
+            log_path=work_dir / "01_to_filter.log",
+        )
 
-    if config.bbox is None:
-        estimated_bbox = load_estimated_bbox(work_dir / "PICKLE" / "topo.xml")
-        config.bbox = expand_bbox(estimated_bbox, args.bbox_margin)
+    if should_run_stage(start_stage, "geocode") and config.bbox is None:
+        ensure_geocode_bbox(work_dir, config, args.bbox_margin)
+        prepare_geocode_dem(work_dir, config)
         write_stripmap_xml(xml_path, config)
-        print(f"Auto bbox from topo: {estimated_bbox}")
-        print(f"Expanded bbox used for geocode: {config.bbox}")
 
-    prepare_snaphu_resume(work_dir, config.bbox)
-    run_logged(
-        [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--start=unwrap", "--end=unwrap"],
-        cwd=work_dir,
-        log_path=work_dir / "02_unwrap_snaphu.log",
-    )
+    if should_run_stage(start_stage, "unwrap"):
+        prepare_snaphu_resume(work_dir, config.bbox)
+        run_logged(
+            "02_unwrap_snaphu",
+            [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--start=unwrap", "--end=unwrap"],
+            cwd=work_dir,
+            log_path=work_dir / "02_unwrap_snaphu.log",
+        )
 
-    prepare_geocode_resume(work_dir)
-    run_logged(
-        [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--start=geocode", "--end=geocode"],
-        cwd=work_dir,
-        log_path=work_dir / "03_geocode.log",
-    )
+    if should_run_stage(start_stage, "geocode"):
+        prepare_geocode_resume(work_dir)
+        cleanup_geocode_outputs(work_dir, config.geocode_products)
+        run_logged(
+            "03_geocode",
+            [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--start=geocode", "--end=geocode"],
+            cwd=work_dir,
+            log_path=work_dir / "03_geocode.log",
+        )
 
-    outputs = export_products(
-        work_dir=work_dir,
-        output_dir=output_dir,
-        prefix=output_prefix,
-        wavelength=args.wavelength,
-        coh_threshold=args.coh_threshold,
-        include_disp_full=args.include_disp_full,
-    )
+    outputs: dict[str, Path] = {}
+    if should_run_stage(start_stage, "export"):
+        outputs = export_products(
+            work_dir=work_dir,
+            output_dir=output_dir,
+            prefix=output_prefix,
+            wavelength=args.wavelength,
+            coh_threshold=args.coh_threshold,
+            include_disp_full=args.include_disp_full,
+        )
 
-    print("Pipeline finished.")
-    for key, path in outputs.items():
-        print(f"{key}: {path}")
+        print("Pipeline finished.")
+        for key, path in outputs.items():
+            print(f"{key}: {path}")
     return 0
 
 
