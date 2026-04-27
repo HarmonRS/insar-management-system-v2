@@ -13,7 +13,13 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
-from export_isce_geotiff import DEFAULT_WAVELENGTH, export_products
+from export_isce_geotiff import (
+    DEFAULT_REFERENCE_COH_THRESHOLD,
+    DEFAULT_REFERENCE_MODE,
+    DEFAULT_WAVELENGTH,
+    REFERENCE_MODE_CHOICES,
+    export_products,
+)
 from lt1_input_resolver import (
     DEFAULT_WSL_DEM_CANDIDATES,
     ensure_lt1_orbit_xml,
@@ -147,6 +153,18 @@ def parse_args() -> argparse.Namespace:
         help="Coherence threshold for *_disp.tif export",
     )
     parser.add_argument(
+        "--reference-mode",
+        choices=REFERENCE_MODE_CHOICES,
+        default=DEFAULT_REFERENCE_MODE,
+        help="Optional reference normalization mode used only for debug exports",
+    )
+    parser.add_argument(
+        "--reference-coh-threshold",
+        type=float,
+        default=DEFAULT_REFERENCE_COH_THRESHOLD,
+        help="Minimum coherence used when selecting reference pixels for export normalization",
+    )
+    parser.add_argument(
         "--target-grid-size-m",
         type=int,
         default=DEFAULT_TARGET_GRID_SIZE_M,
@@ -199,6 +217,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--orbit-margin-sec must be between 60 and 120 seconds")
     if args.target_grid_size_m <= 0:
         raise ValueError("--target-grid-size-m must be greater than 0")
+    if args.reference_coh_threshold < 0 or args.reference_coh_threshold > 1:
+        raise ValueError("--reference-coh-threshold must be between 0 and 1")
     if args.force and args.resume_from:
         raise ValueError("--force cannot be used together with --resume-from")
     return args
@@ -914,6 +934,8 @@ def main() -> int:
             prefix=output_prefix,
             wavelength=args.wavelength,
             coh_threshold=args.coh_threshold,
+            reference_mode=args.reference_mode,
+            reference_coh_threshold=args.reference_coh_threshold,
             include_disp_full=args.include_disp_full,
         )
 

@@ -67,3 +67,17 @@ These operational steps are intentionally not committed:
 - Point local `.env` `PYINT_PREPARED_DEM_PATH` to the same prepared `.wgs84` file.
 - Restart the backend so the running process reloads the updated `.env`.
 
+## Additional Update: Strict Production Workflow Boundary
+
+After reviewing the ISCE2 production semantics, the export path was tightened so the
+default managed `ISCE2` D-InSAR product remains a strict pipeline result rather than an
+implicitly corrected interpretation layer.
+
+Delivered adjustments:
+
+- Kept the reference-normalization helper only as an optional debug/export capability.
+- Restored the default export behavior to `reference_mode=none`.
+- Removed reference-normalization controls from the regular managed production profile so
+  operators do not treat post-processing heuristics as part of the standard workflow.
+- Revalidated the modified pipeline, engine, and WSL runner modules with `python3 -m py_compile`
+  inside the target WSL runtime environment.

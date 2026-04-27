@@ -27,12 +27,15 @@ LT1_FIXED_WAVELENGTH = 0.23793052222222222
 DEFAULT_TARGET_GRID_SIZE_M = 10
 DEFAULT_BBOX_MARGIN = 0.05
 DEFAULT_COH_THRESHOLD = 0.05
+DEFAULT_REFERENCE_MODE = "none"
+DEFAULT_REFERENCE_COH_THRESHOLD = 0.30
 ORBIT_MARGIN_MIN_SEC = 60.0
 ORBIT_MARGIN_MAX_SEC = 120.0
 TARGET_GRID_SIZE_MIN_M = 5
 TARGET_GRID_SIZE_MAX_M = 100
 RERUN_MODE_UNFINISHED_ONLY = "unfinished_only"
 RESUME_STAGE_CHOICES = {"", "unwrap", "geocode", "export"}
+REFERENCE_MODE_CHOICES = {"none", "coh_median"}
 
 
 def _read_env(name: str, default: str = "") -> str:
@@ -311,6 +314,22 @@ class Isce2Engine(DinsarEngine):
                 raise ValueError("相干性阈值必须在 0 到 1 之间。")
             normalized["coh_threshold"] = coh_threshold
 
+        if "reference_mode" in normalized and normalized["reference_mode"] is not None:
+            reference_mode = str(normalized["reference_mode"]).strip().lower()
+            if reference_mode not in REFERENCE_MODE_CHOICES:
+                supported_modes = ", ".join(sorted(REFERENCE_MODE_CHOICES))
+                raise ValueError(f"reference_mode must be one of: {supported_modes}")
+            normalized["reference_mode"] = reference_mode
+
+        if "reference_coh_threshold" in normalized and normalized["reference_coh_threshold"] is not None:
+            try:
+                reference_coh_threshold = float(normalized["reference_coh_threshold"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("reference_coh_threshold must be numeric") from exc
+            if reference_coh_threshold < 0 or reference_coh_threshold > 1:
+                raise ValueError("reference_coh_threshold must be between 0 and 1")
+            normalized["reference_coh_threshold"] = reference_coh_threshold
+
         if "bbox_margin" in normalized and normalized["bbox_margin"] is not None:
             try:
                 bbox_margin = float(normalized["bbox_margin"])
@@ -527,6 +546,8 @@ class Isce2Engine(DinsarEngine):
         target_grid_size_m: int,
         bbox: str,
         coh_threshold: Any,
+        reference_mode: str,
+        reference_coh_threshold: Any,
         bbox_margin: Any,
         wavelength: Any,
         orbit_margin_sec: Any,
@@ -563,6 +584,8 @@ class Isce2Engine(DinsarEngine):
                 "target_grid_size_m": int(target_grid_size_m),
                 "bbox": str(bbox or "").strip(),
                 "coh_threshold": coh_threshold,
+                "reference_mode": str(reference_mode or "").strip(),
+                "reference_coh_threshold": reference_coh_threshold,
                 "bbox_margin": bbox_margin,
                 "wavelength": wavelength,
                 "orbit_margin_sec": orbit_margin_sec,
@@ -673,10 +696,17 @@ class Isce2Engine(DinsarEngine):
         force = bool(extra.get("force"))
         target_grid_size_m = int(extra.get("target_grid_size_m", DEFAULT_TARGET_GRID_SIZE_M))
         bbox = extra.get("bbox", "")
-        coh_threshold = extra.get("coh_threshold")
-        bbox_margin = extra.get("bbox_margin")
+        coh_threshold = extra.get("coh_threshold", DEFAULT_COH_THRESHOLD)
+        reference_mode = str(
+            extra.get("reference_mode", DEFAULT_REFERENCE_MODE) or DEFAULT_REFERENCE_MODE
+        ).strip().lower()
+        reference_coh_threshold = extra.get(
+            "reference_coh_threshold",
+            DEFAULT_REFERENCE_COH_THRESHOLD,
+        )
+        bbox_margin = extra.get("bbox_margin", DEFAULT_BBOX_MARGIN)
         wavelength = LT1_FIXED_WAVELENGTH
-        orbit_margin_sec = extra.get("orbit_margin_sec")
+        orbit_margin_sec = extra.get("orbit_margin_sec", ORBIT_MARGIN_MIN_SEC)
         full_geocode = bool(extra.get("full_geocode"))
         resume_from = str(extra.get("resume_from") or "").strip().lower()
 
@@ -818,6 +848,8 @@ class Isce2Engine(DinsarEngine):
                 target_grid_size_m=target_grid_size_m,
                 bbox=bbox,
                 coh_threshold=coh_threshold,
+                reference_mode=reference_mode,
+                reference_coh_threshold=reference_coh_threshold,
                 bbox_margin=bbox_margin,
                 wavelength=wavelength,
                 orbit_margin_sec=orbit_margin_sec,
@@ -896,6 +928,8 @@ class Isce2Engine(DinsarEngine):
                                 "target_grid_size_m": target_grid_size_m,
                                 "bbox": bbox,
                                 "coh_threshold": coh_threshold,
+                                "reference_mode": reference_mode,
+                                "reference_coh_threshold": reference_coh_threshold,
                                 "bbox_margin": bbox_margin,
                                 "wavelength": wavelength,
                                 "orbit_margin_sec": orbit_margin_sec,
@@ -1016,6 +1050,10 @@ class Isce2Engine(DinsarEngine):
                 "force": force,
                 "timeout_seconds": timeout,
                 "target_grid_size_m": target_grid_size_m,
+                "coh_threshold": coh_threshold,
+                "reference_mode": reference_mode,
+                "reference_coh_threshold": reference_coh_threshold,
+                "bbox_margin": bbox_margin,
                 "wavelength": wavelength,
                 "orbit_margin_sec": orbit_margin_sec,
                 "runtime_id": runtime.runtime_id,

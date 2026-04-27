@@ -65,6 +65,8 @@ def _build_pipeline_argv(payload: Mapping[str, Any], *, dry_run: bool = False) -
     _append_optional(argv, "--target-grid-size-m", params.get("target_grid_size_m"))
     _append_optional(argv, "--bbox", params.get("bbox"))
     _append_optional(argv, "--coh-threshold", params.get("coh_threshold"))
+    _append_optional(argv, "--reference-mode", params.get("reference_mode"))
+    _append_optional(argv, "--reference-coh-threshold", params.get("reference_coh_threshold"))
     _append_optional(argv, "--bbox-margin", params.get("bbox_margin"))
     _append_optional(argv, "--wavelength", params.get("wavelength"))
     _append_optional(argv, "--orbit-margin-sec", params.get("orbit_margin_sec"))
