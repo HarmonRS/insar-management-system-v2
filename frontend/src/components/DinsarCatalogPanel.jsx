@@ -8,21 +8,19 @@ import {
   queueDinsarCatalogRebuild,
   queueDinsarProductPublish,
 } from '../api/dinsarProducts';
+import {
+  DINSAR_ENGINE_ALL,
+  buildDinsarEngineOptions,
+  getDinsarEngineMeta,
+} from '../utils/dinsarEngines';
 
-const panelCardStyle = {
-  background: '#fff',
-  padding: '12px',
-  borderRadius: '8px',
-  border: '1px solid #e2e8f0',
-};
-
-const statusColorMap = {
-  READY: '#16a34a',
-  PARTIAL: '#b45309',
-  QUARANTINED: '#dc2626',
-  WARN: '#b45309',
-  ERROR: '#dc2626',
-  REBUILDING: '#2563eb',
+const STATUS_TONE_MAP = {
+  READY: 'ready',
+  PARTIAL: 'warn',
+  QUARANTINED: 'error',
+  WARN: 'warn',
+  ERROR: 'error',
+  REBUILDING: 'info',
 };
 
 function formatDateTime(value) {
@@ -38,37 +36,26 @@ function parseDirectoryList(value) {
   return [...new Set(
     String(value || '')
       .split(/[\r\n,;]+/)
-      .map(item => item.trim())
+      .map((item) => item.trim())
       .filter(Boolean)
   )];
 }
 
-function StatusPill({ label, color }) {
+function getMessageTone(message) {
+  return /失败|error|Error|ERROR/.test(String(message || '')) ? 'error' : 'success';
+}
+
+function StatusPill({ label, tone = 'neutral' }) {
+  return <span className={`dinsar-status-pill tone-${tone}`}>{label}</span>;
+}
+
+function MetaField({ label, value, multiline = false }) {
+  const displayValue = value === null || value === undefined || value === '' ? '-' : value;
   return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        padding: '2px 10px',
-        borderRadius: 999,
-        background: `${color}14`,
-        color,
-        fontSize: 12,
-        fontWeight: 600,
-      }}
-    >
-      <span
-        style={{
-          width: 7,
-          height: 7,
-          borderRadius: '50%',
-          background: color,
-          display: 'inline-block',
-        }}
-      />
-      {label}
-    </span>
+    <div className="dinsar-catalog-meta-field">
+      <span>{label}</span>
+      <strong className={multiline ? 'break-all' : ''}>{displayValue}</strong>
+    </div>
   );
 }
 
@@ -88,13 +75,16 @@ export default function DinsarCatalogPanel({
   const [actionMessage, setActionMessage] = useState('');
   const [sourceDirectoriesText, setSourceDirectoriesText] = useState(initialSourceDir || '');
   const [publishRoot, setPublishRoot] = useState('');
+  const [engineFilter, setEngineFilter] = useState(DINSAR_ENGINE_ALL);
+  const [queryDraft, setQueryDraft] = useState('');
+  const [queryApplied, setQueryApplied] = useState('');
 
-  const listLimit = compact ? 6 : 12;
+  const listLimit = compact ? 8 : 24;
   const previewBaseUrl = apiClient.defaults.baseURL || '/api';
 
   useEffect(() => {
     if (!initialSourceDir) return;
-    setSourceDirectoriesText(current => (current.trim() ? current : initialSourceDir));
+    setSourceDirectoriesText((current) => (current.trim() ? current : initialSourceDir));
   }, [initialSourceDir]);
 
   const sourceDirectories = useMemo(
@@ -102,18 +92,39 @@ export default function DinsarCatalogPanel({
     [sourceDirectoriesText]
   );
 
+  const engineOptions = useMemo(
+    () => buildDinsarEngineOptions(products, { includeKnown: true }),
+    [products]
+  );
+  const selectedEngineMeta = useMemo(
+    () => (engineFilter === DINSAR_ENGINE_ALL ? null : getDinsarEngineMeta(engineFilter)),
+    [engineFilter]
+  );
+
+  useEffect(() => {
+    if (engineFilter === DINSAR_ENGINE_ALL) return;
+    if (!engineOptions.some((option) => option.value === engineFilter)) {
+      setEngineFilter(DINSAR_ENGINE_ALL);
+    }
+  }, [engineFilter, engineOptions]);
+
   const loadCatalog = useCallback(async () => {
     setLoading(true);
     try {
       const [statusData, productData] = await Promise.all([
         getDinsarCatalogStatus(),
-        listDinsarProducts({ limit: listLimit, offset: 0 }),
+        listDinsarProducts({
+          limit: listLimit,
+          offset: 0,
+          engine_code: engineFilter === DINSAR_ENGINE_ALL ? undefined : engineFilter,
+          query: queryApplied || undefined,
+        }),
       ]);
       setCatalogStatus(statusData);
       const nextItems = Array.isArray(productData?.items) ? productData.items : [];
       setProducts(nextItems);
-      setSelectedProductId(current => {
-        if (current && nextItems.some(item => item.id === current)) {
+      setSelectedProductId((current) => {
+        if (current && nextItems.some((item) => item.id === current)) {
           return current;
         }
         return nextItems[0]?.id ?? null;
@@ -126,7 +137,7 @@ export default function DinsarCatalogPanel({
     } finally {
       setLoading(false);
     }
-  }, [listLimit]);
+  }, [engineFilter, listLimit, queryApplied]);
 
   const loadProductDetail = useCallback(async (productId) => {
     if (!productId) {
@@ -154,6 +165,16 @@ export default function DinsarCatalogPanel({
   useEffect(() => {
     loadProductDetail(selectedProductId);
   }, [loadProductDetail, selectedProductId]);
+
+  const handleApplyFilters = useCallback(() => {
+    setQueryApplied(queryDraft.trim());
+  }, [queryDraft]);
+
+  const handleResetFilters = useCallback(() => {
+    setEngineFilter(DINSAR_ENGINE_ALL);
+    setQueryDraft('');
+    setQueryApplied('');
+  }, []);
 
   const handleQueuePublish = async () => {
     if (readOnly || sourceDirectories.length === 0) return;
@@ -194,7 +215,8 @@ export default function DinsarCatalogPanel({
     }
   };
 
-  const catalogColor = statusColorMap[catalogStatus?.status] || '#64748b';
+  const catalogTone = STATUS_TONE_MAP[catalogStatus?.status] || 'neutral';
+  const actionTone = getMessageTone(actionMessage);
   const selectedIssues = Array.isArray(selectedProduct?.issues) ? selectedProduct.issues : [];
   const selectedAssets = Array.isArray(selectedProduct?.assets) ? selectedProduct.assets : [];
   const selectedPairingTrace = selectedProduct?.pairing_trace || null;
@@ -202,191 +224,190 @@ export default function DinsarCatalogPanel({
   const selectedPairingRun = selectedPairingNetwork?.run || null;
   const selectedPairingEdge = selectedPairingNetwork?.edge || null;
   const selectedPairingMetric = selectedPairingNetwork?.metric || null;
+  const selectedProductEngine = getDinsarEngineMeta(selectedProduct?.engine_code);
+  const selectedStatusTone = STATUS_TONE_MAP[selectedProduct?.status] || 'neutral';
 
   return (
-    <div style={panelCardStyle}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 10 }}>
-        <div>
-          <strong style={{ fontSize: 14 }}>{compact ? '结果目录状态' : '标准结果包目录'}</strong>
-          <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
-            {compact ? '展示结果包目录与数据库索引状态' : '结果文件以结果包目录为真源，数据库仅保存索引与检索信息'}
-          </div>
+    <div className={`dinsar-catalog-shell ${compact ? 'compact' : ''}`}>
+      <div className="dinsar-catalog-header">
+        <div className="dinsar-catalog-header-copy">
+          <strong>{compact ? '结果目录状态' : '标准结果包目录'}</strong>
+          <p>
+            {compact
+              ? '查看结果包目录与数据库索引是否一致。'
+              : '统一结果目录按 engine + pair + run 管理，便于同一对影像保留多套生产结果并行对比。'}
+          </p>
         </div>
-        <button
-          onClick={loadCatalog}
-          disabled={loading || actionLoading}
-          style={{
-            fontSize: 12,
-            padding: '4px 10px',
-            borderRadius: 4,
-            border: '1px solid #e2e8f0',
-            background: '#f8fafc',
-            cursor: 'pointer',
-          }}
-        >
-          {loading ? '刷新中...' : '刷新'}
-        </button>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))', gap: 8, marginBottom: 10 }}>
-        <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc' }}>
-          <div style={{ fontSize: 11, color: '#64748b' }}>目录状态</div>
-          <div style={{ marginTop: 4 }}>
-            <StatusPill label={catalogStatus?.status || '未知'} color={catalogColor} />
-          </div>
-        </div>
-        <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc' }}>
-          <div style={{ fontSize: 11, color: '#64748b' }}>需要重建</div>
-          <div style={{ marginTop: 4, fontSize: 16, fontWeight: 700, color: catalogStatus?.needs_rebuild ? '#dc2626' : '#16a34a' }}>
-            {catalogStatus?.needs_rebuild ? '是' : '否'}
-          </div>
-        </div>
-        <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc' }}>
-          <div style={{ fontSize: 11, color: '#64748b' }}>Manifest / 数据库</div>
-          <div style={{ marginTop: 4, fontSize: 16, fontWeight: 700 }}>
-            {(catalogStatus?.manifest_count ?? 0)} / {(catalogStatus?.db_count ?? 0)}
-          </div>
-        </div>
-        <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc' }}>
-          <div style={{ fontSize: 11, color: '#64748b' }}>问题数量</div>
-          <div style={{ marginTop: 4, fontSize: 16, fontWeight: 700, color: (catalogStatus?.issue_count ?? 0) > 0 ? '#b45309' : '#16a34a' }}>
-            {catalogStatus?.issue_count ?? 0}
-          </div>
+        <div className="dinsar-catalog-header-actions">
+          {selectedEngineMeta && (
+            <span className={`dinsar-engine-badge tone-${selectedEngineMeta.tone}`}>
+              {selectedEngineMeta.shortLabel}
+            </span>
+          )}
+          <button onClick={loadCatalog} disabled={loading || actionLoading}>
+            {loading ? '刷新中...' : '刷新'}
+          </button>
         </div>
       </div>
 
-      <div style={{ fontSize: 12, color: '#475569', marginBottom: 8, wordBreak: 'break-all' }}>
+      <div className="dinsar-catalog-summary">
+        <div className="dinsar-catalog-stat-card">
+          <span>目录状态</span>
+          <strong>{catalogStatus?.status || '未知'}</strong>
+          <StatusPill label={catalogStatus?.status || 'UNKNOWN'} tone={catalogTone} />
+        </div>
+        <div className="dinsar-catalog-stat-card">
+          <span>需要重建</span>
+          <strong>{catalogStatus?.needs_rebuild ? '是' : '否'}</strong>
+          <small>{catalogStatus?.needs_rebuild ? 'Manifest 与数据库存在漂移' : '目录登记正常'}</small>
+        </div>
+        <div className="dinsar-catalog-stat-card">
+          <span>Manifest / 数据库</span>
+          <strong>{catalogStatus?.manifest_count ?? 0} / {catalogStatus?.db_count ?? 0}</strong>
+          <small>已登记结果包总量</small>
+        </div>
+        <div className="dinsar-catalog-stat-card">
+          <span>问题数量</span>
+          <strong>{catalogStatus?.issue_count ?? 0}</strong>
+          <small>含缺失文件与健康异常</small>
+        </div>
+      </div>
+
+      <div className="dinsar-catalog-meta-strip">
         <div><strong>结果包根目录：</strong>{catalogStatus?.storage_root || '-'}</div>
         <div><strong>最近消息：</strong>{catalogStatus?.last_message || '-'}</div>
-        <div><strong>最近重建：</strong>{formatDateTime(catalogStatus?.last_full_rebuild_at)}</div>
+        <div><strong>最近全量重建：</strong>{formatDateTime(catalogStatus?.last_full_rebuild_at)}</div>
       </div>
 
-      {compact && actionMessage && (
-        <div style={{ marginBottom: 8, fontSize: 12, color: actionMessage.includes('失败') ? '#dc2626' : '#166534' }}>
+      {actionMessage && (
+        <div className={`dinsar-catalog-message tone-${actionTone}`}>
           {actionMessage}
         </div>
       )}
 
       {!compact && (
-        <div style={{ marginBottom: 12, padding: '10px 12px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#f8fafc' }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: '#0f172a', marginBottom: 8 }}>手动发布与重建</div>
-          <div style={{ fontSize: 12, color: '#475569', marginBottom: 8 }}>
-            旧的“提取位移结果”入口已经会自动尝试发布标准结果包。这里保留显式入口，方便你对任意目录重新发布和重建索引。
+        <div className="dinsar-catalog-manage">
+          <div className="dinsar-catalog-manage-copy">
+            <strong>手动发布与目录重建</strong>
+            <p>
+              这里用于把既有结果目录重新发布为标准结果包，并按最新规则重建目录索引。
+              如果同一对影像存在 ENVI 与 ISCE2 两套结果，它们会依赖 `engine_code` 与 `run_key` 分别登记，不会互相覆盖。
+            </p>
           </div>
-          <textarea
-            value={sourceDirectoriesText}
-            onChange={event => setSourceDirectoriesText(event.target.value)}
-            placeholder="输入一个或多个结果根目录，支持换行、逗号或分号分隔"
-            disabled={readOnly || actionLoading}
-            style={{
-              width: '100%',
-              minHeight: 72,
-              resize: 'vertical',
-              padding: '8px 10px',
-              boxSizing: 'border-box',
-              borderRadius: 6,
-              border: '1px solid #cbd5e1',
-              fontSize: 12,
-              marginBottom: 8,
-            }}
-          />
-          <input
-            value={publishRoot}
-            onChange={event => setPublishRoot(event.target.value)}
-            placeholder="可选：自定义结果包根目录，留空使用系统默认目录"
-            disabled={readOnly || actionLoading}
-            style={{
-              width: '100%',
-              padding: '6px 10px',
-              boxSizing: 'border-box',
-              borderRadius: 6,
-              border: '1px solid #cbd5e1',
-              fontSize: 12,
-              marginBottom: 8,
-            }}
-          />
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button
-              onClick={handleQueuePublish}
-              disabled={readOnly || actionLoading || sourceDirectories.length === 0}
-              style={{
-                padding: '6px 14px',
-                borderRadius: 6,
-                border: 'none',
-                background: '#2563eb',
-                color: '#fff',
-                cursor: 'pointer',
-                fontSize: 12,
-              }}
-            >
-              {actionLoading ? '处理中...' : '发布结果包并重建'}
-            </button>
-            <button
-              onClick={handleQueueRebuild}
+          <div className="dinsar-catalog-manage-form">
+            <textarea
+              value={sourceDirectoriesText}
+              onChange={(event) => setSourceDirectoriesText(event.target.value)}
+              placeholder="输入一个或多个结果源目录，支持换行、逗号或分号分隔"
               disabled={readOnly || actionLoading}
-              style={{
-                padding: '6px 14px',
-                borderRadius: 6,
-                border: '1px solid #cbd5e1',
-                background: '#fff',
-                color: '#0f172a',
-                cursor: 'pointer',
-                fontSize: 12,
-              }}
-            >
-              仅重建目录索引
-            </button>
-          </div>
-          {actionMessage && (
-            <div style={{ marginTop: 8, fontSize: 12, color: actionMessage.includes('失败') ? '#dc2626' : '#166534' }}>
-              {actionMessage}
+            />
+            <input
+              value={publishRoot}
+              onChange={(event) => setPublishRoot(event.target.value)}
+              placeholder="可选：自定义标准结果包根目录，留空使用系统配置"
+              disabled={readOnly || actionLoading}
+            />
+            <div className="dinsar-catalog-manage-actions">
+              <button
+                type="button"
+                className="primary"
+                onClick={handleQueuePublish}
+                disabled={readOnly || actionLoading || sourceDirectories.length === 0}
+              >
+                {actionLoading ? '处理中...' : '发布结果包并重建'}
+              </button>
+              <button
+                type="button"
+                onClick={handleQueueRebuild}
+                disabled={readOnly || actionLoading}
+              >
+                仅重建目录
+              </button>
             </div>
-          )}
+          </div>
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(260px, 360px) 1fr', gap: 12 }}>
-        <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, overflow: 'hidden' }}>
-          <div style={{ padding: '8px 10px', background: '#f8fafc', fontSize: 12, fontWeight: 600 }}>
-            最新结果包 ({products.length})
+      <div className={`dinsar-catalog-workspace ${compact ? 'compact' : ''}`}>
+        <aside className="dinsar-catalog-list-card">
+          <div className="dinsar-catalog-card-head">
+            <div>
+              <strong>结果包列表</strong>
+              <span>
+                {loading ? '加载中...' : `当前展示 ${products.length} 条`}
+              </span>
+            </div>
+            {queryApplied && <StatusPill label={`检索: ${queryApplied}`} tone="info" />}
           </div>
+
+          <div className="dinsar-catalog-filter-bar">
+            <label className="dinsar-catalog-filter-field">
+              <span>生产引擎</span>
+              <select value={engineFilter} onChange={(event) => setEngineFilter(event.target.value)}>
+                <option value={DINSAR_ENGINE_ALL}>全部引擎</option>
+                {engineOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="dinsar-catalog-filter-field search">
+              <span>检索</span>
+              <input
+                value={queryDraft}
+                onChange={(event) => setQueryDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    handleApplyFilters();
+                  }
+                }}
+                placeholder="搜索任务名 / pair / run / 引擎"
+              />
+            </label>
+
+            <div className="dinsar-catalog-filter-actions">
+              <button type="button" onClick={handleApplyFilters}>查询</button>
+              <button type="button" onClick={handleResetFilters}>重置</button>
+            </div>
+          </div>
+
           {products.length === 0 ? (
-            <div style={{ padding: '12px', fontSize: 12, color: '#94a3b8' }}>
-              {loading ? '正在加载结果包...' : '当前没有已注册的结果包。'}
+            <div className="dinsar-catalog-empty">
+              {loading ? '正在加载结果包...' : '当前筛选条件下没有结果包。'}
             </div>
           ) : (
-            <div style={{ maxHeight: compact ? 280 : 360, overflowY: 'auto' }}>
-              {products.map(item => {
-                const color = statusColorMap[item.status] || '#64748b';
+            <div className="dinsar-catalog-list">
+              {products.map((item) => {
+                const tone = STATUS_TONE_MAP[item.status] || 'neutral';
+                const engineMeta = getDinsarEngineMeta(item.engine_code);
                 return (
                   <button
                     key={item.id}
+                    type="button"
+                    className={`dinsar-catalog-list-item ${selectedProductId === item.id ? 'active' : ''}`}
                     onClick={() => setSelectedProductId(item.id)}
-                    style={{
-                      display: 'block',
-                      width: '100%',
-                      textAlign: 'left',
-                      border: 'none',
-                      borderTop: '1px solid #f1f5f9',
-                      background: selectedProductId === item.id ? '#eff6ff' : '#fff',
-                      padding: '10px 12px',
-                      cursor: 'pointer',
-                    }}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
-                      <strong style={{ fontSize: 12, color: '#0f172a', wordBreak: 'break-all' }}>{item.display_name || item.product_id}</strong>
-                      <span style={{ fontSize: 11, color }}>{item.status}</span>
+                    <div className="dinsar-catalog-list-item-top">
+                      <strong>{item.display_name || item.product_id}</strong>
+                      <StatusPill label={item.status || 'UNKNOWN'} tone={tone} />
                     </div>
-                    <div style={{ fontSize: 11, color: '#64748b' }}>
-                      {item.engine_code || '-'} · {formatDateTime(item.published_at)}
+                    <div className="dinsar-catalog-list-item-badges">
+                      <span className={`dinsar-engine-badge tone-${engineMeta.tone}`}>{engineMeta.shortLabel}</span>
+                      <span>{formatDateTime(item.published_at)}</span>
                     </div>
-                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2, wordBreak: 'break-all' }}>
+                    <div className="dinsar-catalog-list-item-meta">
                       {(item.task_alias || item.task_name || '-')}{item.run_key ? ` / ${item.run_key}` : ''}
                     </div>
-                    {(item.selection_strategy || item.network_run_id || item.network_edge_id) && (
-                      <div style={{ fontSize: 11, color: '#475569', marginTop: 2, wordBreak: 'break-all' }}>
+                    <div className="dinsar-catalog-list-item-meta">
+                      {item.pair_key || '-'}
+                    </div>
+                    {(item.selection_strategy || item.network_run_id || item.network_edge_id != null) && (
+                      <div className="dinsar-catalog-list-item-trace">
                         {(item.selection_strategy || 'trace')}
-                        {item.network_edge_id ? ` / edge ${item.network_edge_id}` : ''}
+                        {item.network_edge_id != null ? ` / edge ${item.network_edge_id}` : ''}
                         {item.network_run_id ? ` / ${item.network_run_id}` : ''}
                       </div>
                     )}
@@ -395,167 +416,165 @@ export default function DinsarCatalogPanel({
               })}
             </div>
           )}
-        </div>
+        </aside>
 
-        <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, overflow: 'hidden' }}>
-          <div style={{ padding: '8px 10px', background: '#f8fafc', fontSize: 12, fontWeight: 600 }}>
-            结果包详情
+        <section className="dinsar-catalog-detail-card">
+          <div className="dinsar-catalog-card-head">
+            <div>
+              <strong>结果包详情</strong>
+              <span>查看选中结果的发布信息、配对溯源与资产健康</span>
+            </div>
           </div>
+
           {!selectedProductId ? (
-            <div style={{ padding: '12px', fontSize: 12, color: '#94a3b8' }}>请选择一个结果包查看详情。</div>
+            <div className="dinsar-catalog-empty">请选择一个结果包查看详情。</div>
           ) : detailLoading || !selectedProduct ? (
-            <div style={{ padding: '12px', fontSize: 12, color: '#94a3b8' }}>正在加载详情...</div>
+            <div className="dinsar-catalog-empty">正在加载详情...</div>
           ) : selectedProduct?.error ? (
-            <div style={{ padding: '12px', fontSize: 12, color: '#dc2626' }}>{selectedProduct.error}</div>
+            <div className="dinsar-catalog-empty error">{selectedProduct.error}</div>
           ) : (
-            <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '180px 1fr', gap: 12 }}>
-                <div>
-                  <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, overflow: 'hidden', background: '#f8fafc' }}>
-                    <img
-                      src={`${previewBaseUrl}/dinsar-products/${selectedProduct.id}/preview`}
-                      alt={selectedProduct.display_name}
-                      style={{ display: 'block', width: '100%', minHeight: 120, objectFit: 'cover', background: '#e2e8f0' }}
-                    />
+            <div className="dinsar-catalog-detail-body">
+              <div className="dinsar-catalog-hero">
+                <div className="dinsar-catalog-preview-frame">
+                  <img
+                    src={`${previewBaseUrl}/dinsar-products/${selectedProduct.id}/preview`}
+                    alt={selectedProduct.display_name || selectedProduct.product_id}
+                  />
+                </div>
+
+                <div className="dinsar-catalog-hero-meta">
+                  <div className="dinsar-catalog-hero-title-row">
+                    <div>
+                      <h4>{selectedProduct.display_name || selectedProduct.product_id}</h4>
+                      <p>{selectedProduct.task_alias || selectedProduct.task_name || '未命名任务'}</p>
+                    </div>
+                    <div className="dinsar-catalog-hero-badges">
+                      <span className={`dinsar-engine-badge tone-${selectedProductEngine.tone}`}>
+                        {selectedProductEngine.shortLabel}
+                      </span>
+                      <StatusPill label={selectedProduct.status || 'UNKNOWN'} tone={selectedStatusTone} />
+                    </div>
+                  </div>
+
+                  <div className="dinsar-catalog-kv-grid">
+                    <MetaField label="产品编号" value={selectedProduct.product_id} multiline />
+                    <MetaField label="配对标识" value={selectedProduct.pair_key} multiline />
+                    <MetaField label="场景配对 UID" value={selectedProduct.pair_uid} multiline />
+                    <MetaField label="运行标识" value={selectedProduct.run_key} multiline />
+                    <MetaField label="生产配置" value={selectedProduct.profile_code} />
+                    <MetaField label="健康状态" value={selectedProduct.health_status} />
+                    <MetaField label="主文件" value={selectedProduct.primary_asset_path} multiline />
+                    <MetaField label="源文件" value={selectedProduct.source_primary_path} multiline />
+                    <MetaField label="结果包目录" value={selectedProduct.publish_dir} multiline />
                   </div>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: '#334155' }}>
-                  <div><strong>名称：</strong>{selectedProduct.display_name || '-'}</div>
-                  <div><strong>产品编号：</strong>{selectedProduct.product_id || '-'}</div>
-                  <div><strong>任务别名：</strong>{selectedProduct.task_alias || selectedProduct.task_name || '-'}</div>
-                  <div><strong>配对标识：</strong><span style={{ wordBreak: 'break-all' }}>{selectedProduct.pair_key || '-'}</span></div>
-                  <div><strong>场景对 UID：</strong><span style={{ wordBreak: 'break-all' }}>{selectedProduct.pair_uid || '-'}</span></div>
-                  <div><strong>运行标识：</strong><span style={{ wordBreak: 'break-all' }}>{selectedProduct.run_key || '-'}</span></div>
-                  <div><strong>生产配置：</strong>{selectedProduct.profile_code || '-'}</div>
-                  <div><strong>引擎：</strong>{selectedProduct.engine_code || '-'}</div>
-                  <div><strong>状态：</strong>{selectedProduct.status || '-'} / {selectedProduct.health_status || '-'}</div>
-                  <div><strong>主文件：</strong><span style={{ wordBreak: 'break-all' }}>{selectedProduct.primary_asset_path || '-'}</span></div>
-                  <div><strong>来源文件：</strong><span style={{ wordBreak: 'break-all' }}>{selectedProduct.source_primary_path || '-'}</span></div>
-                  <div><strong>结果包目录：</strong><span style={{ wordBreak: 'break-all' }}>{selectedProduct.publish_dir || '-'}</span></div>
+              </div>
+
+              <div className="dinsar-catalog-detail-grid">
+                <div className="dinsar-catalog-section-card">
+                  <div className="dinsar-catalog-section-title">时空概览</div>
+                  <MetaField label="主影像日期" value={selectedProduct.profile?.master_imaging_date} />
+                  <MetaField label="从影像日期" value={selectedProduct.profile?.slave_imaging_date} />
+                  <MetaField label="时间基线" value={selectedProduct.profile?.time_baseline_days} />
+                  <MetaField label="空间基线" value={selectedProduct.profile?.spatial_baseline_meters} />
+                </div>
+                <div className="dinsar-catalog-section-card">
+                  <div className="dinsar-catalog-section-title">空间范围</div>
+                  <MetaField label="最小坐标" value={`${selectedProduct.min_lon ?? '-'}, ${selectedProduct.min_lat ?? '-'}`} />
+                  <MetaField label="最大坐标" value={`${selectedProduct.max_lon ?? '-'}, ${selectedProduct.max_lat ?? '-'}`} />
+                  <MetaField label="登记时间" value={formatDateTime(selectedProduct.registered_at)} />
+                  <MetaField label="发布时间" value={formatDateTime(selectedProduct.published_at)} />
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
-                <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc', fontSize: 12 }}>
-                  <div><strong>主影像日期：</strong>{selectedProduct.profile?.master_imaging_date || '-'}</div>
-                  <div><strong>辅影像日期：</strong>{selectedProduct.profile?.slave_imaging_date || '-'}</div>
-                  <div><strong>时间基线：</strong>{selectedProduct.profile?.time_baseline_days ?? '-'}</div>
-                  <div><strong>空间基线：</strong>{selectedProduct.profile?.spatial_baseline_meters ?? '-'}</div>
-                </div>
-                <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc', fontSize: 12 }}>
-                  <div><strong>BBox：</strong></div>
-                  <div>{selectedProduct.min_lon ?? '-'}, {selectedProduct.min_lat ?? '-'}</div>
-                  <div>{selectedProduct.max_lon ?? '-'}, {selectedProduct.max_lat ?? '-'}</div>
-                  <div style={{ marginTop: 4 }}><strong>注册时间：</strong>{formatDateTime(selectedProduct.registered_at)}</div>
-                </div>
-              </div>
-
-              <div style={{ fontSize: 12 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>配对追踪</div>
+              <div className="dinsar-catalog-section-card">
+                <div className="dinsar-catalog-section-title">配对追踪</div>
                 {!selectedPairingTrace?.network_run_id ? (
-                  <div style={{ color: '#94a3b8' }}>当前结果未携带配对网络追踪信息。</div>
+                  <div className="dinsar-catalog-empty inline">当前结果未携带完整的配对网络追踪信息。</div>
                 ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
-                      <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc' }}>
-                        <div><strong>network_run_id：</strong><span style={{ wordBreak: 'break-all' }}>{selectedPairingTrace.network_run_id || '-'}</span></div>
-                        <div><strong>network_edge_id：</strong>{selectedPairingTrace.network_edge_id ?? '-'}</div>
-                        <div><strong>pair_uid：</strong><span style={{ wordBreak: 'break-all' }}>{selectedPairingTrace.pair_uid || '-'}</span></div>
-                        <div><strong>策略：</strong>{selectedPairingTrace.selection_strategy || '-'}</div>
-                        <div><strong>策略版本：</strong>{selectedPairingTrace.policy_version || '-'}</div>
-                      </div>
-                      <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc' }}>
-                        <div><strong>网络记录：</strong>{selectedPairingNetwork?.run_found ? '已找到' : '未找到'}</div>
-                        <div><strong>边记录：</strong>{selectedPairingNetwork?.edge_found ? '已找到' : '未找到'}</div>
-                        <div><strong>运行状态：</strong>{selectedPairingRun?.status || '-'}</div>
-                        <div><strong>候选边数：</strong>{selectedPairingRun?.candidate_count ?? '-'}</div>
-                        <div><strong>入选边数：</strong>{selectedPairingRun?.selected_edge_count ?? '-'}</div>
-                        <div><strong>告警数：</strong>{selectedPairingRun?.warning_count ?? '-'}</div>
-                      </div>
+                  <div className="dinsar-catalog-detail-grid">
+                    <div className="dinsar-catalog-section-card nested">
+                      <MetaField label="network_run_id" value={selectedPairingTrace.network_run_id} multiline />
+                      <MetaField label="network_edge_id" value={selectedPairingTrace.network_edge_id} />
+                      <MetaField label="pair_uid" value={selectedPairingTrace.pair_uid} multiline />
+                      <MetaField label="选择策略" value={selectedPairingTrace.selection_strategy} />
+                      <MetaField label="策略版本" value={selectedPairingTrace.policy_version} />
                     </div>
-
-                    {(selectedPairingEdge || selectedPairingMetric) && (
-                      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
-                        <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc' }}>
-                          <div style={{ fontWeight: 600, marginBottom: 4 }}>网络边</div>
-                          <div><strong>edge_rank：</strong>{selectedPairingEdge?.edge_rank ?? '-'}</div>
-                          <div><strong>selection_reason：</strong>{selectedPairingEdge?.selection_reason || '-'}</div>
-                          <div><strong>selection_score：</strong>{selectedPairingEdge?.selection_score ?? '-'}</div>
-                          <div><strong>reference_edge：</strong>{selectedPairingEdge?.is_reference_edge ? '是' : '否'}</div>
-                          <div><strong>metric_cache_ref_id：</strong>{selectedPairingEdge?.metric_cache_ref_id ?? '-'}</div>
-                        </div>
-                        <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc' }}>
-                          <div style={{ fontWeight: 600, marginBottom: 4 }}>度量快照</div>
-                          <div><strong>主从日期：</strong>{selectedPairingMetric?.master_imaging_date || '-'} / {selectedPairingMetric?.slave_imaging_date || '-'}</div>
-                          <div><strong>主从卫星：</strong>{selectedPairingMetric?.master_satellite || '-'} / {selectedPairingMetric?.slave_satellite || '-'}</div>
-                          <div><strong>主从模式：</strong>{selectedPairingMetric?.master_imaging_mode || '-'} / {selectedPairingMetric?.slave_imaging_mode || '-'}</div>
-                          <div><strong>主从极化：</strong>{selectedPairingMetric?.master_polarization || '-'} / {selectedPairingMetric?.slave_polarization || '-'}</div>
-                          <div><strong>时间基线：</strong>{selectedPairingMetric?.time_baseline_days ?? '-'}</div>
-                          <div><strong>空间基线：</strong>{selectedPairingMetric?.spatial_baseline_meters ?? '-'}</div>
-                          <div><strong>重叠率：</strong>{selectedPairingMetric?.scene_overlap_ratio ?? '-'}</div>
-                        </div>
-                      </div>
-                    )}
+                    <div className="dinsar-catalog-section-card nested">
+                      <MetaField label="网络记录" value={selectedPairingNetwork?.run_found ? '已找到' : '未找到'} />
+                      <MetaField label="边记录" value={selectedPairingNetwork?.edge_found ? '已找到' : '未找到'} />
+                      <MetaField label="运行状态" value={selectedPairingRun?.status} />
+                      <MetaField label="候选边数" value={selectedPairingRun?.candidate_count} />
+                      <MetaField label="入选边数" value={selectedPairingRun?.selected_edge_count} />
+                      <MetaField label="告警数" value={selectedPairingRun?.warning_count} />
+                    </div>
+                    <div className="dinsar-catalog-section-card nested">
+                      <MetaField label="edge_rank" value={selectedPairingEdge?.edge_rank} />
+                      <MetaField label="selection_reason" value={selectedPairingEdge?.selection_reason} multiline />
+                      <MetaField label="selection_score" value={selectedPairingEdge?.selection_score} />
+                      <MetaField label="reference_edge" value={selectedPairingEdge?.is_reference_edge ? '是' : '否'} />
+                      <MetaField label="metric_cache_ref_id" value={selectedPairingEdge?.metric_cache_ref_id} />
+                    </div>
+                    <div className="dinsar-catalog-section-card nested">
+                      <MetaField label="主从日期" value={`${selectedPairingMetric?.master_imaging_date || '-'} / ${selectedPairingMetric?.slave_imaging_date || '-'}`} />
+                      <MetaField label="主从卫星" value={`${selectedPairingMetric?.master_satellite || '-'} / ${selectedPairingMetric?.slave_satellite || '-'}`} />
+                      <MetaField label="主从模式" value={`${selectedPairingMetric?.master_imaging_mode || '-'} / ${selectedPairingMetric?.slave_imaging_mode || '-'}`} />
+                      <MetaField label="主从极化" value={`${selectedPairingMetric?.master_polarization || '-'} / ${selectedPairingMetric?.slave_polarization || '-'}`} />
+                      <MetaField label="时间基线" value={selectedPairingMetric?.time_baseline_days} />
+                      <MetaField label="空间基线" value={selectedPairingMetric?.spatial_baseline_meters} />
+                    </div>
                   </div>
                 )}
               </div>
 
-              <div style={{ fontSize: 12 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>资产列表 ({selectedAssets.length})</div>
-                {selectedAssets.length === 0 ? (
-                  <div style={{ color: '#94a3b8' }}>暂无资产记录。</div>
-                ) : (
-                  selectedAssets.map(asset => (
-                    <div
-                      key={asset.id}
-                      style={{
-                        padding: '6px 8px',
-                        borderRadius: 6,
-                        background: '#f8fafc',
-                        marginBottom: 6,
-                        color: '#334155',
-                      }}
-                    >
-                      <div><strong>{asset.asset_role}</strong> · {asset.asset_name}</div>
-                      <div style={{ color: asset.exists_flag ? '#166534' : '#dc2626' }}>
-                        {asset.exists_flag ? '文件存在' : '文件缺失'}
-                      </div>
-                      <div style={{ wordBreak: 'break-all', color: '#64748b' }}>{asset.absolute_path}</div>
-                    </div>
-                  ))
-                )}
-              </div>
-
-              <div style={{ fontSize: 12 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>问题列表 ({selectedIssues.length})</div>
-                {selectedIssues.length === 0 ? (
-                  <div style={{ color: '#16a34a' }}>当前没有登记问题。</div>
-                ) : (
-                  selectedIssues.map(issue => (
-                    <div
-                      key={issue.id}
-                      style={{
-                        padding: '6px 8px',
-                        borderRadius: 6,
-                        background: issue.severity === 'ERROR' ? '#fef2f2' : '#fff7ed',
-                        color: issue.severity === 'ERROR' ? '#991b1b' : '#9a3412',
-                        marginBottom: 6,
-                      }}
-                    >
-                      <div><strong>{issue.issue_code}</strong> · {issue.severity}</div>
-                      <div>{issue.message}</div>
-                      {issue.repair_action && (
-                        <div style={{ color: '#64748b', marginTop: 2 }}>
-                          建议修复动作：{issue.repair_action}
+              <div className="dinsar-catalog-detail-grid">
+                <div className="dinsar-catalog-section-card">
+                  <div className="dinsar-catalog-section-title">资产列表 ({selectedAssets.length})</div>
+                  {selectedAssets.length === 0 ? (
+                    <div className="dinsar-catalog-empty inline">暂无资产记录。</div>
+                  ) : (
+                    <div className="dinsar-catalog-asset-list">
+                      {selectedAssets.map((asset) => (
+                        <div key={asset.id} className={`dinsar-catalog-asset-item ${asset.exists_flag ? 'ok' : 'missing'}`}>
+                          <div className="dinsar-catalog-asset-top">
+                            <strong>{asset.asset_role}</strong>
+                            <span>{asset.exists_flag ? '文件存在' : '文件缺失'}</span>
+                          </div>
+                          <div>{asset.asset_name}</div>
+                          <div className="break-all">{asset.absolute_path}</div>
                         </div>
-                      )}
+                      ))}
                     </div>
-                  ))
-                )}
+                  )}
+                </div>
+
+                <div className="dinsar-catalog-section-card">
+                  <div className="dinsar-catalog-section-title">问题列表 ({selectedIssues.length})</div>
+                  {selectedIssues.length === 0 ? (
+                    <div className="dinsar-catalog-empty inline ok">当前没有登记问题。</div>
+                  ) : (
+                    <div className="dinsar-catalog-issue-list">
+                      {selectedIssues.map((issue) => (
+                        <div key={issue.id} className={`dinsar-catalog-issue-item ${String(issue.severity || '').toUpperCase() === 'ERROR' ? 'error' : 'warn'}`}>
+                          <div className="dinsar-catalog-issue-top">
+                            <strong>{issue.issue_code}</strong>
+                            <span>{issue.severity}</span>
+                          </div>
+                          <div>{issue.message}</div>
+                          {issue.repair_action && (
+                            <div className="dinsar-catalog-issue-action">
+                              建议修复动作：{issue.repair_action}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
-        </div>
+        </section>
       </div>
     </div>
   );

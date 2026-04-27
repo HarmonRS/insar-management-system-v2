@@ -158,7 +158,7 @@ export default function DinsarResultPanel({
                 </p>
             ) : (
                 <>
-                    <div className="list-toolbar column-layout">
+                    <div className="list-toolbar column-layout dinsar-results-toolbar">
                         {focusedHazardPoint && (
                             <div className="filter-banner">
                                 <span>
@@ -168,7 +168,7 @@ export default function DinsarResultPanel({
                                         </>
                                     ) : (
                                         <>
-                                            正在查看覆盖点 <strong>{focusedHazardPoint.hazard_name}</strong> 的结果
+                                            当前仅显示覆盖隐患点 <strong>{focusedHazardPoint.hazard_name}</strong> 的结果
                                         </>
                                     )}
                                 </span>
@@ -178,144 +178,252 @@ export default function DinsarResultPanel({
                             </div>
                         )}
 
-                        <div className="toolbar-row">
-                            <button onClick={() => onSetAllVisibility(true)}>
-                                {language === 'en' ? 'Show All' : '显示全部'}
-                            </button>
-                            <button onClick={() => onSetAllVisibility(false)}>
-                                {language === 'en' ? 'Hide All' : '隐藏全部'}
-                            </button>
-                            <button onClick={() => setShowDates(!showDates)}>
-                                {showDates
-                                    ? (language === 'en' ? 'Hide Dates' : '隐藏日期')
-                                    : (language === 'en' ? 'Show Dates' : '显示日期')}
-                            </button>
-                            <button
-                                onClick={() => setShowExportModal(true)}
-                                disabled={isLoading || dinsarResults.length === 0}
-                                title={language === 'en' ? 'Export selected results to a directory' : '将结果文件提取到指定目录'}
-                            >
-                                {language === 'en' ? 'Export...' : '导出...'}
-                            </button>
+                        <div className="dinsar-toolbar-grid">
+                            <section className="dinsar-toolbar-panel">
+                                <span className="dinsar-toolbar-kicker">
+                                    {language === 'en' ? 'Current page' : '当前页'}
+                                </span>
+                                <strong className="dinsar-toolbar-value">
+                                    {filteredResults.length} / {dinsarResults.length}
+                                </strong>
+                                <p className="dinsar-toolbar-note">
+                                    {language === 'en'
+                                        ? 'Results after local filtering on the current page'
+                                        : '当前页本地筛选后的结果数量'}
+                                </p>
+                                <div className="dinsar-toolbar-chip-row">
+                                    <span className="dinsar-toolbar-chip">
+                                        {language === 'en' ? 'AI score' : 'AI 分数'}
+                                        {' >= '}
+                                        {scorePercent}
+                                    </span>
+                                    <span className="dinsar-toolbar-chip">
+                                        {language === 'en' ? 'Dates' : '日期'}
+                                        {showDates
+                                            ? (language === 'en' ? ': visible' : '：已展开')
+                                            : (language === 'en' ? ': hidden' : '：已收起')}
+                                    </span>
+                                </div>
+                            </section>
+
+                            <section className="dinsar-toolbar-panel">
+                                <span className="dinsar-toolbar-kicker">
+                                    {language === 'en' ? 'Engine focus' : '当前引擎'}
+                                </span>
+                                <strong className="dinsar-toolbar-value">
+                                    {filteredEngineMeta
+                                        ? filteredEngineMeta.shortLabel
+                                        : (language === 'en' ? 'All' : '全部')}
+                                </strong>
+                                <p className="dinsar-toolbar-note">
+                                    {filteredEngineMeta
+                                        ? filteredEngineMeta.label
+                                        : (language === 'en'
+                                            ? 'Compare outputs from all registered engines'
+                                            : '同时查看所有登记引擎的结果')}
+                                </p>
+                                <div className="dinsar-toolbar-chip-row">
+                                    <span className="dinsar-toolbar-chip">
+                                        {language === 'en' ? 'Strategy' : '策略'}:
+                                        {' '}
+                                        {strategyFilter === DINSAR_STRATEGY_ALL
+                                            ? (language === 'en' ? 'All' : '全部')
+                                            : strategyFilter}
+                                    </span>
+                                    <span className="dinsar-toolbar-chip">
+                                        {language === 'en' ? 'Trace search' : '检索词'}:
+                                        {' '}
+                                        {traceSearch.trim() || (language === 'en' ? 'None' : '未设置')}
+                                    </span>
+                                </div>
+                            </section>
+
+                            <section className="dinsar-toolbar-panel">
+                                <span className="dinsar-toolbar-kicker">
+                                    {language === 'en' ? 'Page control' : '分页控制'}
+                                </span>
+                                <strong className="dinsar-toolbar-value">{pageSummaryText}</strong>
+                                <p className="dinsar-toolbar-note">
+                                    {language === 'en'
+                                        ? 'Use page size and jump controls below for large catalogs'
+                                        : '大规模结果集请结合页大小和跳页控制使用'}
+                                </p>
+                                <div className="dinsar-toolbar-actions">
+                                    <button onClick={() => onSetAllVisibility(true)}>
+                                        {language === 'en' ? 'Show All' : '全部显示'}
+                                    </button>
+                                    <button onClick={() => onSetAllVisibility(false)}>
+                                        {language === 'en' ? 'Hide All' : '全部隐藏'}
+                                    </button>
+                                    <button onClick={() => setShowDates(!showDates)}>
+                                        {showDates
+                                            ? (language === 'en' ? 'Hide Dates' : '收起日期')
+                                            : (language === 'en' ? 'Show Dates' : '显示日期')}
+                                    </button>
+                                    <button
+                                        onClick={() => setShowExportModal(true)}
+                                        disabled={isLoading || filteredResults.length === 0}
+                                        title={language === 'en'
+                                            ? 'Export visible results in the current filter scope'
+                                            : '按当前筛选范围导出结果文件'}
+                                    >
+                                        {language === 'en' ? 'Export...' : '提取结果...'}
+                                    </button>
+                                </div>
+                            </section>
                         </div>
 
-                        <div className="toolbar-row filter-row">
-                            <label title={language === 'en' ? 'Filter low-quality results below this score' : '过滤低于当前分数的结果'}>
-                                {language === 'en' ? 'AI Score Filter' : 'AI 评分过滤'}: {(scoreFilter * 100).toFixed(0)}
+                        <div className="dinsar-filter-layout">
+                            <label className="dinsar-filter-field">
+                                <span>{language === 'en' ? 'AI score floor' : 'AI 分数下限'}</span>
+                                <div className="dinsar-score-filter">
+                                    <input
+                                        type="range"
+                                        min="0"
+                                        max="1"
+                                        step="0.1"
+                                        value={scoreFilter}
+                                        onChange={onScoreFilterChange}
+                                    />
+                                    <strong>{scorePercent}</strong>
+                                </div>
                             </label>
-                            <input
-                                type="range"
-                                min="0"
-                                max="1"
-                                step="0.1"
-                                value={scoreFilter}
-                                onChange={onScoreFilterChange}
-                            />
-                        </div>
 
-                        <div className="toolbar-row filter-row">
-                            <label>{language === 'en' ? 'Pairing strategy' : '配对策略'}:</label>
-                            <select
-                                value={strategyFilter}
-                                onChange={(event) => setStrategyFilter(event.target.value)}
-                                disabled={isLoading}
-                            >
-                                <option value={DINSAR_STRATEGY_ALL}>
-                                    {language === 'en' ? 'All strategies' : '全部策略'}
-                                </option>
-                                {strategyOptions
-                                    .filter((value) => value !== DINSAR_STRATEGY_ALL)
-                                    .map((value) => (
-                                        <option key={value} value={value}>{value}</option>
-                                    ))}
-                            </select>
-                            <input
-                                type="text"
-                                value={traceSearch}
-                                onChange={(event) => setTraceSearch(event.target.value)}
-                                placeholder={language === 'en' ? 'Search pair/run trace' : '搜索 pair/run trace'}
-                                disabled={isLoading}
-                                style={{ minWidth: '180px', flex: 1 }}
-                            />
-                        </div>
-
-                        <div className="toolbar-row">
-                            <span style={{ fontSize: '12px', color: '#4a5568' }}>
-                                {language === 'en'
-                                    ? `Filtered ${filteredResults.length} / ${dinsarResults.length} results`
-                                    : `当前筛出 ${filteredResults.length} / ${dinsarResults.length} 条结果`}
-                            </span>
-                        </div>
-
-                        <div className="toolbar-row">
-                            <button type="button" onClick={() => onPageChange(-1)} disabled={isLoading || dinsarPagination.offset <= 0}>
-                                {language === 'en' ? 'Previous' : '上一页'}
-                            </button>
-                            <span style={{ fontSize: '12px', color: '#4a5568' }}>
-                                {language === 'en'
-                                    ? `Page ${dinsarCurrentPage}/${dinsarTotalPages} (Total ${dinsarPagination.total} items)`
-                                    : `第 ${dinsarCurrentPage}/${dinsarTotalPages} 页（共 ${dinsarPagination.total} 条）`}
-                            </span>
-                            <button type="button" onClick={() => onPageChange(1)} disabled={isLoading || !dinsarPagination.hasMore}>
-                                {language === 'en' ? 'Next' : '下一页'}
-                            </button>
-                        </div>
-
-                        <div className="toolbar-row">
-                            <label style={{ fontSize: '12px', color: '#4a5568' }}>
-                                {language === 'en' ? 'Per page' : '每页'}
+                            <label className="dinsar-filter-field">
+                                <span>{language === 'en' ? 'Pairing strategy' : '配对策略'}</span>
                                 <select
-                                    value={dinsarPagination.limit}
-                                    onChange={onPageSizeChange}
+                                    value={strategyFilter}
+                                    onChange={(event) => setStrategyFilter(event.target.value)}
                                     disabled={isLoading}
-                                    style={{ marginLeft: '6px', marginRight: '6px' }}
                                 >
-                                    {PAGE_SIZE_OPTIONS.map((size) => (
-                                        <option key={size} value={size}>{size}</option>
+                                    <option value={DINSAR_STRATEGY_ALL}>
+                                        {language === 'en' ? 'All strategies' : '全部策略'}
+                                    </option>
+                                    {strategyOptions
+                                        .filter((value) => value !== DINSAR_STRATEGY_ALL)
+                                        .map((value) => (
+                                            <option key={value} value={value}>{value}</option>
+                                        ))}
+                                </select>
+                            </label>
+
+                            <label className="dinsar-filter-field">
+                                <span>{language === 'en' ? 'Production engine' : '生产引擎'}</span>
+                                <select
+                                    value={engineFilter}
+                                    onChange={(event) => setEngineFilter(event.target.value)}
+                                    disabled={isLoading}
+                                >
+                                    {engineFilterOptions.map((option) => (
+                                        <option key={option.value} value={option.value}>
+                                            {option.label}
+                                        </option>
                                     ))}
                                 </select>
-                                {language === 'en' ? 'items' : '条'}
                             </label>
-                            <label style={{ fontSize: '12px', color: '#4a5568' }}>
-                                {language === 'en' ? 'Go to' : '跳到'}
+
+                            <label className="dinsar-filter-field dinsar-filter-field-wide">
+                                <span>{language === 'en' ? 'Trace search' : 'Trace 检索'}</span>
                                 <input
-                                    type="number"
-                                    min={1}
-                                    max={dinsarTotalPages}
-                                    value={dinsarPageInput}
-                                    onChange={(event) => {
-                                        setDinsarPageInput(event.target.value);
-                                        setDinsarPageInputTouched(false);
-                                    }}
-                                    onBlur={() => setDinsarPageInputTouched(true)}
-                                    onKeyDown={(event) => {
-                                        if (event.key === 'Enter') {
-                                            event.preventDefault();
-                                            onGoToPage();
-                                        }
-                                    }}
+                                    type="text"
+                                    value={traceSearch}
+                                    onChange={(event) => setTraceSearch(event.target.value)}
+                                    placeholder={language === 'en'
+                                        ? 'Search pair / run / policy / engine'
+                                        : '搜索 pair / run / policy / engine'}
                                     disabled={isLoading}
-                                    style={{
-                                        width: '70px',
-                                        marginLeft: '6px',
-                                        marginRight: '6px',
-                                        borderColor: showDinsarPageInputError ? '#e53e3e' : undefined,
-                                        boxShadow: showDinsarPageInputError ? '0 0 0 1px rgba(229,62,62,0.25)' : undefined,
-                                    }}
                                 />
-                                {language === 'en' ? 'page' : '页'}
                             </label>
-                            <button type="button" onClick={onGoToPage} disabled={isLoading}>
-                                {language === 'en' ? 'Jump' : '跳转'}
-                            </button>
                         </div>
 
-                        <div className="toolbar-row">
-                            <span style={{ fontSize: '12px', color: showDinsarPageInputError ? '#e53e3e' : '#718096' }}>
+                        <div className="dinsar-engine-filter-row">
+                            <button
+                                type="button"
+                                className={engineFilter === DINSAR_ENGINE_ALL ? 'active' : ''}
+                                onClick={() => setEngineFilter(DINSAR_ENGINE_ALL)}
+                                disabled={isLoading}
+                            >
+                                <span>{language === 'en' ? 'All engines' : '全部引擎'}</span>
+                                <strong>{dinsarResults.length}</strong>
+                            </button>
+                            {engineCounts.map((option) => (
+                                <button
+                                    key={option.code}
+                                    type="button"
+                                    className={engineFilter === option.code ? 'active' : ''}
+                                    onClick={() => setEngineFilter(option.code)}
+                                    disabled={isLoading}
+                                >
+                                    <span>{option.shortLabel}</span>
+                                    <strong>{option.count}</strong>
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="dinsar-toolbar-footer">
+                            <div className="dinsar-toolbar-footer-main">
+                                <button
+                                    type="button"
+                                    onClick={() => onPageChange(-1)}
+                                    disabled={isLoading || dinsarPagination.offset <= 0}
+                                >
+                                    {language === 'en' ? 'Previous' : '上一页'}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => onPageChange(1)}
+                                    disabled={isLoading || !dinsarPagination.hasMore}
+                                >
+                                    {language === 'en' ? 'Next' : '下一页'}
+                                </button>
+
+                                <label className="dinsar-pagination-field">
+                                    <span>{language === 'en' ? 'Per page' : '每页条数'}</span>
+                                    <select
+                                        value={dinsarPagination.limit}
+                                        onChange={onPageSizeChange}
+                                        disabled={isLoading}
+                                    >
+                                        {PAGE_SIZE_OPTIONS.map((size) => (
+                                            <option key={size} value={size}>{size}</option>
+                                        ))}
+                                    </select>
+                                </label>
+
+                                <label className="dinsar-pagination-field dinsar-pagination-field-jump">
+                                    <span>{language === 'en' ? 'Jump to page' : '跳转页码'}</span>
+                                    <div className="dinsar-page-jump-input">
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            max={dinsarTotalPages}
+                                            value={dinsarPageInput}
+                                            onChange={(event) => {
+                                                setDinsarPageInput(event.target.value);
+                                                setDinsarPageInputTouched(false);
+                                            }}
+                                            onBlur={() => setDinsarPageInputTouched(true)}
+                                            onKeyDown={(event) => {
+                                                if (event.key === 'Enter') {
+                                                    event.preventDefault();
+                                                    onGoToPage();
+                                                }
+                                            }}
+                                            disabled={isLoading}
+                                            className={showDinsarPageInputError ? 'has-error' : ''}
+                                        />
+                                        <button type="button" onClick={onGoToPage} disabled={isLoading}>
+                                            {language === 'en' ? 'Jump' : '跳转'}
+                                        </button>
+                                    </div>
+                                </label>
+                            </div>
+
+                            <div className={`dinsar-toolbar-hint ${showDinsarPageInputError ? 'error' : ''}`}>
                                 {showDinsarPageInputError
                                     ? dinsarPageInputValidationError
                                     : getPageHintText(dinsarTotalPages, language)}
-                            </span>
+                            </div>
                         </div>
                     </div>
 
@@ -344,7 +452,7 @@ export default function DinsarResultPanel({
 
             {showExportModal && (
                 <ResultExportModal
-                    results={dinsarResults}
+                    results={filteredResults}
                     onClose={() => setShowExportModal(false)}
                 />
             )}

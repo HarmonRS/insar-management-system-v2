@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { exportDinsarResults } from '../api/dinsar';
+import { getDinsarEngineMeta } from '../utils/dinsarEngines';
 
 const EXAMPLE_TARGET_DIR = String.raw`例如: D:\Export\Results 或 \\server\share\results`;
 
@@ -9,6 +10,9 @@ export default function ResultExportModal({ results = [], onClose }) {
     const [exporting, setExporting] = useState(false);
     const [exportResult, setExportResult] = useState(null);
     const [error, setError] = useState('');
+
+    const selectedCount = selectedIds.size;
+    const sortedResults = useMemo(() => [...results], [results]);
 
     const toggleSelect = (id) => {
         setSelectedIds((prev) => {
@@ -86,7 +90,7 @@ export default function ResultExportModal({ results = [], onClose }) {
                                     onChange={toggleAll}
                                     disabled={exporting || results.length === 0}
                                 />
-                                全选 ({selectedIds.size}/{results.length})
+                                全选 ({selectedCount}/{results.length})
                             </label>
                         </div>
 
@@ -95,21 +99,27 @@ export default function ResultExportModal({ results = [], onClose }) {
                         </div>
 
                         <ul className="export-result-list">
-                            {results.map((result) => (
-                                <li key={result.id} className="export-result-item">
-                                    <label>
-                                        <input
-                                            type="checkbox"
-                                            checked={selectedIds.has(result.id)}
-                                            onChange={() => toggleSelect(result.id)}
-                                            disabled={exporting}
-                                        />
-                                        <span className="export-result-name" title={result.file_path || result.name}>
-                                            {result.name}
-                                        </span>
-                                    </label>
-                                </li>
-                            ))}
+                            {sortedResults.map((result) => {
+                                const engineMeta = getDinsarEngineMeta(result.engine_code);
+                                return (
+                                    <li key={result.id} className="export-result-item">
+                                        <label>
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedIds.has(result.id)}
+                                                onChange={() => toggleSelect(result.id)}
+                                                disabled={exporting}
+                                            />
+                                            <span className="export-result-name" title={result.file_path || result.name}>
+                                                {result.name}
+                                            </span>
+                                            <span className={`dinsar-engine-badge tone-${engineMeta.tone}`}>
+                                                {engineMeta.shortLabel}
+                                            </span>
+                                        </label>
+                                    </li>
+                                );
+                            })}
                         </ul>
                     </div>
 

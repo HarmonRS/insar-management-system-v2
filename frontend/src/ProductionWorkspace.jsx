@@ -9,7 +9,7 @@ import { PanelLoadingBody } from './components/app/AppLoadingFallbacks';
 
 const LazyDinsarProductionPanel = lazy(() => import('./DinsarProductionPanel'));
 const LazyTimeseriesProductionPanel = lazy(() => import('./TimeseriesProductionPanel'));
-const LazyDinsarProductsPanel = lazy(() => import('./DinsarProductsPanel.rewrite'));
+const LazyDinsarProductsPanel = lazy(() => import('./DinsarProductsPanel'));
 const LazyPsinsarCatalogPanel = lazy(() => import('./components/PsinsarCatalogPanel'));
 
 const shellStyle = {

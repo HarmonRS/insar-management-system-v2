@@ -1,5 +1,8 @@
 # INIT
 
+> 说明：本文件是开发/运维工作笔记，不是当前系统架构、部署或运行事实的最高依据。  
+> 优先阅读 `README.md`、`docs/INDEX.md` 与 `docs/DOCUMENTATION_GOVERNANCE.md`。
+
 ## 1. 当前开发机已确认的本机环境
 
 - Windows 开发机 Python 解释器：`C:\ProgramData\anaconda3\envs\InSAR\python.exe`
@@ -33,23 +36,32 @@
 - 修复 D-InSAR 运行时目录处理逻辑，避免继续依赖历史开发机 `Z:\` 路径。
 - 当前原则：路径统一走 `.env`，不允许把开发机专用盘符写入跟踪代码。
 
-### 2.3 前端乱码修复
+### 2.3 前端编码与临时文件收口
 
 本轮已清理以下面板中的残留乱码与混杂英文：
 
 - `frontend/src/DinsarProductionPanel.jsx`
 - `frontend/src/DinsarProductsPanel.jsx`
 
-日志管理原文件 `frontend/src/LogManagementPanel.jsx` 本身存在历史乱码内容，而且开发过程中目标文件一度被占用，当前采用的稳定方案是：
+此前前端存在一批过渡文件名，例如：
 
-- 新增干净版本：`frontend/src/LogManagementPanel.clean.jsx`
-- 由 `frontend/src/HealthCheckPanel.jsx` 暂时改为导入 `LogManagementPanel.clean`
+- `*.rewrite.jsx`
+- `LogManagementPanel.clean.jsx`
 
-这样做的目的：
+这些文件名现在已经完成收口，当前应以正式文件名作为事实来源：
 
-- 先保证页面可用、无乱码
-- 不在文件被占用时强行覆盖旧文件
-- 后续如果旧文件占用解除，再考虑把 clean 版本回收为正式文件名
+- `frontend/src/DinsarProductsPanel.jsx`
+- `frontend/src/components/DinsarCatalogPanel.jsx`
+- `frontend/src/panels/DinsarResultPanel.jsx`
+- `frontend/src/components/ResultExportModal.jsx`
+- `frontend/src/components/panels/DinsarResultRow.jsx`
+- `frontend/src/LogManagementPanel.jsx`
+
+当前原则：
+
+- 不再让“rewrite / clean”文件名长期停留在主分支
+- 当前被界面实际使用的实现，应恢复为正式文件名
+- 如后续再次出现临时过渡文件，必须在功能稳定后尽快收口
 
 ## 3. PowerShell 使用注意事项
 
@@ -99,4 +111,3 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
   - 运行监控
   - 处理模板
   - D-InSAR 产物说明文案
-
