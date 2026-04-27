@@ -84,10 +84,19 @@ python run_worker.py
 
 ## 文档导航
 
-- [当前状态快照](docs/CURRENT_STATUS_20260425.md)
-- [部署与运行说明](docs/DEPLOYMENT.md)
-- [数据库自维护审计](docs/DATABASE_SELF_MAINTENANCE_AUDIT_20260425.md)
-- [文档索引](docs/INDEX.md)
+建议阅读顺序：
+
+1. [文档治理约定](docs/DOCUMENTATION_GOVERNANCE.md)
+2. [文档索引](docs/INDEX.md)
+3. [当前状态快照](docs/CURRENT_STATUS_20260425.md)
+4. [部署与运行说明](docs/DEPLOYMENT.md)
+5. [数据库自维护审计](docs/DATABASE_SELF_MAINTENANCE_AUDIT_20260425.md)
+
+说明：
+
+- `docs/INDEX.md` 是当前有效文档与历史参考文档的总入口。
+- `INIT.md` 是工作笔记，不应替代正式文档。
+- 历史材料可从 `docs/archive/INDEX.md` 进入。
 
 当前仍在生效的专题设计文档：
 

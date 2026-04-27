@@ -1,17 +1,20 @@
 # 文档索引
 
-本索引用来区分“当前有效文档”和“历史参考文档”。
+本页用于区分“当前有效文档”和“历史参考文档”。
 
 原则：
 
-- 以本页列为“当前有效”的文档，才作为现网架构、部署和运维的事实依据。
-- 没有列入“当前有效”区域的文档，默认只作为设计过程记录或历史参考。
-- 旧文档即使仍保留在 `docs/` 根目录，也不代表它仍然描述当前系统。
+- 只有列在“当前有效”区域的文档，才作为现网架构、部署、运维和产品边界的事实依据。
+- 没有列入“当前有效”区域的材料，默认只作为设计过程记录、阶段性任务单或历史参考。
+- 历史文档即使还保留在仓库中，也不应被当作当前系统的真实规则。
 
 ## 1. 当前有效
 
 - [../README.md](../README.md)
   项目总览、当前架构和启动入口。
+
+- [DOCUMENTATION_GOVERNANCE.md](DOCUMENTATION_GOVERNANCE.md)
+  文档治理约定，定义事实来源优先级、命名规则、归档规则与语言/编码约束。
 
 - [CURRENT_STATUS_20260425.md](CURRENT_STATUS_20260425.md)
   2026-04-25 的项目状态快照，包含结果目录、运行时、健康检查摘要。
@@ -21,6 +24,9 @@
 
 - [DATABASE_SELF_MAINTENANCE_AUDIT_20260425.md](DATABASE_SELF_MAINTENANCE_AUDIT_20260425.md)
   当前数据库自维护机制与现场数据库一致性审计结果。
+
+- [CODEBASE_CLEANUP_AUDIT_20260425.md](CODEBASE_CLEANUP_AUDIT_20260425.md)
+  代码库清理审计，记录过渡文件、文档治理和编码显示问题的判定结果。
 
 - [PROJ_CONFIGURATION.md](PROJ_CONFIGURATION.md)
   PROJ / GDAL 相关专项配置说明。
@@ -39,9 +45,6 @@
 - [ISCE2_PRODUCTION_RELIABILITY_HARDENING_DESIGN_20260424.md](ISCE2_PRODUCTION_RELIABILITY_HARDENING_DESIGN_20260424.md)
   ISCE2 生产链路稳定性修补与约束。
 
-- [DINSAR_ENHANCEMENT_TASKS.md](DINSAR_ENHANCEMENT_TASKS.md)
-  D-InSAR 生产相关任务清单。
-
 ## 3. 时序 InSAR / SBAS
 
 - [ISCE2_SBAS_TIMESERIES_DESIGN.md](ISCE2_SBAS_TIMESERIES_DESIGN.md)
@@ -51,38 +54,56 @@
 
 - 当前前端顶级显示名已经统一为“时序 InSAR”。
 - 当前默认接入仍然是 SBAS 路径，因此这两份文档仍然有效。
-- `SBAS_*` 命名的一批旧文档大多是阶段性设计材料，不再作为总事实来源。
+- `SBAS_*` 命名的一批旧文档已经归档，只保留历史追溯价值。
 
 ## 4. 配对与前端导航
 
 - [PAIRING_ENHANCEMENT_DESIGN.md](PAIRING_ENHANCEMENT_DESIGN.md)
-- [PAIRING_SYSTEM_REFACTOR_PLAN_20260413.md](PAIRING_SYSTEM_REFACTOR_PLAN_20260413.md)
 - [FRONTEND_NAVIGATION_ARCHITECTURE.md](FRONTEND_NAVIGATION_ARCHITECTURE.md)
 
-## 5. Gamma / PyINT / WSL 预留
+说明：
 
-- [GAMMA_WSL2_INTEGRATION_PLAN.md](GAMMA_WSL2_INTEGRATION_PLAN.md)
+- `PAIRING_ENHANCEMENT_DESIGN.md` 保留配对语义、策略命名和产品交互边界设计价值。
+- 当前 pairing cache 的运行态事实，以 `CURRENT_STATUS_20260425.md` 和 `DATABASE_SELF_MAINTENANCE_AUDIT_20260425.md` 为准。
+
+## 5. Gamma / PyINT
+
 - [PYINT_GAMMA_INTEGRATION_DESIGN_20260418.md](PYINT_GAMMA_INTEGRATION_DESIGN_20260418.md)
 - [PYINT_INPUT_ASSET_ADAPTATION_DESIGN_20260419.md](PYINT_INPUT_ASSET_ADAPTATION_DESIGN_20260419.md)
+- [PYINT_LT1_PRECISE_ORBIT_BRIDGE_DESIGN_20260419.md](PYINT_LT1_PRECISE_ORBIT_BRIDGE_DESIGN_20260419.md)
 - [PYINT_GAMMA_AB_FINDINGS_20260420.md](PYINT_GAMMA_AB_FINDINGS_20260420.md)
 
 说明：
 
-- 这部分主要作为 Gamma / PyINT 接入的预留设计和实验记录。
-- 真正的当前运行时事实，以 `WSL_RUNTIME_REFACTOR_DESIGN_20260422.md`、`.env` 和健康面板为准。
+- 这部分保留当前仍有导航价值的 PyINT / Gamma 设计与结论。
+- 旧的 `GAMMA_WSL2_INTEGRATION_PLAN.md` 已于 2026-04-26 归档，因为它描述的是已被替代的 `/idl` + 独立 Gamma 服务方案。
+- 真正的当前运行时事实，以 `WSL_RUNTIME_REFACTOR_DESIGN_20260422.md`、`README.md` 和健康面板为准。
 
 ## 6. 安全与审计
 
 - [SECURITY_AUDIT_2026-03-12.md](SECURITY_AUDIT_2026-03-12.md)
 
-## 7. 历史参考
+## 7. 工作笔记
+
+- [../INIT.md](../INIT.md)
+
+说明：
+
+- `INIT.md` 视为工作笔记，不是架构、部署和运行事实的最高依据。
+- 需要判断“当前真实规则”时，优先看 `README.md`、本页和长期有效文档。
+
+## 8. 历史参考
 
 以下材料默认视为历史设计记录或过程文档：
 
+- [archive/INDEX.md](archive/INDEX.md)
 - `docs/archive/`
-- `SBAS_*`
-- `WSL2_ISCE2_MINTPY_SBAS_INTEGRATION_PLAN_20260412.md`
-- `项目汇报.md`
-- 各类 `*_EXPERIMENT_*` / `*_PROGRESS_*` / `*_TODO_*`
+- 已归档的 `SBAS_*` 阶段文档
+- 已归档的 `GAMMA_WSL2_INTEGRATION_PLAN.md`
+- 已归档的 `PAIRING_SYSTEM_REFACTOR_PLAN_20260413.md`
+- 已归档的 `DINSAR_ENHANCEMENT_TASKS.md`
+- 已归档的 `WSL2_ISCE2_MINTPY_SBAS_INTEGRATION_PLAN_20260412.md`
+- 已归档的 `项目汇报.md`
+- 已归档的各类 `*_EXPERIMENT_*` / `*_PROGRESS_*` / `*_TODO_*`
 
-最后更新：2026-04-25
+最后更新：2026-04-26

@@ -121,7 +121,7 @@
 |------|------|
 | `backend/app/services/envi_service.py` | ENVI 工作流核心（6 步流程、GCP 生成、文件稳定等待） |
 | `backend/app/services/envi_runner_cli.py` | 子进程入口（加载 .env、调用 run_workflow） |
-| `backend/app/services/job_handlers.py` | Job handler（子进程监控、keepalive、文件稳定检查��� |
+| `backend/app/services/job_handlers.py` | Job handler（子进程监控、keepalive、文件稳定检查） |
 | `backend/app/services/job_worker.py` | Worker 主循环（心跳、stale 检测） |
 | `backend/app/services/task_service.py` | Task 管理（僵尸检测在 get_active_tasks 中） |
 | `backend/app/routers/tasks.py` | Task API（含 force-cancel 端点） |

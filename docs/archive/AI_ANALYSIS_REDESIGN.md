@@ -164,7 +164,7 @@ GET /api/ai-diagnosis?page=1&limit=20&result_id=123&risk_level=HIGH&sort=-create
 GET /api/ai-diagnosis/{id}
 ```
 
-**响��**：
+**响应**：
 ```json
 {
   "id": 42,
