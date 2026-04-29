@@ -482,7 +482,9 @@ export default function AppSidePanel({
                 <Suspense fallback={<PanelLoadingPanel message="正在加载 PS 候选结果面板..." />}>
                     <LazyPsResultsPanel
                         onPreviewPsStack={psPanel.onPreviewPsStack}
+                        onClearPsStackPreview={psPanel.onClearPsStackPreview}
                         onCreatePsBatch={psPanel.onCreatePsBatch}
+                        onSendToTimeseriesProduction={psPanel.onSendToTimeseriesProduction}
                         onClearPsResults={psPanel.onClearPsResults}
                     />
                 </Suspense>

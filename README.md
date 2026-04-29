@@ -45,7 +45,7 @@
 
 - 会自动创建缺失表。
 - 会自动补齐缺失列。
-- 会自动执行 `backend/migrations/001` 到 `006` 的 SQL 文件。
+- 会自动执行 `backend/migrations/001` 到 `007` 的 SQL 文件。
 - 只有同时设置 `DB_SCHEMA_RESET_ON_MISMATCH=true` 和 `DB_SCHEMA_RESET_CONFIRM=true`，才允许破坏性重建。
 
 不会自动处理的情况：
@@ -76,6 +76,34 @@ start_system.bat
 python run_backend.py
 python run_worker.py
 ```
+
+## Git Clone Deployment
+
+This repository is intended to stay deployable after a clean `git clone` on a new
+Windows host.
+
+Recommended bootstrap path:
+
+```powershell
+git clone <repo-url>
+cd Insar_management_system_v2
+Copy-Item .env.example .env
+notepad .env
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_clone.ps1 -InitFrontend -BuildFrontend
+start_system.bat
+```
+
+Optional runtime bootstrap commands:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_clone.ps1 -InitWindowsConda
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_clone.ps1 -InitWslConda
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_clone.ps1 -All
+```
+
+The clone bootstrap script keeps the existing startup, database self-maintenance,
+and health-check chain unchanged. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+for the current deployment model and switch details.
 
 说明：
 

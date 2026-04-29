@@ -1,6 +1,19 @@
 import { usePairingStore, useUiStore, useAuthStore } from '../store';
 import { getSelectedRegionTreeId } from '../utils/appUiHelpers';
 
+const PARAM_METADATA = {
+    initial_overlap_threshold: {
+        label: '单景 AOI 覆盖率',
+        title: '单景影像覆盖 AOI 的最低比例。0.30 表示影像至少覆盖 AOI 面积的 30%。',
+        hint: '先过滤明显不覆盖研究区的影像；AOI 很大时可适当降低。',
+    },
+    final_overlap_threshold: {
+        label: '栈覆盖一致性',
+        title: '最终候选栈的公共覆盖区 / 栈内最小单景 AOI 覆盖区。0.95 表示栈内场景覆盖范围基本一致，不要求覆盖整个行政区。',
+        hint: '控制时序栈内部覆盖稳定性；若同轨同模式影像仍被过滤，可尝试 0.85-0.90。',
+    },
+};
+
 function PsStackModal({
     onSubmit,
     onAoiModeChange,
@@ -110,12 +123,8 @@ function PsStackModal({
                     )}
                     {Object.entries(psParams).map(([key, value]) => (
                         <div className="form-group" key={key}>
-                            <label title={
-                                key === 'initial_overlap_threshold'
-                                ? '影像与AOI重叠面积 / AOI面积'
-                                : '影像与公共重叠区面积 / 公共重叠区面积'
-                            }>
-                                {key.replace(/_/g, ' ')}:
+                            <label title={PARAM_METADATA[key]?.title || key}>
+                                {PARAM_METADATA[key]?.label || key.replace(/_/g, ' ')}:
                             </label>
                             <input
                                 type="number"
@@ -125,6 +134,11 @@ function PsStackModal({
                                 value={value}
                                 onChange={e => setPsParams({...psParams, [key]: parseFloat(e.target.value)})}
                             />
+                            {PARAM_METADATA[key]?.hint && (
+                                <div style={{ marginTop: '4px', fontSize: '12px', color: '#6b7280', lineHeight: 1.4 }}>
+                                    {PARAM_METADATA[key].hint}
+                                </div>
+                            )}
                         </div>
                     ))}
                     <div className="modal-actions">

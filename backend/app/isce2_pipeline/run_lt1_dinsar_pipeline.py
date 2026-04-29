@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import os
 import re
 import shutil
@@ -14,15 +15,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from export_isce_geotiff import (
+    DEFAULT_DERAMP_COH_THRESHOLD,
+    DEFAULT_DERAMP_MODE,
     DEFAULT_REFERENCE_COH_THRESHOLD,
     DEFAULT_REFERENCE_MODE,
     DEFAULT_WAVELENGTH,
+    DERAMP_MODE_CHOICES,
     REFERENCE_MODE_CHOICES,
     export_products,
 )
 from lt1_input_resolver import (
     DEFAULT_WSL_DEM_CANDIDATES,
     ensure_lt1_orbit_xml,
+    repair_related_dem_sidecars,
     resolve_prepared_dem_path,
 )
 
@@ -35,7 +40,22 @@ RESUME_STAGE_CHOICES = PIPELINE_STAGE_ORDER[1:]
 DEFAULT_EXPORT_GEOCODE_PRODUCTS = [
     "interferogram/filt_topophase.unw",
     "interferogram/topophase.cor",
+    "ionosphere/dispersive.bil.unwCor.filt",
+    "ionosphere/nondispersive.bil.unwCor.filt",
+    "ionosphere/mask.bil",
 ]
+DEFAULT_EXPORT_GEOCODE_PRODUCTS_NO_IONO = [
+    "interferogram/filt_topophase.unw",
+    "interferogram/topophase.cor",
+]
+DEFAULT_RUBBER_SHEET_SNR_THRESHOLD = 5.0
+DEFAULT_RUBBER_SHEET_FILTER_SIZE = 9
+DEFAULT_DENSE_WINDOW_WIDTH = 64
+DEFAULT_DENSE_WINDOW_HEIGHT = 64
+DEFAULT_DENSE_SEARCH_WIDTH = 20
+DEFAULT_DENSE_SEARCH_HEIGHT = 20
+DEFAULT_DENSE_SKIP_WIDTH = 32
+DEFAULT_DENSE_SKIP_HEIGHT = 32
 
 
 @dataclass
@@ -59,6 +79,18 @@ class PipelineConfig:
     target_grid_size_m: int
     geo_posting_deg: float
     geocode_products: list[str] | None
+    ionosphere_correction: bool
+    dense_offsets: bool
+    rubbersheet_range: bool
+    rubbersheet_azimuth: bool
+    rubber_sheet_snr_threshold: float
+    rubber_sheet_filter_size: int
+    dense_window_width: int
+    dense_window_height: int
+    dense_search_width: int
+    dense_search_height: int
+    dense_skip_width: int
+    dense_skip_height: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,7 +98,7 @@ def parse_args() -> argparse.Namespace:
     repo_root = script_dir.parent
 
     parser = argparse.ArgumentParser(
-        description="Run an LT-1 ISCE2 DInSAR production pipeline with SNAPHU."
+        description="Run an LT-1 ISCE2 DInSAR production pipeline with the standard stripmap workflow."
     )
     parser.add_argument("task_dir", help="Task directory, for example Task_20250112_20250309")
     parser.add_argument(
@@ -156,13 +188,25 @@ def parse_args() -> argparse.Namespace:
         "--reference-mode",
         choices=REFERENCE_MODE_CHOICES,
         default=DEFAULT_REFERENCE_MODE,
-        help="Optional reference normalization mode used only for debug exports",
+        help="Reference normalization mode applied during final displacement export",
     )
     parser.add_argument(
         "--reference-coh-threshold",
         type=float,
         default=DEFAULT_REFERENCE_COH_THRESHOLD,
         help="Minimum coherence used when selecting reference pixels for export normalization",
+    )
+    parser.add_argument(
+        "--deramp-mode",
+        choices=DERAMP_MODE_CHOICES,
+        default=DEFAULT_DERAMP_MODE,
+        help="Optional ramp-removal mode applied after reference normalization",
+    )
+    parser.add_argument(
+        "--deramp-coh-threshold",
+        type=float,
+        default=DEFAULT_DERAMP_COH_THRESHOLD,
+        help="Minimum coherence used when selecting pixels for deramp fitting",
     )
     parser.add_argument(
         "--target-grid-size-m",
@@ -179,6 +223,76 @@ def parse_args() -> argparse.Namespace:
         "--full-geocode",
         action="store_true",
         help="Let ISCE2 geocode its full default product list instead of the reduced export-only list.",
+    )
+    parser.add_argument(
+        "--no-ionosphere-correction",
+        action="store_false",
+        dest="ionosphere_correction",
+        help="Disable split-spectrum dispersive correction and export the standard unwrapped interferogram.",
+    )
+    parser.set_defaults(ionosphere_correction=True)
+    parser.add_argument(
+        "--dense-offsets",
+        action="store_true",
+        help="Enable ISCE2 dense offset estimation before fine resampling.",
+    )
+    parser.add_argument(
+        "--rubbersheet-range",
+        action="store_true",
+        help="Enable ISCE2 range rubbersheeting using dense offsets.",
+    )
+    parser.add_argument(
+        "--rubbersheet-azimuth",
+        action="store_true",
+        help="Enable ISCE2 azimuth rubbersheeting using dense offsets.",
+    )
+    parser.add_argument(
+        "--rubber-sheet-snr-threshold",
+        type=float,
+        default=DEFAULT_RUBBER_SHEET_SNR_THRESHOLD,
+        help="SNR threshold used by ISCE2 rubbersheet offset masking.",
+    )
+    parser.add_argument(
+        "--rubber-sheet-filter-size",
+        type=int,
+        default=DEFAULT_RUBBER_SHEET_FILTER_SIZE,
+        help="Median filter size used by ISCE2 rubbersheet offset masking.",
+    )
+    parser.add_argument(
+        "--dense-window-width",
+        type=int,
+        default=DEFAULT_DENSE_WINDOW_WIDTH,
+        help="Dense offset correlation window width.",
+    )
+    parser.add_argument(
+        "--dense-window-height",
+        type=int,
+        default=DEFAULT_DENSE_WINDOW_HEIGHT,
+        help="Dense offset correlation window height.",
+    )
+    parser.add_argument(
+        "--dense-search-width",
+        type=int,
+        default=DEFAULT_DENSE_SEARCH_WIDTH,
+        help="Dense offset search window width.",
+    )
+    parser.add_argument(
+        "--dense-search-height",
+        type=int,
+        default=DEFAULT_DENSE_SEARCH_HEIGHT,
+        help="Dense offset search window height.",
+    )
+    parser.add_argument(
+        "--dense-skip-width",
+        type=int,
+        default=DEFAULT_DENSE_SKIP_WIDTH,
+        help="Dense offset sampling stride in range direction.",
+    )
+    parser.add_argument(
+        "--dense-skip-height",
+        type=int,
+        default=DEFAULT_DENSE_SKIP_HEIGHT,
+        help="Dense offset sampling stride in azimuth direction.",
     )
     parser.add_argument(
         "--resume-from",
@@ -219,9 +333,73 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--target-grid-size-m must be greater than 0")
     if args.reference_coh_threshold < 0 or args.reference_coh_threshold > 1:
         raise ValueError("--reference-coh-threshold must be between 0 and 1")
+    if args.deramp_coh_threshold < 0 or args.deramp_coh_threshold > 1:
+        raise ValueError("--deramp-coh-threshold must be between 0 and 1")
+    if args.rubber_sheet_snr_threshold < 0:
+        raise ValueError("--rubber-sheet-snr-threshold must be non-negative")
+    if args.rubber_sheet_filter_size <= 0:
+        raise ValueError("--rubber-sheet-filter-size must be greater than 0")
+    for field_name in (
+        "dense_window_width",
+        "dense_window_height",
+        "dense_search_width",
+        "dense_search_height",
+        "dense_skip_width",
+        "dense_skip_height",
+    ):
+        if int(getattr(args, field_name)) <= 0:
+            raise ValueError(f"--{field_name.replace('_', '-')} must be greater than 0")
     if args.force and args.resume_from:
         raise ValueError("--force cannot be used together with --resume-from")
     return args
+
+
+def _find_python_module(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def validate_runtime_dependencies(args: argparse.Namespace) -> str:
+    errors: list[str] = []
+    env_for_cli = build_process_env()
+    ionosphere_correction = bool(getattr(args, "ionosphere_correction", True))
+
+    if ionosphere_correction:
+        missing_ionosphere_modules: list[str] = []
+        if not _find_python_module("cv2"):
+            missing_ionosphere_modules.append("cv2")
+        if not _find_python_module("scipy"):
+            missing_ionosphere_modules.append("scipy")
+        if missing_ionosphere_modules:
+            errors.append(
+                "Missing Python dependencies for the ISCE2 stripmap ionosphere step: "
+                + ", ".join(missing_ionosphere_modules)
+                + ". The managed LT-1 workflow enables split-spectrum dispersive correction "
+                "before geocode. Install the missing packages in the WSL runtime, for example: "
+                "conda install -n insar_wsl_v1 -c conda-forge opencv scipy."
+            )
+
+    if (args.rubbersheet_range or args.rubbersheet_azimuth) and not _find_python_module(
+        "astropy.convolution"
+    ):
+        errors.append(
+            "Missing Python dependency 'astropy.convolution'. "
+            "ISCE2 stripmap rubbersheeting imports astropy.convolution in "
+            "runRubbersheetRange.py. Install astropy in the WSL runtime, for example: "
+            "conda install -n insar_wsl_v1 -c conda-forge astropy."
+        )
+
+    if ionosphere_correction and not shutil.which("imageMath.py", path=str(env_for_cli.get("PATH") or "")):
+        errors.append(
+            "Missing CLI dependency 'imageMath.py' on PATH. "
+            "ISCE2 stripmap shells out to imageMath.py in the ionosphere step, so a missing PATH entry "
+            "will only surface late in the run. Export the active conda env bin directory into PATH "
+            "before launching production."
+        )
+
+    return "\n".join(errors)
 
 
 def locate_stripmap_app() -> Path:
@@ -231,6 +409,29 @@ def locate_stripmap_app() -> Path:
     if not app_path.exists():
         raise FileNotFoundError(f"stripmapApp.py not found: {app_path}")
     return app_path
+
+
+def locate_isce_applications_dir() -> Path | None:
+    spec = importlib.util.find_spec("isce")
+    if not spec or not spec.origin:
+        return None
+
+    app_dir = Path(spec.origin).resolve().parent / "applications"
+    if app_dir.exists():
+        return app_dir
+    return None
+
+
+def build_process_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(base_env or os.environ.copy())
+    path_prefixes = [Path(sys.executable).resolve().parent.as_posix()]
+    app_dir = locate_isce_applications_dir()
+    if app_dir:
+        path_prefixes.append(app_dir.as_posix())
+
+    current_path = str(env.get("PATH") or "")
+    env["PATH"] = ":".join(path_prefixes + ([current_path] if current_path else []))
+    return env
 
 
 def normalize_linux_path(value: str | Path) -> Path:
@@ -374,6 +575,14 @@ def resolve_dem(dem_value: str | None) -> Path:
         path_transform=normalize_linux_path,
     )
     if dem_path is not None:
+        repair_reports = repair_related_dem_sidecars(dem_path)
+        for report in repair_reports:
+            if not report.get("changed"):
+                continue
+            print(
+                "Repaired DEM sidecar paths: "
+                f"{report['xml_path']} -> {', '.join(report['updated_fields'])}"
+            )
         return dem_path
 
     searched = ", ".join(str(path) for path in DEFAULT_WSL_DEM_CANDIDATES)
@@ -502,9 +711,30 @@ def meters_to_geoposting_degrees(target_grid_size_m: int) -> float:
     return float(target_grid_size_m) / METERS_PER_DEGREE
 
 
+def build_default_geocode_products(*, ionosphere_correction: bool) -> list[str]:
+    return list(
+        DEFAULT_EXPORT_GEOCODE_PRODUCTS
+        if ionosphere_correction
+        else DEFAULT_EXPORT_GEOCODE_PRODUCTS_NO_IONO
+    )
+
+
 def write_stripmap_xml(xml_path: Path, config: PipelineConfig) -> None:
     bbox_xml = render_bbox(config.bbox)
     geocode_list_xml = render_string_list("geocode list", config.geocode_products)
+    enhancement_props = (
+        f"    <property name=\"do denseoffsets\">{str(config.dense_offsets)}</property>\n"
+        f"    <property name=\"do rubbersheetingRange\">{str(config.rubbersheet_range)}</property>\n"
+        f"    <property name=\"do rubbersheetingAzimuth\">{str(config.rubbersheet_azimuth)}</property>\n"
+        f"    <property name=\"rubber sheet SNR Threshold\">{config.rubber_sheet_snr_threshold}</property>\n"
+        f"    <property name=\"rubber sheet filter size\">{config.rubber_sheet_filter_size}</property>\n"
+        f"    <property name=\"dense window width\">{config.dense_window_width}</property>\n"
+        f"    <property name=\"dense window height\">{config.dense_window_height}</property>\n"
+        f"    <property name=\"dense search width\">{config.dense_search_width}</property>\n"
+        f"    <property name=\"dense search height\">{config.dense_search_height}</property>\n"
+        f"    <property name=\"dense skip width\">{config.dense_skip_width}</property>\n"
+        f"    <property name=\"dense skip height\">{config.dense_skip_height}</property>\n"
+    )
     text = (
         "<stripmapApp>\n"
         "  <component name=\"stripmapApp\">\n"
@@ -514,10 +744,13 @@ def write_stripmap_xml(xml_path: Path, config: PipelineConfig) -> None:
         "    <property name=\"renderer\">xml</property>\n"
         "    <property name=\"do unwrap\">True</property>\n"
         "    <property name=\"unwrapper name\">snaphu</property>\n"
+        f"    <property name=\"do split spectrum\">{str(config.ionosphere_correction)}</property>\n"
+        f"    <property name=\"do dispersive\">{str(config.ionosphere_correction)}</property>\n"
         f"    <property name=\"posting\">{config.target_grid_size_m}</property>\n"
         f"    <property name=\"geoPosting\">{config.geo_posting_deg:.12f}</property>\n"
         f"{bbox_xml}"
         f"{geocode_list_xml}"
+        f"{enhancement_props}"
         f"    <property name=\"demFilename\">{config.dem_path.as_posix()}</property>\n"
         "\n"
         "    <component name=\"Reference\">\n"
@@ -553,7 +786,7 @@ def run_logged(stage_name: str, cmd: list[str], cwd: Path, log_path: Path) -> No
         handle.write(f"Log: {log_path}\n")
         handle.flush()
 
-        child_env = os.environ.copy()
+        child_env = build_process_env()
         child_env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
             cmd,
@@ -730,59 +963,57 @@ def should_run_stage(start_stage: str, stage_name: str) -> bool:
     return stage_index >= start_index
 
 
-def prepare_snaphu_resume(work_dir: Path, bbox: list[float] | None) -> None:
+def has_pickle_state(work_dir: Path, state_name: str) -> bool:
     pickle_dir = work_dir / "PICKLE"
-    src = pickle_dir / "filter"
-    src_xml = pickle_dir / "filter.xml"
-    dst = pickle_dir / "filter_high_band"
-    dst_xml = pickle_dir / "filter_high_band.xml"
-
-    if not src.exists() or not src_xml.exists():
-        raise FileNotFoundError("filter step output is missing; cannot prepare SNAPHU resume state.")
-
-    shutil.copy2(src, dst)
-    shutil.copy2(src_xml, dst_xml)
-
-    root = ET.fromstring(dst_xml.read_text(encoding="utf-8"))
-    props = {prop.attrib.get("name"): prop for prop in root.findall("property")}
-
-    required = {
-        "referenceslccroppedproduct": "reference_slc.xml",
-        "secondaryslccroppedproduct": "secondary_slc.xml",
-        "referenceslcproduct": "reference_slc.xml",
-        "secondaryslcproduct": "secondary_slc.xml",
-        "referencegeometrysystem": "Zero Doppler",
-        "secondarygeometrysystem": "Zero Doppler",
-    }
-    if bbox is not None:
-        required["estimatedboundingbox"] = str(bbox)
-
-    for name, value in required.items():
-        if name in props:
-            node = props[name].find("value")
-            if node is None:
-                node = ET.SubElement(props[name], "value")
-            node.text = value
-            continue
-
-        prop = ET.SubElement(root, "property", {"name": name})
-        ET.SubElement(prop, "value").text = value
-
-    dst_xml.write_text(ET.tostring(root, encoding="unicode"), encoding="utf-8")
+    return (pickle_dir / state_name).exists() and (pickle_dir / f"{state_name}.xml").exists()
 
 
-def prepare_geocode_resume(work_dir: Path) -> None:
-    pickle_dir = work_dir / "PICKLE"
-    unwrap = pickle_dir / "unwrap"
-    unwrap_xml = pickle_dir / "unwrap.xml"
-    ionosphere = pickle_dir / "ionosphere"
-    ionosphere_xml = pickle_dir / "ionosphere.xml"
+def resolve_unwrap_start_step(work_dir: Path, *, ionosphere_correction: bool) -> str:
+    if ionosphere_correction:
+        if has_pickle_state(work_dir, "ionosphere"):
+            return "ionosphere"
+        if has_pickle_state(work_dir, "unwrap_low_band") and has_pickle_state(
+            work_dir, "unwrap_high_band"
+        ):
+            return "ionosphere"
+        if has_pickle_state(work_dir, "filter_low_band") and has_pickle_state(
+            work_dir, "filter_high_band"
+        ):
+            return "unwrap"
+        if has_pickle_state(work_dir, "filter"):
+            return "filter_low_band"
+        raise FileNotFoundError(
+            "Unable to resume the ISCE2 unwrap/ionosphere stage. Missing PICKLE state for "
+            "filter, filter_low_band/filter_high_band, unwrap_low_band/unwrap_high_band, or ionosphere."
+        )
 
-    if not unwrap.exists() or not unwrap_xml.exists():
-        raise FileNotFoundError("unwrap step output is missing; cannot prepare geocode resume state.")
+    if has_pickle_state(work_dir, "unwrap"):
+        return "unwrap"
+    if has_pickle_state(work_dir, "filter"):
+        return "unwrap"
+    raise FileNotFoundError(
+        "Unable to resume the ISCE2 unwrap stage. Missing PICKLE state for filter or unwrap."
+    )
 
-    shutil.copy2(unwrap, ionosphere)
-    shutil.copy2(unwrap_xml, ionosphere_xml)
+
+def resolve_geocode_start_step(work_dir: Path, *, ionosphere_correction: bool) -> str:
+    if ionosphere_correction:
+        if has_pickle_state(work_dir, "ionosphere"):
+            return "geocode"
+        if has_pickle_state(work_dir, "unwrap_low_band") and has_pickle_state(
+            work_dir, "unwrap_high_band"
+        ):
+            return "ionosphere"
+        raise FileNotFoundError(
+            "Unable to resume the ISCE2 geocode stage. Missing PICKLE state for ionosphere or "
+            "unwrap_low_band/unwrap_high_band."
+        )
+
+    if has_pickle_state(work_dir, "unwrap"):
+        return "geocode"
+    raise FileNotFoundError(
+        "Unable to resume the ISCE2 geocode stage. Missing PICKLE state for unwrap."
+    )
 
 
 def print_summary(
@@ -805,6 +1036,25 @@ def print_summary(
     print(f"Target grid:  {config.target_grid_size_m} m")
     print(f"Geo posting:  {config.geo_posting_deg:.12f} deg")
     print(
+        "Enhancement:  "
+        f"split_spectrum={config.ionosphere_correction}, "
+        f"ionosphere={config.ionosphere_correction}, "
+        f"dense_offsets={config.dense_offsets}, "
+        f"rubbersheet_range={config.rubbersheet_range}, "
+        f"rubbersheet_azimuth={config.rubbersheet_azimuth}"
+    )
+    print(
+        "Dense params: "
+        f"window={config.dense_window_width}x{config.dense_window_height}, "
+        f"search={config.dense_search_width}x{config.dense_search_height}, "
+        f"skip={config.dense_skip_width}x{config.dense_skip_height}"
+    )
+    print(
+        "Rubber mask:  "
+        f"snr_threshold={config.rubber_sheet_snr_threshold}, "
+        f"filter_size={config.rubber_sheet_filter_size}"
+    )
+    print(
         "Geocode list: "
         + (
             ", ".join(config.geocode_products)
@@ -816,6 +1066,11 @@ def print_summary(
 
 def main() -> int:
     args = parse_args()
+    if not args.dry_run:
+        dependency_error = validate_runtime_dependencies(args)
+        if dependency_error:
+            print(dependency_error, file=sys.stderr)
+            return 2
     resume_from = str(args.resume_from or "").strip().lower()
     start_stage = resume_from or PIPELINE_STAGE_ORDER[0]
     task_dir = normalize_linux_path(args.task_dir).resolve()
@@ -873,12 +1128,30 @@ def main() -> int:
         bbox=bbox,
         target_grid_size_m=args.target_grid_size_m,
         geo_posting_deg=geo_posting_deg,
-        geocode_products=None if args.full_geocode else list(DEFAULT_EXPORT_GEOCODE_PRODUCTS),
+        geocode_products=(
+            None
+            if args.full_geocode
+            else build_default_geocode_products(
+                ionosphere_correction=bool(args.ionosphere_correction)
+            )
+        ),
+        ionosphere_correction=bool(args.ionosphere_correction),
+        dense_offsets=bool(args.dense_offsets),
+        rubbersheet_range=bool(args.rubbersheet_range),
+        rubbersheet_azimuth=bool(args.rubbersheet_azimuth),
+        rubber_sheet_snr_threshold=float(args.rubber_sheet_snr_threshold),
+        rubber_sheet_filter_size=int(args.rubber_sheet_filter_size),
+        dense_window_width=int(args.dense_window_width),
+        dense_window_height=int(args.dense_window_height),
+        dense_search_width=int(args.dense_search_width),
+        dense_search_height=int(args.dense_search_height),
+        dense_skip_width=int(args.dense_skip_width),
+        dense_skip_height=int(args.dense_skip_height),
     )
     if start_stage == PIPELINE_STAGE_ORDER[0]:
         guard_large_unprepared_base_dem(config.dem_path)
 
-    if resume_from in {"unwrap", "geocode", "export"}:
+    if resume_from in {"unwrap", "geocode"}:
         ensure_geocode_bbox(work_dir, config, args.bbox_margin)
         if should_run_stage(start_stage, "geocode"):
             prepare_geocode_dem(work_dir, config)
@@ -908,20 +1181,42 @@ def main() -> int:
         write_stripmap_xml(xml_path, config)
 
     if should_run_stage(start_stage, "unwrap"):
-        prepare_snaphu_resume(work_dir, config.bbox)
+        unwrap_start_step = resolve_unwrap_start_step(
+            work_dir,
+            ionosphere_correction=config.ionosphere_correction,
+        )
+        unwrap_end_step = "ionosphere" if config.ionosphere_correction else "unwrap"
+        unwrap_stage_name = "02_to_ionosphere" if config.ionosphere_correction else "02_to_unwrap"
         run_logged(
-            "02_unwrap_snaphu",
-            [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--start=unwrap", "--end=unwrap"],
+            unwrap_stage_name,
+            [
+                sys.executable,
+                app_py.as_posix(),
+                xml_path.as_posix(),
+                "--steps",
+                f"--start={unwrap_start_step}",
+                f"--end={unwrap_end_step}",
+            ],
             cwd=work_dir,
-            log_path=work_dir / "02_unwrap_snaphu.log",
+            log_path=work_dir / f"{unwrap_stage_name}.log",
         )
 
     if should_run_stage(start_stage, "geocode"):
-        prepare_geocode_resume(work_dir)
+        geocode_start_step = resolve_geocode_start_step(
+            work_dir,
+            ionosphere_correction=config.ionosphere_correction,
+        )
         cleanup_geocode_outputs(work_dir, config.geocode_products)
         run_logged(
             "03_geocode",
-            [sys.executable, app_py.as_posix(), xml_path.as_posix(), "--steps", "--start=geocode", "--end=geocode"],
+            [
+                sys.executable,
+                app_py.as_posix(),
+                xml_path.as_posix(),
+                "--steps",
+                f"--start={geocode_start_step}",
+                "--end=geocode",
+            ],
             cwd=work_dir,
             log_path=work_dir / "03_geocode.log",
         )
@@ -936,6 +1231,8 @@ def main() -> int:
             coh_threshold=args.coh_threshold,
             reference_mode=args.reference_mode,
             reference_coh_threshold=args.reference_coh_threshold,
+            deramp_mode=args.deramp_mode,
+            deramp_coh_threshold=args.deramp_coh_threshold,
             include_disp_full=args.include_disp_full,
         )
 

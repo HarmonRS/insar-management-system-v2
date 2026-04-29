@@ -239,6 +239,20 @@ function buildExtraPayload(schema, values) {
   return payload;
 }
 
+function buildParamSections(schema) {
+  const sections = [];
+  const indexByTitle = new Map();
+  Object.entries(schema || {}).forEach(([name, item]) => {
+    const title = item.section || '处理参数';
+    if (!indexByTitle.has(title)) {
+      indexByTitle.set(title, sections.length);
+      sections.push({ title, items: [] });
+    }
+    sections[indexByTitle.get(title)].items.push([name, item]);
+  });
+  return sections;
+}
+
 function ParamField({ name, schema, value, disabled, onChange }) {
   const label = schema.label || name;
   const description = schema.description || '';
@@ -280,6 +294,41 @@ function ParamField({ name, schema, value, disabled, onChange }) {
         )}
         {description && <span style={{ color: '#64748b' }}>{description}</span>}
       </label>
+    );
+  }
+
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    return (
+      <div style={{ minWidth: 180, flex: '0 1 220px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+          <label style={{ fontSize: 12, color: '#64748b', display: 'block' }}>{label}</label>
+          {isReadonly && (
+            <span
+              style={{
+                padding: '1px 6px',
+                borderRadius: 999,
+                background: '#e2e8f0',
+                color: '#475569',
+                fontSize: 11,
+              }}
+            >
+              固定值
+            </span>
+          )}
+        </div>
+        <select
+          value={value ?? schema.default ?? schema.enum[0]}
+          disabled={disabled || isReadonly}
+          onChange={event => onChange(name, event.target.value)}
+          style={inputStyle}
+        >
+          {schema.enum.map(option => (
+            <option key={option} value={option}>{option}</option>
+          ))}
+        </select>
+        {description && <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>{description}</div>}
+        {recommendation && <div style={{ fontSize: 11, color: '#2563eb', marginTop: 4 }}>推荐：{recommendation}</div>}
+      </div>
     );
   }
 
@@ -350,10 +399,13 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const currentProfiles = currentEngineObj?.profiles || EMPTY_ARRAY;
   const currentProfileObj = currentProfiles.find(profile => profile.code === selectedProfile) || null;
   const currentParamSchema = currentProfileObj?.params_schema || EMPTY_OBJECT;
+  const currentParamSections = buildParamSections(currentParamSchema);
   const currentDefaultTimeoutSec = Number(currentEngineObj?.default_timeout_seconds || 0) || 0;
   const currentParamHelpText = selectedEngine === 'pyint'
     ? '这些参数影响 PyINT 的多视、并行度以及是否执行解缠/地理编码。建议先直接使用默认值，优先确认当前任务目录里的 LT-1 原始压缩包是否能被正常识别。'
-    : '这些参数主要影响目标网格大小、精裁剪范围、地理编码范围和位移结果掩膜。建议先使用默认值，通常优先只调整目标网格大小；只有在边缘被裁切、时间窗异常或噪声较多时，再继续调整其他参数。';
+    : selectedEngine === 'isce2'
+      ? '这些参数现在按执行、交付、增强分组展示。结果异常时，优先尝试关闭增强项，再回看基础几何和配对质量。'
+      : '这些参数影响当前引擎的生产模板。建议先使用默认值，只有在结果边界、噪声或几何表现异常时再逐项调整。';
   const pyintPreviewBlocksSubmit = selectedEngine === 'pyint' && pyintPreview && pyintPreview.allow_submit === false;
   const latestRunWithTask = runs.find(run => run?.task_id) || null;
   const monitoredTask = activeTask || (
@@ -935,15 +987,24 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
               {currentParamHelpText}
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              {Object.entries(currentParamSchema).map(([name, schema]) => (
-                <ParamField
-                  key={name}
-                  name={name}
-                  schema={schema}
-                  value={engineExtraParams[name]}
-                  disabled={readOnly}
-                  onChange={handleParamChange}
-                />
+              {currentParamSections.map(section => (
+                <div key={section.title} style={{ width: '100%' }}>
+                  <div style={{ fontSize: 12, color: '#0f172a', fontWeight: 600, marginBottom: 8 }}>
+                    {section.title}
+                  </div>
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                    {section.items.map(([name, schema]) => (
+                      <ParamField
+                        key={name}
+                        name={name}
+                        schema={schema}
+                        value={engineExtraParams[name]}
+                        disabled={readOnly}
+                        onChange={handleParamChange}
+                      />
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           </div>

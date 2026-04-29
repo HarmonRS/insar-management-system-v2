@@ -5,7 +5,9 @@ import PsStackSection from '../components/panels/PsStackSection';
 
 function PsResultsPanel({
     onPreviewPsStack,
+    onClearPsStackPreview,
     onCreatePsBatch,
+    onSendToTimeseriesProduction,
     onClearPsResults,
 }) {
     const { psResults } = usePairingStore(useShallow((state) => ({
@@ -18,7 +20,7 @@ function PsResultsPanel({
     return (
         <div className="panel-content panel-scroll-shell">
             {psStacks.length === 0 ? (
-                <p className="empty-state">未找到时序InSAR候选栈。</p>
+                <p className="empty-state">未找到满足 SBAS 至少 3 景要求的时序InSAR候选栈。</p>
             ) : (
                 <>
                     <div className="list-toolbar">
@@ -32,7 +34,9 @@ function PsResultsPanel({
                                 stack={stack}
                                 isReadOnlyUser={isReadOnlyUser}
                                 onPreviewPsStack={onPreviewPsStack}
+                                onClearPsStackPreview={onClearPsStackPreview}
                                 onCreatePsBatch={onCreatePsBatch}
+                                onSendToTimeseriesProduction={onSendToTimeseriesProduction}
                             />
                         ))}
                     </div>

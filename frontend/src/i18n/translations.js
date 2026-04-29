@@ -140,7 +140,7 @@
   // PairingPanel
   { zh: '基于时间基线、空间基线与重叠率筛选干涉对，可选 AOI 限定范围。', en: 'Filter interferometric pairs by temporal baseline, spatial baseline, and overlap ratio. Optional AOI constraint.' },
   { zh: '配对', en: 'Pair' },
-  { zh: 'PS准备', en: 'PS Prep' },
+  { zh: '时序准备', en: 'Timeseries Prep' },
   { zh: '结果与刷新', en: 'Results & Refresh' },
   { zh: '已生成配对', en: 'Generated Pairs' },
   { zh: '已选中', en: 'Selected' },

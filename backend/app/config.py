@@ -506,14 +506,25 @@ class Settings(BaseSettings):
         if not self.TIMESERIES_WSL_DISTRO:
             object.__setattr__(self, "TIMESERIES_WSL_DISTRO", self.WSL_DISTRO or self.ISCE2_WSL_DISTRO)
         if not self.TIMESERIES_ENV_NAME:
-            object.__setattr__(self, "TIMESERIES_ENV_NAME", "isce2_mintpy_v1")
-        if not self.TIMESERIES_PYTHON:
-            env_name = str(self.TIMESERIES_ENV_NAME or "isce2_mintpy_v1").strip() or "isce2_mintpy_v1"
             object.__setattr__(
                 self,
-                "TIMESERIES_PYTHON",
-                f"/home/administrator/miniconda3/envs/{env_name}/bin/python",
+                "TIMESERIES_ENV_NAME",
+                str(self.WSL_SHARED_CONDA_ENV or "insar_wsl_v1").strip() or "insar_wsl_v1",
             )
+        if not self.TIMESERIES_PYTHON:
+            shared_python = str(self.WSL_SHARED_PYTHON or "").strip()
+            if shared_python:
+                object.__setattr__(self, "TIMESERIES_PYTHON", shared_python)
+            else:
+                env_name = (
+                    str(self.TIMESERIES_ENV_NAME or "insar_wsl_v1").strip()
+                    or "insar_wsl_v1"
+                )
+                object.__setattr__(
+                    self,
+                    "TIMESERIES_PYTHON",
+                    f"/home/administrator/miniconda3/envs/{env_name}/bin/python",
+                )
         if not self.TIMESERIES_WORK_ROOT:
             object.__setattr__(
                 self,

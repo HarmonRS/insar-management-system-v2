@@ -8,7 +8,7 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 
@@ -20,17 +20,10 @@ DEFAULT_MANIFEST_PATH = (
     / "configs"
     / "sample_stack_e123p3_n46p1.json"
 )
-DEFAULT_STACK_SCRIPT_WSL = (
-    "/home/administrator/miniconda3/envs/isce2/share/isce2/stripmapStack/stackStripMap.py"
-)
-DEFAULT_CONDA_WSL = "/home/administrator/miniconda3/bin/conda"
-DEFAULT_ISCE2_SHARE_WSL = "/home/administrator/miniconda3/envs/isce2/share/isce2"
-DEFAULT_STRIPMAP_STACK_DIR_WSL = f"{DEFAULT_ISCE2_SHARE_WSL}/stripmapStack"
+DEFAULT_SHARED_ENV_NAME = "insar_wsl_v1"
+DEFAULT_CONDA_ROOT_WSL = "/home/administrator/miniconda3"
+DEFAULT_CONDA_WSL = f"{DEFAULT_CONDA_ROOT_WSL}/bin/conda"
 SUPPORTED_STACK_WORKFLOWS = ("slc", "interferogram", "ionosphere")
-DEFAULT_STACK_TEXT_CMD = (
-    f"export PATH={DEFAULT_STRIPMAP_STACK_DIR_WSL}:$PATH; "
-    f"export PYTHONPATH={DEFAULT_STRIPMAP_STACK_DIR_WSL}:{DEFAULT_ISCE2_SHARE_WSL}${{PYTHONPATH:+:$PYTHONPATH}}; "
-)
 
 
 def windows_to_wsl(path: str | Path) -> str:
@@ -55,6 +48,47 @@ def load_isce2_input_helper_module():
 
 
 ISCE2_INPUT_HELPER = load_isce2_input_helper_module()
+
+
+def _default_python_wsl(env_name: str) -> str:
+    normalized_env = str(env_name or "").strip() or DEFAULT_SHARED_ENV_NAME
+    return f"{DEFAULT_CONDA_ROOT_WSL}/envs/{normalized_env}/bin/python"
+
+
+def _resolve_runtime_paths(env_values: Dict[str, Any]) -> Dict[str, str]:
+    env_name = str(
+        env_values.get("TIMESERIES_ENV_NAME")
+        or env_values.get("WSL_SHARED_CONDA_ENV")
+        or DEFAULT_SHARED_ENV_NAME
+    ).strip() or DEFAULT_SHARED_ENV_NAME
+    python_wsl = str(
+        env_values.get("TIMESERIES_PYTHON")
+        or env_values.get("WSL_SHARED_PYTHON")
+        or env_values.get("ISCE2_PYTHON")
+        or _default_python_wsl(env_name)
+    ).strip() or _default_python_wsl(env_name)
+
+    python_path = PurePosixPath(python_wsl)
+    env_root = python_path.parent.parent
+    conda_root = env_root.parent.parent
+    conda_bin_wsl = str(conda_root / "bin" / "conda")
+    isce2_share_wsl = str(env_root / "share" / "isce2")
+    stripmap_stack_dir_wsl = str(PurePosixPath(isce2_share_wsl) / "stripmapStack")
+    stack_script_wsl = str(PurePosixPath(stripmap_stack_dir_wsl) / "stackStripMap.py")
+    stack_text_cmd = (
+        f"export PATH={stripmap_stack_dir_wsl}:$PATH; "
+        f"export PYTHONPATH={stripmap_stack_dir_wsl}:{isce2_share_wsl}${{PYTHONPATH:+:$PYTHONPATH}}; "
+    )
+
+    return {
+        "env_name": env_name,
+        "python_wsl": python_wsl,
+        "conda_bin_wsl": conda_bin_wsl,
+        "isce2_share_wsl": isce2_share_wsl,
+        "stripmap_stack_dir_wsl": stripmap_stack_dir_wsl,
+        "stack_script_wsl": stack_script_wsl,
+        "stack_text_cmd": stack_text_cmd,
+    }
 
 
 def require_file(path: Path, label: str) -> None:
@@ -204,14 +238,15 @@ def render_stack_command(
     work_dir_wsl: str,
     reference_date: str,
     workflow: str,
+    runtime: Dict[str, str],
 ) -> List[str]:
     return [
-        DEFAULT_CONDA_WSL,
+        runtime["conda_bin_wsl"],
         "run",
         "-n",
-        "isce2",
+        runtime["env_name"],
         "python",
-        DEFAULT_STACK_SCRIPT_WSL,
+        runtime["stack_script_wsl"],
         "-s",
         slc_dir_wsl,
         "-d",
@@ -226,7 +261,7 @@ def render_stack_command(
         "-u",
         "snaphu",
         "-c",
-        DEFAULT_STACK_TEXT_CMD,
+        runtime["stack_text_cmd"],
     ]
 
 
@@ -341,6 +376,7 @@ def render_run_script(report: Dict[str, Any]) -> str:
     reference_date = report["reference_date"]
     dates = " ".join(scene["date"] for scene in report["scenes"])
     command = report["stack_command"]["shell"]
+    runtime = report["runtime"]
 
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -349,8 +385,10 @@ SLC_DIR={shell_quote(slc_dir)}
 WORK_DIR={shell_quote(work_dir)}
 DEM={shell_quote(dem_path)}
 REFERENCE_DATE={shell_quote(reference_date)}
-ISCE2_SHARE={shell_quote(DEFAULT_ISCE2_SHARE_WSL)}
-STRIPMAP_STACK_DIR={shell_quote(DEFAULT_STRIPMAP_STACK_DIR_WSL)}
+CONDA_ENV={shell_quote(runtime["env_name"])}
+CONDA_BIN={shell_quote(runtime["conda_bin_wsl"])}
+ISCE2_SHARE={shell_quote(runtime["isce2_share_wsl"])}
+STRIPMAP_STACK_DIR={shell_quote(runtime["stripmap_stack_dir_wsl"])}
 DATES=({dates})
 
 export PYTHONPATH="$STRIPMAP_STACK_DIR:$ISCE2_SHARE${{PYTHONPATH:+:$PYTHONPATH}}"
@@ -361,6 +399,8 @@ echo "SLC root: $SLC_DIR"
 echo "Work dir: $WORK_DIR"
 echo "DEM: $DEM"
 echo "Reference date: $REFERENCE_DATE"
+echo "Conda env: $CONDA_ENV"
+echo "Conda bin: $CONDA_BIN"
 echo "PYTHONPATH: $PYTHONPATH"
 echo "PATH prefix: $STRIPMAP_STACK_DIR"
 
@@ -436,6 +476,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     env_values = ISCE2_INPUT_HELPER.load_env_file(REPO_ROOT / ".env")
+    runtime = _resolve_runtime_paths(env_values)
 
     manifest_path = Path(args.manifest_path).resolve()
     require_file(manifest_path, "stack manifest")
@@ -506,6 +547,7 @@ def main() -> int:
         work_dir_wsl=windows_to_wsl(stack_work_dir),
         reference_date=manifest["reference_date"],
         workflow=args.workflow,
+        runtime=runtime,
     )
 
     blockers = build_blockers(scene_plans, orbit_pool=orbit_pool, dem_path=dem_path)
@@ -530,6 +572,7 @@ def main() -> int:
         "processing_workflow": args.workflow,
         "sensor_name": "LUTAN1",
         "stack_driver": "isce2.stripmapStack.stackStripMap",
+        "runtime": runtime,
         "workspace": {
             "root_windows": str(scratch_root),
             "root_wsl": windows_to_wsl(scratch_root),

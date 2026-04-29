@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import sys
+import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 try:
     from .convert_lt1_orbit_to_isce_xml import (
@@ -37,6 +39,7 @@ DEFAULT_WSL_DEM_CANDIDATES = (
     "/mnt/d/SRTM30m/SRTMDEM_RSP_SARscape",
 )
 DEFAULT_WINDOWS_ORBIT_POOL_CANDIDATES = (r"D:\orbit_pools\isce2",)
+DEM_SIDECAR_PROPERTY_NAMES = ("file_name", "metadata_location", "extra_file_name")
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,24 @@ def resolve_prepared_dem_path(
     return resolve_existing_prepared_file(candidates, path_transform=path_transform)
 
 
+def repair_related_dem_sidecars(
+    dem_path: Path,
+    *,
+    write_changes: bool = True,
+) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in _related_dem_sidecar_candidates(dem_path):
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        report = repair_dem_sidecar_paths(candidate, write_changes=write_changes)
+        if report.get("exists"):
+            reports.append(report)
+    return reports
+
+
 def resolve_existing_directory(
     candidates: Iterable[str | Path],
     path_transform: PathTransform = identity_path_transform,
@@ -160,6 +181,63 @@ def resolve_existing_prepared_file(
         if path.exists() and Path(str(path) + ".xml").exists():
             return path
     return None
+
+
+def repair_dem_sidecar_paths(
+    dem_path: Path,
+    *,
+    write_changes: bool = True,
+) -> dict[str, Any]:
+    normalized_path = Path(str(dem_path))
+    xml_path = Path(str(normalized_path) + ".xml")
+    vrt_path = Path(str(normalized_path) + ".vrt")
+    report: dict[str, Any] = {
+        "dem_path": str(normalized_path),
+        "xml_path": str(xml_path),
+        "vrt_path": str(vrt_path),
+        "exists": xml_path.exists(),
+        "changed": False,
+        "updated_fields": [],
+        "expected": {},
+        "current": {},
+    }
+    if not xml_path.exists():
+        return report
+
+    expected_values = {
+        "file_name": _to_isce_sidecar_path(normalized_path),
+        "metadata_location": _to_isce_sidecar_path(xml_path),
+        "extra_file_name": _to_isce_sidecar_path(vrt_path) if vrt_path.exists() else "",
+    }
+
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    updates: list[str] = []
+    for prop in root.findall("property"):
+        name = str(prop.get("name") or "").strip()
+        if name not in DEM_SIDECAR_PROPERTY_NAMES:
+            continue
+        value_node = prop.find("value")
+        if value_node is None:
+            value_node = ET.SubElement(prop, "value")
+        current_value = str(value_node.text or "").strip()
+        expected_value = expected_values.get(name, "")
+        report["current"][name] = current_value
+        report["expected"][name] = expected_value
+        if not expected_value:
+            continue
+        if current_value == expected_value:
+            continue
+        value_node.text = expected_value
+        updates.append(name)
+
+    if updates and write_changes:
+        ET.indent(tree, space="    ")
+        tree.write(xml_path, encoding="utf-8")
+
+    report["changed"] = bool(updates)
+    report["updated_fields"] = updates
+    return report
 
 
 def ensure_lt1_orbit_xml(
@@ -251,3 +329,24 @@ def _prepared_dem_variants(value: str | Path) -> tuple[str | Path, ...]:
     if text.lower().endswith(".wgs84"):
         return (value,)
     return (f"{text}.wgs84", value)
+
+
+def _related_dem_sidecar_candidates(dem_path: Path) -> tuple[Path, ...]:
+    text = str(dem_path).strip()
+    if not text:
+        return ()
+    if text.lower().endswith(".wgs84"):
+        raw_path = Path(text[:-6])
+        return (dem_path, raw_path)
+    prepared_path = Path(text + ".wgs84")
+    return (dem_path, prepared_path)
+
+
+def _to_isce_sidecar_path(path: Path) -> str:
+    text = str(path).strip()
+    match = re.match(r"^([A-Za-z]):[\\/](.*)$", text)
+    if match:
+        drive = match.group(1).lower()
+        rest = match.group(2).replace("\\", "/")
+        return f"/mnt/{drive}/{rest}"
+    return Path(text).as_posix()

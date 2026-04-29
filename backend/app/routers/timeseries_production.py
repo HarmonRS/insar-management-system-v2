@@ -31,6 +31,45 @@ class TimeseriesRunCreateRequest(BaseModel):
         return text
 
 
+class TimeseriesWslCheckRequest(BaseModel):
+    distro: Optional[str] = Field(default=None, max_length=128)
+    smoke_test: bool = Field(default=False)
+
+    @field_validator("distro", mode="before")
+    @classmethod
+    def _normalize_distro(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+
+class TimeseriesPreflightRequest(BaseModel):
+    batch_id: str = Field(..., description="PS batch id")
+    reference_date: Optional[str] = Field(default=None, pattern=r"^\d{8}$|^$")
+    water_mask_mode: str = Field(default="synthetic_fallback", max_length=64)
+
+    @field_validator("batch_id", mode="before")
+    @classmethod
+    def _validate_batch_id(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("batch_id is required")
+        return text
+
+
+class TimeseriesRetryStepRequest(BaseModel):
+    step_id: str = Field(..., max_length=128)
+
+    @field_validator("step_id", mode="before")
+    @classmethod
+    def _validate_step_id(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("step_id is required")
+        return text
+
+
 @router.post("/runs", status_code=202)
 async def create_timeseries_run(
     request: TimeseriesRunCreateRequest,
@@ -51,6 +90,39 @@ async def create_timeseries_run(
         message = str(exc)
         status_code = 409 if "冲突" in message else 400
         raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.post("/wsl-check")
+async def run_timeseries_wsl_check(
+    request: TimeseriesWslCheckRequest,
+    current_user: AuthUserORM = Depends(_require_admin),
+):
+    _ = current_user
+    try:
+        return await timeseries_service.get_runtime_report(
+            distro=request.distro,
+            smoke_test=request.smoke_test,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/preflight")
+async def run_timeseries_preflight(
+    request: TimeseriesPreflightRequest,
+    current_user: AuthUserORM = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = current_user
+    try:
+        return await timeseries_service.get_preflight_report(
+            batch_id=request.batch_id,
+            reference_date=request.reference_date,
+            water_mask_mode=request.water_mask_mode,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/runs")
@@ -75,3 +147,25 @@ async def get_timeseries_run_detail(
     if detail is None:
         raise HTTPException(status_code=404, detail="Timeseries run not found")
     return detail
+
+
+@router.post("/runs/{run_id}/retry-step", status_code=202)
+async def retry_timeseries_run_step(
+    run_id: str,
+    request: TimeseriesRetryStepRequest,
+    current_user: AuthUserORM = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = current_user
+    try:
+        return await timeseries_service.retry_step(
+            run_id,
+            step_id=request.step_id,
+            db=db,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 409 if "cannot be retried" in message or "running steps" in message else 400
+        if "not found" in message:
+            status_code = 404
+        raise HTTPException(status_code=status_code, detail=message) from exc

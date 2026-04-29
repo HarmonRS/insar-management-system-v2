@@ -23,6 +23,28 @@ class WorkflowService:
     Lightweight workflow orchestration service backed by DB.
     """
 
+    @staticmethod
+    def _collect_downstream_step_ids(
+        target_step_id: str,
+        steps: List[WorkflowStepORM],
+    ) -> set[str]:
+        reverse_graph: Dict[str, List[str]] = {}
+        for step in steps:
+            for dependency in step.depends_on or []:
+                reverse_graph.setdefault(str(dependency), []).append(step.step_id)
+
+        pending = [target_step_id]
+        visited: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            for child_step_id in reverse_graph.get(current, []):
+                if child_step_id not in visited:
+                    pending.append(child_step_id)
+        return visited
+
     async def create_run(
         self,
         workflow_name: str,
@@ -200,6 +222,75 @@ class WorkflowService:
         finally:
             if gen_db:
                 await db.close()
+
+    async def retry_step(
+        self,
+        run_id: str,
+        step_id: str,
+        db: Optional[AsyncSession] = None,
+    ) -> Dict[str, Any]:
+        gen_db = db is None
+        if gen_db:
+            db = _new_session()
+
+        try:
+            run_result = await db.execute(
+                select(WorkflowRunORM).where(WorkflowRunORM.run_id == run_id)
+            )
+            run = run_result.scalar_one_or_none()
+            if run is None:
+                raise ValueError(f"Workflow run not found: {run_id}")
+
+            steps_result = await db.execute(
+                select(WorkflowStepORM)
+                .where(WorkflowStepORM.run_id == run_id)
+                .order_by(WorkflowStepORM.id.asc())
+            )
+            steps = steps_result.scalars().all()
+            if not steps:
+                raise ValueError(f"Workflow run has no steps: {run_id}")
+
+            step_map = {step.step_id: step for step in steps}
+            target = step_map.get(step_id)
+            if target is None:
+                raise ValueError(f"Workflow step not found: {step_id}")
+
+            if any(step.status == "RUNNING" for step in steps):
+                raise ValueError("Workflow still has running steps and cannot be retried.")
+
+            retryable_statuses = {"FAILED", "COMPLETED", "CANCELLED", "SKIPPED"}
+            if target.status not in retryable_statuses:
+                raise ValueError(
+                    f"Workflow step '{step_id}' is not retryable from status '{target.status}'."
+                )
+
+            reset_step_ids = self._collect_downstream_step_ids(step_id, steps)
+            for step in steps:
+                if step.step_id not in reset_step_ids:
+                    continue
+                step.status = "READY" if step.step_id == step_id else "PENDING"
+                step.error = None
+                step.outputs = None
+                step.started_at = None
+                step.ended_at = None
+
+            run.status = "RUNNING"
+            run.ended_at = None
+
+            if gen_db:
+                await db.commit()
+            else:
+                await db.flush()
+        finally:
+            if gen_db:
+                await db.close()
+
+        await self.enqueue_ready_steps(run_id, db=None if gen_db else db)
+        return {
+            "run_id": run_id,
+            "step_id": step_id,
+            "reset_steps": sorted(reset_step_ids),
+        }
 
     async def _advance_ready_steps(self, run_id: str, db: AsyncSession) -> None:
         result = await db.execute(

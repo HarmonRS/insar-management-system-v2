@@ -329,9 +329,14 @@ export default function PsinsarCatalogPanel({
                   </div>
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: '#334155' }}>
+                  <div><strong>Stack Plan:</strong>{selectedProduct.plan_id || '-'}</div>
+                  <div><strong>Plan Strategy:</strong>{selectedProduct.plan_strategy || '-'}</div>
                   <div><strong>名称：</strong>{selectedProduct.display_name || '-'}</div>
                   <div><strong>产品编号：</strong>{selectedProduct.product_id || '-'}</div>
-                  <div><strong>运行标识：</strong>{selectedProduct.run_key || '-'}</div>
+                  <div><strong>运行标识：</strong>{selectedProduct.run_id || selectedProduct.run_key || '-'}</div>
+                  <div><strong>来源批次：</strong>{selectedProduct.batch_id || '-'}</div>
+                  <div><strong>任务标识：</strong>{selectedProduct.task_id || '-'}</div>
+                  <div><strong>工作流标识：</strong>{selectedProduct.workflow_run_id || '-'}</div>
                   <div><strong>参考日期：</strong>{selectedProduct.reference_date || '-'}</div>
                   <div><strong>影像数：</strong>{selectedProduct.stack_size || 0}</div>
                   <div><strong>引擎：</strong>{selectedProduct.engine_code || '-'}</div>
@@ -348,6 +353,21 @@ export default function PsinsarCatalogPanel({
                 <div><strong>主科学产物：</strong>{selectedProduct.source_primary_path || '-'}</div>
                 <div><strong>主展示产物：</strong>{selectedProduct.primary_asset_path || '-'}</div>
               </div>
+
+              {selectedProduct.source_summary && (
+                <div style={{ borderTop: '1px dashed #cbd5e1', paddingTop: 10 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>来源追踪</div>
+                  <div style={{ fontSize: 12, color: '#334155', lineHeight: 1.7 }}>
+                    <div><strong>Stack Plan:</strong>{selectedProduct.source_summary?.plan_id || selectedProduct.plan_id || '-'}</div>
+                    <div><strong>Plan Strategy:</strong>{selectedProduct.source_summary?.plan_strategy || selectedProduct.plan_strategy || '-'}</div>
+                    <div><strong>规划来源：</strong>{selectedProduct.source_summary?.planning_context?.source || '-'}</div>
+                    <div><strong>规划策略：</strong>{selectedProduct.source_summary?.planning_context?.strategy || '-'}</div>
+                    <div><strong>场景数：</strong>{selectedProduct.source_summary?.planning_context?.scene_count || '-'}</div>
+                    <div><strong>工作目录：</strong>{selectedProduct.source_summary?.work_dir || '-'}</div>
+                    <div><strong>原生输出：</strong>{selectedProduct.source_summary?.native_output_dir || '-'}</div>
+                  </div>
+                </div>
+              )}
 
               <div style={{ borderTop: '1px dashed #cbd5e1', paddingTop: 10 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>质量摘要</div>

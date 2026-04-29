@@ -115,7 +115,7 @@ export default function PairPlanningPanel({
                         {en ? 'Pair' : '配对'}
                     </button>
                     <button onClick={onOpenPsModal} disabled={isLoading || !hasEnoughRadarScenesForPlanning || isReadOnlyUser} style={{ flex: 1 }}>
-                        {en ? 'PS Prep' : 'PS 准备'}
+                        {en ? 'Timeseries Prep' : '时序准备'}
                     </button>
                 </div>
             </div>

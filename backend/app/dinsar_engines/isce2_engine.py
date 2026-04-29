@@ -27,8 +27,22 @@ LT1_FIXED_WAVELENGTH = 0.23793052222222222
 DEFAULT_TARGET_GRID_SIZE_M = 10
 DEFAULT_BBOX_MARGIN = 0.05
 DEFAULT_COH_THRESHOLD = 0.05
-DEFAULT_REFERENCE_MODE = "none"
+DEFAULT_REFERENCE_MODE = "coh_median"
 DEFAULT_REFERENCE_COH_THRESHOLD = 0.30
+DEFAULT_DERAMP_MODE = "plane"
+DEFAULT_DERAMP_COH_THRESHOLD = 0.30
+DEFAULT_DENSE_OFFSETS = True
+DEFAULT_RUBBERSHEET_RANGE = True
+DEFAULT_RUBBERSHEET_AZIMUTH = True
+DEFAULT_IONOSPHERE_CORRECTION = True
+DEFAULT_RUBBER_SHEET_SNR_THRESHOLD = 5.0
+DEFAULT_RUBBER_SHEET_FILTER_SIZE = 9
+DEFAULT_DENSE_WINDOW_WIDTH = 64
+DEFAULT_DENSE_WINDOW_HEIGHT = 64
+DEFAULT_DENSE_SEARCH_WIDTH = 20
+DEFAULT_DENSE_SEARCH_HEIGHT = 20
+DEFAULT_DENSE_SKIP_WIDTH = 32
+DEFAULT_DENSE_SKIP_HEIGHT = 32
 ORBIT_MARGIN_MIN_SEC = 60.0
 ORBIT_MARGIN_MAX_SEC = 120.0
 TARGET_GRID_SIZE_MIN_M = 5
@@ -36,6 +50,7 @@ TARGET_GRID_SIZE_MAX_M = 100
 RERUN_MODE_UNFINISHED_ONLY = "unfinished_only"
 RESUME_STAGE_CHOICES = {"", "unwrap", "geocode", "export"}
 REFERENCE_MODE_CHOICES = {"none", "coh_median"}
+DERAMP_MODE_CHOICES = {"none", "plane"}
 
 
 def _read_env(name: str, default: str = "") -> str:
@@ -206,7 +221,7 @@ class Isce2Engine(DinsarEngine):
     # Profiles
     # ------------------------------------------------------------------
 
-    def get_profiles(self) -> List[EngineProfile]:
+    def _legacy_get_profiles(self) -> List[EngineProfile]:
         return [
             EngineProfile(
                 code="lt1_stripmap",
@@ -281,6 +296,243 @@ class Isce2Engine(DinsarEngine):
             ),
         ]
 
+    def get_profiles(self) -> List[EngineProfile]:
+        return [
+            EngineProfile(
+                code="lt1_stripmap",
+                label="LT-1 Stripmap",
+                description=(
+                    "Managed LT-1 stripmap D-InSAR production in WSL with the standard "
+                    "ISCE2 enhancement steps and split-spectrum ionosphere correction enabled by default."
+                ),
+                params_schema={
+                    "force": {
+                        "label": "Rebuild Work Dir",
+                        "type": "boolean",
+                        "default": False,
+                        "section": "Execution",
+                        "description": "Delete the existing work directory before rerunning the task.",
+                        "recommendation": "Use only when the previous work directory can be discarded.",
+                    },
+                    "target_grid_size_m": {
+                        "label": "Target Grid Size (m)",
+                        "type": "number",
+                        "default": DEFAULT_TARGET_GRID_SIZE_M,
+                        "step": 1,
+                        "min": TARGET_GRID_SIZE_MIN_M,
+                        "max": TARGET_GRID_SIZE_MAX_M,
+                        "section": "Execution",
+                        "description": "Controls multilook scale and geocoded output spacing.",
+                        "recommendation": "Use 10 by default; try 5 for more detail or 15-20 for more stability.",
+                    },
+                    "bbox": {
+                        "label": "Geocode BBox",
+                        "type": "string",
+                        "default": "",
+                        "placeholder": "south,north,west,east",
+                        "section": "Execution",
+                        "description": "Optional manual geocode bounding box.",
+                        "recommendation": "Leave empty unless you need to constrain the output area.",
+                    },
+                    "coh_threshold": {
+                        "label": "Coherence Threshold",
+                        "type": "number",
+                        "default": DEFAULT_COH_THRESHOLD,
+                        "step": 0.01,
+                        "min": 0,
+                        "max": 1,
+                        "section": "Delivery",
+                        "description": "Masks displacement pixels below this coherence threshold in the exported product.",
+                        "recommendation": "Use 0.05 for broad inspection and 0.10+ for stricter delivery.",
+                    },
+                    "reference_mode": {
+                        "label": "Reference Mode",
+                        "type": "string",
+                        "default": DEFAULT_REFERENCE_MODE,
+                        "enum": sorted(REFERENCE_MODE_CHOICES),
+                        "section": "Delivery",
+                        "description": "Normalizes the final displacement field before delivery.",
+                        "recommendation": "Use coh_median for production so the result is centered on stable high-coherence pixels.",
+                    },
+                    "reference_coh_threshold": {
+                        "label": "Reference Coh Threshold",
+                        "type": "number",
+                        "default": DEFAULT_REFERENCE_COH_THRESHOLD,
+                        "step": 0.01,
+                        "min": 0,
+                        "max": 1,
+                        "section": "Delivery",
+                        "description": "Minimum coherence used when selecting pixels for displacement referencing.",
+                        "recommendation": "Use 0.30 by default; raise it only when you have enough high-quality support pixels.",
+                    },
+                    "deramp_mode": {
+                        "label": "Deramp Mode",
+                        "type": "string",
+                        "default": DEFAULT_DERAMP_MODE,
+                        "enum": sorted(DERAMP_MODE_CHOICES),
+                        "section": "Delivery",
+                        "description": "Removes long-wavelength ramp residuals after referencing.",
+                        "recommendation": "Use plane for LT-1 production unless you are explicitly debugging raw ISCE2 output.",
+                    },
+                    "deramp_coh_threshold": {
+                        "label": "Deramp Coh Threshold",
+                        "type": "number",
+                        "default": DEFAULT_DERAMP_COH_THRESHOLD,
+                        "step": 0.01,
+                        "min": 0,
+                        "max": 1,
+                        "section": "Delivery",
+                        "description": "Minimum coherence used when selecting pixels for deramp fitting.",
+                        "recommendation": "Use 0.30 by default so the ramp is fitted on cleaner support pixels.",
+                    },
+                    "bbox_margin": {
+                        "label": "BBox Margin (deg)",
+                        "type": "number",
+                        "default": DEFAULT_BBOX_MARGIN,
+                        "step": 0.01,
+                        "min": 0,
+                        "section": "Execution",
+                        "description": "Extra degree margin added to the auto-estimated geocode bounding box.",
+                        "recommendation": "Use 0.05 by default; increase only if edges are clipped.",
+                    },
+                    "ionosphere_correction": {
+                        "label": "Enable Split-Spectrum Ionosphere Correction",
+                        "type": "boolean",
+                        "default": DEFAULT_IONOSPHERE_CORRECTION,
+                        "section": "Enhancement",
+                        "description": "Runs the split-spectrum dispersive correction branch before geocode and export.",
+                        "recommendation": "Keep enabled by default; disable it when the correction itself is suspected to degrade a scene.",
+                    },
+                    "dense_offsets": {
+                        "label": "Enable Dense Offsets",
+                        "type": "boolean",
+                        "default": DEFAULT_DENSE_OFFSETS,
+                        "section": "Enhancement",
+                        "description": "Run ISCE2 dense offset estimation before fine resampling.",
+                        "recommendation": "Keep enabled for LT-1 stripmap production.",
+                    },
+                    "rubbersheet_range": {
+                        "label": "Enable Range Rubbersheeting",
+                        "type": "boolean",
+                        "default": DEFAULT_RUBBERSHEET_RANGE,
+                        "section": "Enhancement",
+                        "description": "Update range offsets with dense offsets before fine resampling.",
+                        "recommendation": "Keep enabled for LT-1 stripmap production.",
+                    },
+                    "rubbersheet_azimuth": {
+                        "label": "Enable Azimuth Rubbersheeting",
+                        "type": "boolean",
+                        "default": DEFAULT_RUBBERSHEET_AZIMUTH,
+                        "section": "Enhancement",
+                        "description": "Update azimuth offsets with dense offsets before fine resampling.",
+                        "recommendation": "Keep enabled for LT-1 stripmap production.",
+                    },
+                    "rubber_sheet_snr_threshold": {
+                        "label": "Rubbersheet SNR Threshold",
+                        "type": "number",
+                        "default": DEFAULT_RUBBER_SHEET_SNR_THRESHOLD,
+                        "step": 0.5,
+                        "min": 0,
+                        "section": "Enhancement",
+                        "description": "SNR threshold used when masking dense offsets for rubbersheeting.",
+                        "recommendation": "Start with 5.0 unless a scene-specific diagnosis suggests otherwise.",
+                    },
+                    "rubber_sheet_filter_size": {
+                        "label": "Rubbersheet Filter Size",
+                        "type": "number",
+                        "default": DEFAULT_RUBBER_SHEET_FILTER_SIZE,
+                        "step": 1,
+                        "min": 1,
+                        "section": "Enhancement",
+                        "description": "Median filter size used when smoothing masked dense offsets.",
+                        "recommendation": "Start with 9.",
+                    },
+                    "dense_window_width": {
+                        "label": "Dense Window Width",
+                        "type": "number",
+                        "default": DEFAULT_DENSE_WINDOW_WIDTH,
+                        "step": 1,
+                        "min": 1,
+                        "section": "Enhancement",
+                        "description": "Dense offset correlation window width.",
+                        "recommendation": "Start with 64.",
+                    },
+                    "dense_window_height": {
+                        "label": "Dense Window Height",
+                        "type": "number",
+                        "default": DEFAULT_DENSE_WINDOW_HEIGHT,
+                        "step": 1,
+                        "min": 1,
+                        "section": "Enhancement",
+                        "description": "Dense offset correlation window height.",
+                        "recommendation": "Start with 64.",
+                    },
+                    "dense_search_width": {
+                        "label": "Dense Search Width",
+                        "type": "number",
+                        "default": DEFAULT_DENSE_SEARCH_WIDTH,
+                        "step": 1,
+                        "min": 1,
+                        "section": "Enhancement",
+                        "description": "Dense offset search width.",
+                        "recommendation": "Start with 20.",
+                    },
+                    "dense_search_height": {
+                        "label": "Dense Search Height",
+                        "type": "number",
+                        "default": DEFAULT_DENSE_SEARCH_HEIGHT,
+                        "step": 1,
+                        "min": 1,
+                        "section": "Enhancement",
+                        "description": "Dense offset search height.",
+                        "recommendation": "Start with 20.",
+                    },
+                    "dense_skip_width": {
+                        "label": "Dense Skip Width",
+                        "type": "number",
+                        "default": DEFAULT_DENSE_SKIP_WIDTH,
+                        "step": 1,
+                        "min": 1,
+                        "section": "Enhancement",
+                        "description": "Dense offset sampling stride in range direction.",
+                        "recommendation": "Start with 32.",
+                    },
+                    "dense_skip_height": {
+                        "label": "Dense Skip Height",
+                        "type": "number",
+                        "default": DEFAULT_DENSE_SKIP_HEIGHT,
+                        "step": 1,
+                        "min": 1,
+                        "section": "Enhancement",
+                        "description": "Dense offset sampling stride in azimuth direction.",
+                        "recommendation": "Start with 32.",
+                    },
+                    "wavelength": {
+                        "label": "Radar Wavelength (m)",
+                        "type": "number",
+                        "default": LT1_FIXED_WAVELENGTH,
+                        "step": 0.000001,
+                        "readonly": True,
+                        "include_in_payload": False,
+                        "section": "Execution",
+                        "description": "Fixed LT-1 radar wavelength used for displacement conversion.",
+                        "recommendation": "This value is locked by the system.",
+                    },
+                    "orbit_margin_sec": {
+                        "label": "Orbit Margin (sec)",
+                        "type": "number",
+                        "default": ORBIT_MARGIN_MIN_SEC,
+                        "step": 1,
+                        "min": ORBIT_MARGIN_MIN_SEC,
+                        "max": ORBIT_MARGIN_MAX_SEC,
+                        "section": "Execution",
+                        "description": "Extra time margin preserved when clipping the precise orbit XML.",
+                        "recommendation": "Use 60 by default; raise to 90-120 only if scene timing is tight.",
+                    },
+                },
+            ),
+        ]
+
     def normalize_extra(self, extra: Dict[str, Any] | None) -> Dict[str, Any]:
         normalized: Dict[str, Any] = dict(extra or {})
         normalized.pop("wavelength", None)
@@ -330,6 +582,22 @@ class Isce2Engine(DinsarEngine):
                 raise ValueError("reference_coh_threshold must be between 0 and 1")
             normalized["reference_coh_threshold"] = reference_coh_threshold
 
+        if "deramp_mode" in normalized and normalized["deramp_mode"] is not None:
+            deramp_mode = str(normalized["deramp_mode"]).strip().lower()
+            if deramp_mode not in DERAMP_MODE_CHOICES:
+                supported_modes = ", ".join(sorted(DERAMP_MODE_CHOICES))
+                raise ValueError(f"deramp_mode must be one of: {supported_modes}")
+            normalized["deramp_mode"] = deramp_mode
+
+        if "deramp_coh_threshold" in normalized and normalized["deramp_coh_threshold"] is not None:
+            try:
+                deramp_coh_threshold = float(normalized["deramp_coh_threshold"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("deramp_coh_threshold must be numeric") from exc
+            if deramp_coh_threshold < 0 or deramp_coh_threshold > 1:
+                raise ValueError("deramp_coh_threshold must be between 0 and 1")
+            normalized["deramp_coh_threshold"] = deramp_coh_threshold
+
         if "bbox_margin" in normalized and normalized["bbox_margin"] is not None:
             try:
                 bbox_margin = float(normalized["bbox_margin"])
@@ -338,6 +606,40 @@ class Isce2Engine(DinsarEngine):
             if bbox_margin < 0:
                 raise ValueError("范围外扩量不能小于 0。")
             normalized["bbox_margin"] = bbox_margin
+
+        for bool_key in ("ionosphere_correction", "dense_offsets", "rubbersheet_range", "rubbersheet_azimuth"):
+            if bool_key in normalized:
+                normalized[bool_key] = bool(normalized[bool_key])
+
+        if "rubber_sheet_snr_threshold" in normalized and normalized["rubber_sheet_snr_threshold"] is not None:
+            try:
+                snr_threshold = float(normalized["rubber_sheet_snr_threshold"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("rubber_sheet_snr_threshold must be numeric") from exc
+            if snr_threshold < 0:
+                raise ValueError("rubber_sheet_snr_threshold must be non-negative")
+            normalized["rubber_sheet_snr_threshold"] = snr_threshold
+
+        for int_key in (
+            "rubber_sheet_filter_size",
+            "dense_window_width",
+            "dense_window_height",
+            "dense_search_width",
+            "dense_search_height",
+            "dense_skip_width",
+            "dense_skip_height",
+        ):
+            if int_key not in normalized or normalized[int_key] is None:
+                continue
+            try:
+                numeric_value = float(normalized[int_key])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{int_key} must be numeric") from exc
+            if int(numeric_value) != numeric_value:
+                raise ValueError(f"{int_key} must be an integer")
+            if int(numeric_value) <= 0:
+                raise ValueError(f"{int_key} must be greater than 0")
+            normalized[int_key] = int(numeric_value)
 
         if "orbit_margin_sec" in normalized and normalized["orbit_margin_sec"] is not None:
             try:
@@ -548,7 +850,21 @@ class Isce2Engine(DinsarEngine):
         coh_threshold: Any,
         reference_mode: str,
         reference_coh_threshold: Any,
+        deramp_mode: str,
+        deramp_coh_threshold: Any,
         bbox_margin: Any,
+        dense_offsets: bool,
+        rubbersheet_range: bool,
+        rubbersheet_azimuth: bool,
+        ionosphere_correction: bool,
+        rubber_sheet_snr_threshold: Any,
+        rubber_sheet_filter_size: Any,
+        dense_window_width: Any,
+        dense_window_height: Any,
+        dense_search_width: Any,
+        dense_search_height: Any,
+        dense_skip_width: Any,
+        dense_skip_height: Any,
         wavelength: Any,
         orbit_margin_sec: Any,
         full_geocode: bool,
@@ -586,11 +902,26 @@ class Isce2Engine(DinsarEngine):
                 "coh_threshold": coh_threshold,
                 "reference_mode": str(reference_mode or "").strip(),
                 "reference_coh_threshold": reference_coh_threshold,
+                "deramp_mode": str(deramp_mode or "").strip(),
+                "deramp_coh_threshold": deramp_coh_threshold,
                 "bbox_margin": bbox_margin,
+                "dense_offsets": bool(dense_offsets),
+                "rubbersheet_range": bool(rubbersheet_range),
+                "rubbersheet_azimuth": bool(rubbersheet_azimuth),
+                "ionosphere_correction": bool(ionosphere_correction),
+                "rubber_sheet_snr_threshold": rubber_sheet_snr_threshold,
+                "rubber_sheet_filter_size": rubber_sheet_filter_size,
+                "dense_window_width": dense_window_width,
+                "dense_window_height": dense_window_height,
+                "dense_search_width": dense_search_width,
+                "dense_search_height": dense_search_height,
+                "dense_skip_width": dense_skip_width,
+                "dense_skip_height": dense_skip_height,
                 "wavelength": wavelength,
                 "orbit_margin_sec": orbit_margin_sec,
                 "full_geocode": bool(full_geocode),
                 "resume_from": str(resume_from or "").strip(),
+                "split_spectrum": bool(ionosphere_correction),
             },
             "pair_meta": dict(pair_meta or {}),
         }
@@ -704,7 +1035,34 @@ class Isce2Engine(DinsarEngine):
             "reference_coh_threshold",
             DEFAULT_REFERENCE_COH_THRESHOLD,
         )
+        deramp_mode = str(
+            extra.get("deramp_mode", DEFAULT_DERAMP_MODE) or DEFAULT_DERAMP_MODE
+        ).strip().lower()
+        deramp_coh_threshold = extra.get(
+            "deramp_coh_threshold",
+            DEFAULT_DERAMP_COH_THRESHOLD,
+        )
         bbox_margin = extra.get("bbox_margin", DEFAULT_BBOX_MARGIN)
+        ionosphere_correction = bool(
+            extra.get("ionosphere_correction", DEFAULT_IONOSPHERE_CORRECTION)
+        )
+        dense_offsets = bool(extra.get("dense_offsets", DEFAULT_DENSE_OFFSETS))
+        rubbersheet_range = bool(extra.get("rubbersheet_range", DEFAULT_RUBBERSHEET_RANGE))
+        rubbersheet_azimuth = bool(extra.get("rubbersheet_azimuth", DEFAULT_RUBBERSHEET_AZIMUTH))
+        rubber_sheet_snr_threshold = extra.get(
+            "rubber_sheet_snr_threshold",
+            DEFAULT_RUBBER_SHEET_SNR_THRESHOLD,
+        )
+        rubber_sheet_filter_size = extra.get(
+            "rubber_sheet_filter_size",
+            DEFAULT_RUBBER_SHEET_FILTER_SIZE,
+        )
+        dense_window_width = extra.get("dense_window_width", DEFAULT_DENSE_WINDOW_WIDTH)
+        dense_window_height = extra.get("dense_window_height", DEFAULT_DENSE_WINDOW_HEIGHT)
+        dense_search_width = extra.get("dense_search_width", DEFAULT_DENSE_SEARCH_WIDTH)
+        dense_search_height = extra.get("dense_search_height", DEFAULT_DENSE_SEARCH_HEIGHT)
+        dense_skip_width = extra.get("dense_skip_width", DEFAULT_DENSE_SKIP_WIDTH)
+        dense_skip_height = extra.get("dense_skip_height", DEFAULT_DENSE_SKIP_HEIGHT)
         wavelength = LT1_FIXED_WAVELENGTH
         orbit_margin_sec = extra.get("orbit_margin_sec", ORBIT_MARGIN_MIN_SEC)
         full_geocode = bool(extra.get("full_geocode"))
@@ -850,7 +1208,21 @@ class Isce2Engine(DinsarEngine):
                 coh_threshold=coh_threshold,
                 reference_mode=reference_mode,
                 reference_coh_threshold=reference_coh_threshold,
+                deramp_mode=deramp_mode,
+                deramp_coh_threshold=deramp_coh_threshold,
                 bbox_margin=bbox_margin,
+                dense_offsets=dense_offsets,
+                rubbersheet_range=rubbersheet_range,
+                rubbersheet_azimuth=rubbersheet_azimuth,
+                ionosphere_correction=ionosphere_correction,
+                rubber_sheet_snr_threshold=rubber_sheet_snr_threshold,
+                rubber_sheet_filter_size=rubber_sheet_filter_size,
+                dense_window_width=dense_window_width,
+                dense_window_height=dense_window_height,
+                dense_search_width=dense_search_width,
+                dense_search_height=dense_search_height,
+                dense_skip_width=dense_skip_width,
+                dense_skip_height=dense_skip_height,
                 wavelength=wavelength,
                 orbit_margin_sec=orbit_margin_sec,
                 full_geocode=full_geocode,
@@ -930,9 +1302,25 @@ class Isce2Engine(DinsarEngine):
                                 "coh_threshold": coh_threshold,
                                 "reference_mode": reference_mode,
                                 "reference_coh_threshold": reference_coh_threshold,
+                                "deramp_mode": deramp_mode,
+                                "deramp_coh_threshold": deramp_coh_threshold,
                                 "bbox_margin": bbox_margin,
+                                "ionosphere_correction": ionosphere_correction,
+                                "dense_offsets": dense_offsets,
+                                "rubbersheet_range": rubbersheet_range,
+                                "rubbersheet_azimuth": rubbersheet_azimuth,
+                                "rubber_sheet_snr_threshold": rubber_sheet_snr_threshold,
+                                "rubber_sheet_filter_size": rubber_sheet_filter_size,
+                                "dense_window_width": dense_window_width,
+                                "dense_window_height": dense_window_height,
+                                "dense_search_width": dense_search_width,
+                                "dense_search_height": dense_search_height,
+                                "dense_skip_width": dense_skip_width,
+                                "dense_skip_height": dense_skip_height,
                                 "wavelength": wavelength,
                                 "orbit_margin_sec": orbit_margin_sec,
+                                "split_spectrum": ionosphere_correction,
+                                "ionosphere_correction": ionosphere_correction,
                             },
                             "master_path": pair_meta.get("master_path"),
                             "slave_path": pair_meta.get("slave_path"),
@@ -1053,9 +1441,25 @@ class Isce2Engine(DinsarEngine):
                 "coh_threshold": coh_threshold,
                 "reference_mode": reference_mode,
                 "reference_coh_threshold": reference_coh_threshold,
+                "deramp_mode": deramp_mode,
+                "deramp_coh_threshold": deramp_coh_threshold,
                 "bbox_margin": bbox_margin,
+                "ionosphere_correction": ionosphere_correction,
+                "dense_offsets": dense_offsets,
+                "rubbersheet_range": rubbersheet_range,
+                "rubbersheet_azimuth": rubbersheet_azimuth,
+                "rubber_sheet_snr_threshold": rubber_sheet_snr_threshold,
+                "rubber_sheet_filter_size": rubber_sheet_filter_size,
+                "dense_window_width": dense_window_width,
+                "dense_window_height": dense_window_height,
+                "dense_search_width": dense_search_width,
+                "dense_search_height": dense_search_height,
+                "dense_skip_width": dense_skip_width,
+                "dense_skip_height": dense_skip_height,
                 "wavelength": wavelength,
                 "orbit_margin_sec": orbit_margin_sec,
+                "split_spectrum": ionosphere_correction,
+                "ionosphere_correction": ionosphere_correction,
                 "runtime_id": runtime.runtime_id,
                 "command": last_task_result.get("command", ""),
                 "runner_argv": last_task_result.get("runner_argv", []),

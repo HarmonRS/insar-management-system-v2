@@ -205,7 +205,7 @@ python run_worker.py
 这套链路要求：
 
 - `.env` 中的根目录配置要真实可访问。
-- `backend/migrations/001` 到 `006` 必须保持幂等。
+- `backend/migrations/001` 到 `007` 必须保持幂等。
 - 启动自维护默认是保守模式，不会在 schema 不匹配时自动破坏性重建。
 
 ## 6. 数据库自维护边界
@@ -216,7 +216,7 @@ python run_worker.py
   - 自动创建 `postgis` 扩展
   - 自动创建缺失表
   - 自动补齐缺失列
-  - 自动执行 `001` 到 `006` 号 SQL 文件
+  - 自动执行 `001` 到 `007` 号 SQL 文件
   - 自动引导管理员账号与灾害点初始化
 
 - 不支持：
@@ -304,3 +304,142 @@ VITE_TILE_SERVER_TOKEN=change_me
 - [DATABASE_SELF_MAINTENANCE_AUDIT_20260425.md](DATABASE_SELF_MAINTENANCE_AUDIT_20260425.md)
 - [PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md](PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md)
 - [WSL_RUNTIME_REFACTOR_DESIGN_20260422.md](WSL_RUNTIME_REFACTOR_DESIGN_20260422.md)
+
+## DEM Sidecar Migration Warning
+
+If you copy or move a prepared ISCE DEM bundle to a new directory or machine, do not assume
+that the sidecar XML files are portable as-is.
+
+Affected files typically include:
+
+- `<dem>.xml`
+- `<dem>.vrt`
+- `<dem>.wgs84`
+- `<dem>.wgs84.xml`
+- `<dem>.wgs84.vrt`
+
+The ISCE XML sidecars may still contain absolute historical paths in:
+
+- `file_name`
+- `metadata_location`
+- `extra_file_name`
+
+Typical failure symptom:
+
+- `verifyDEM` succeeds, but `topo` fails with `FileNotFoundError` pointing at an old
+  `/mnt/...` path from the previous machine or previous directory layout.
+
+Recommended post-migration repair:
+
+```powershell
+C:\ProgramData\anaconda3\envs\InSAR\python.exe `
+  backend\app\isce2_pipeline\repair_dem_sidecars.py `
+  --root D:\DEM `
+  --repair
+```
+
+The managed ISCE2 pipeline now repairs the selected DEM sidecar paths before running, but
+the directory-level repair is still recommended after deployment or storage migration so the
+whole DEM bundle remains internally consistent.
+
+## ISCE2 Rubbersheeting Runtime Dependency
+
+The managed `ISCE2` `lt1_stripmap` profile enables dense offsets plus range and azimuth
+rubbersheeting by default. This is an ISCE2 native workflow step, not an export-time
+correction.
+
+The range rubbersheeting implementation imports `astropy.convolution`, so every deployed
+or migrated WSL runtime must include `astropy` in `insar_wsl_v1`.
+
+Check:
+
+```bash
+/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python -c "from astropy.convolution import convolve; print('astropy_ok')"
+```
+
+Repair:
+
+```bash
+conda install -n insar_wsl_v1 -c conda-forge astropy
+```
+
+If this package is missing, production now fails during preflight instead of after the
+long dense-offset stage.
+
+## ISCE2 Ionosphere Runtime Dependency
+
+The managed `ISCE2` `lt1_stripmap` profile now keeps the standard stripmap
+`split-spectrum -> low/high-band unwrap -> ionosphere -> geocode` path enabled.
+This is part of the native workflow and replaces the older fake `PICKLE/ionosphere`
+resume shortcut.
+
+Operational consequences:
+
+- `resume_from=unwrap` now resumes the full stage-2 chain up to `ionosphere`
+- `resume_from=geocode` now starts from real `ionosphere` state when available
+- the export step prefers geocoded `ionosphere/nondispersive.bil.unwCor.filt`
+  when that product exists
+
+The ionosphere implementation in ISCE2 imports `cv2` and `scipy`, so every
+deployed or migrated WSL runtime must include both packages.
+
+Check:
+
+```bash
+/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python -c "import cv2, scipy; print('ionosphere_ok')"
+```
+
+Repair:
+
+```bash
+conda install -n insar_wsl_v1 -c conda-forge opencv scipy
+```
+
+If these packages are missing, production now fails during preflight instead of
+after the long stripmap filtering / unwrap stage.
+
+## Git Clone Bootstrap
+
+Goal: a clean `git clone` on a new Windows host should already contain the
+deployment entrypoints required to install dependencies, validate `.env`, and
+start the system.
+
+Recommended path:
+
+```powershell
+git clone <repo-url>
+cd Insar_management_system_v2
+Copy-Item .env.example .env
+notepad .env
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_clone.ps1 -InitFrontend -BuildFrontend
+start_system.bat
+```
+
+Optional runtime bootstrap:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_clone.ps1 -InitWindowsConda
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_clone.ps1 -InitWslConda
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_clone.ps1 -All
+```
+
+`scripts/bootstrap_clone.ps1` is intentionally conservative:
+
+- It copies `.env.example` to `.env` only when `.env` is missing.
+- It can create or update the Windows conda env from `environment.yml`.
+- It can create or update the shared WSL conda env from
+  `deploy/wsl/conda/insar_wsl_v1.environment.yml`.
+- It can run `npm ci` and `npm run build` in `frontend/`.
+- It runs `scripts/check_runtime_config.py` unless `-SkipChecks` is specified.
+- `start_system.bat` now fails early when `frontend/dist/index.html` is missing.
+- It does not auto-start backend, worker, or Nginx.
+- It does not bypass the existing database self-maintenance safeguards.
+
+Typical deployment sequence:
+
+1. Edit `.env` to match the new server.
+2. Run `bootstrap_clone.ps1` with the switches required by that server.
+3. Run `start_system.bat`.
+4. Check `GET /api/health`.
+5. Trigger a small real production task and confirm the result is registered in
+   the catalog.

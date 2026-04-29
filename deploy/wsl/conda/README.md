@@ -114,4 +114,49 @@ PYINT_WSL_PYTHON=/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python
 - `shared_conda_env_name = insar_wsl_v1`
 - `required_runtime_count == healthy_runtime_count`
 
+## ISCE2 Rubbersheeting Dependency
+
+The managed `ISCE2` `lt1_stripmap` profile enables native range and azimuth
+rubbersheeting by default. ISCE2's `runRubbersheetRange.py` imports
+`astropy.convolution` during that step, so the shared WSL runtime must include
+`astropy`.
+
+Check the active runtime:
+
+```bash
+/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python -c "from astropy.convolution import convolve; print('astropy_ok')"
+```
+
+Install or repair the package in an existing deployment:
+
+```bash
+conda install -n insar_wsl_v1 -c conda-forge astropy
+```
+
+After changing the runtime, regenerate `insar_wsl_v1.explicit.lock` and
+`insar_wsl_v1.fingerprint.json` so migrations can reproduce the same capability.
+
+## ISCE2 Ionosphere Dependency
+
+The managed `ISCE2` `lt1_stripmap` profile now runs the native stripmap
+ionosphere path (`split spectrum`, low/high-band unwrap, and `ionosphere`)
+before geocoding. That step requires both `cv2` and `scipy` in the shared WSL
+runtime.
+
+Check the active runtime:
+
+```bash
+/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python -c "import cv2, scipy; print('ionosphere_ok')"
+```
+
+Install or repair the packages in an existing deployment:
+
+```bash
+conda install -n insar_wsl_v1 -c conda-forge opencv scipy
+```
+
+If you change the runtime package set, regenerate
+`insar_wsl_v1.explicit.lock` and `insar_wsl_v1.fingerprint.json` so deployment
+and migration records stay aligned with the actual environment.
+
 如果健康面板显示 Python 路径不一致，说明仍然有旧环境残留在配置层或运行时注册层。

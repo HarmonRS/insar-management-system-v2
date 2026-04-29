@@ -10,7 +10,7 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import func, select
@@ -23,13 +23,16 @@ from ..models import (
     PsTimeseriesRunORM,
     RadarDataORM,
     ResultProductORM,
+    TimeseriesStackPlanItemORM,
+    TimeseriesStackPlanORM,
     WorkflowStepORM,
 )
 from .psinsar_catalog_service import psinsar_catalog_service
 from .product_packaging import upgrade_timeseries_package_manifest
+from .product_package_schema import normalize_package_manifest
 from .task_service import task_service
 from .workflow_service import workflow_service
-from .wsl_service import run_wsl_command
+from .wsl_service import check_wsl_environment, run_wsl_command
 
 
 CATALOG_NAME_PSINSAR = "psinsar"
@@ -74,6 +77,38 @@ STACK_RUN_FILE_SEQUENCE = (
     "run_08_igram",
 )
 _SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z._-]+")
+TIMESERIES_STEP_STATUS_HINTS = {
+    "prepare": STATUS_PENDING,
+    "stack_prep_initial": STATUS_PREPARED,
+    "materialize": STATUS_STACK_PREPARED,
+    "stack_prep_refresh": STATUS_MATERIALIZED,
+    "run_isce2_stack": STATUS_STACK_READY,
+    "run_mintpy_sbas": STATUS_STACK_COMPLETED,
+    "export_publish_bundle": STATUS_MINTPY_COMPLETED,
+    "register_psinsar_product": STATUS_EXPORTED,
+}
+TIMESERIES_STEP_PROGRESS_HINTS = {
+    "prepare": 5,
+    "stack_prep_initial": 30,
+    "materialize": 65,
+    "stack_prep_refresh": 82,
+    "run_isce2_stack": 88,
+    "run_mintpy_sbas": 93,
+    "export_publish_bundle": 96,
+    "register_psinsar_product": 99,
+}
+REQUIRED_TIMESERIES_ASSET_ROLES = (
+    "timeseries_cube",
+    "velocity_map",
+    "velocity_geotiff",
+    "temporal_coherence",
+    "quality_mask",
+    "preview_png",
+)
+REQUIRED_TIMESERIES_EXTRA_FILES = (
+    "metadata/smallbaselineApp.cfg",
+    "manifest.json",
+)
 
 
 def _utcnow() -> datetime:
@@ -241,6 +276,33 @@ def _write_step_logs(logs_dir: Path, step_name: str, stdout: str, stderr: str) -
     (logs_dir / f"{step_name}.stderr.log").write_text(stderr or "", encoding="utf-8")
 
 
+def _probe_local_writable_dir(path: str) -> tuple[bool, str]:
+    normalized = _normalize_path(path)
+    probe_dir = Path(normalized)
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    probe_file = probe_dir / f".timeseries_probe_{uuid.uuid4().hex}.tmp"
+    try:
+        probe_file.write_text("ok", encoding="utf-8")
+        probe_file.unlink()
+        return True, normalized
+    except Exception as exc:
+        try:
+            if probe_file.exists():
+                probe_file.unlink()
+        except Exception:
+            pass
+        return False, f"{normalized}: {exc}"
+
+
+def _dem_sidecar_candidates(dem_path: str) -> List[str]:
+    normalized = _normalize_path(dem_path)
+    candidates = [
+        normalized,
+        normalized + ".xml",
+    ]
+    return list(dict.fromkeys(candidates))
+
+
 class TimeseriesService:
     def _derive_paths(self, run_id: str, *, stack_key: Optional[str] = None) -> Dict[str, str]:
         work_root_windows = _normalize_path(os.path.join(settings.TIMESERIES_WORK_ROOT, run_id))
@@ -276,9 +338,18 @@ class TimeseriesService:
     def _scene_payload(self, items: List[PsTaskItemORM]) -> List[Dict[str, Any]]:
         payload: List[Dict[str, Any]] = []
         for item in items:
+            remark_json: Optional[Dict[str, Any]] = None
+            if str(item.remark or "").strip():
+                try:
+                    parsed = json.loads(str(item.remark))
+                    if isinstance(parsed, dict):
+                        remark_json = parsed
+                except Exception:
+                    remark_json = None
             payload.append(
                 {
                     "item_id": item.id,
+                    "plan_item_ref_id": item.plan_item_ref_id,
                     "file_path": item.file_path,
                     "satellite": item.satellite,
                     "imaging_date": item.imaging_date,
@@ -286,9 +357,117 @@ class TimeseriesService:
                     "has_orbit_data": bool(item.has_orbit_data),
                     "status": item.status,
                     "remark": item.remark,
+                    "remark_json": remark_json,
                 }
             )
         return payload
+
+    def _extract_planning_context(self, items: List[PsTaskItemORM]) -> Optional[Dict[str, Any]]:
+        scene_records: List[Dict[str, Any]] = []
+        summary_payload: Optional[Dict[str, Any]] = None
+        for item in items:
+            remark_text = str(item.remark or "").strip()
+            if not remark_text:
+                continue
+            try:
+                parsed = json.loads(remark_text)
+            except Exception:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            if summary_payload is None:
+                summary_payload = {
+                    key: value
+                    for key, value in parsed.items()
+                    if key not in {"scene_id", "scene_file_path", "scene_imaging_date", "scene_satellite"}
+                }
+            scene_records.append(
+                {
+                    "item_id": item.id,
+                    "scene_id": parsed.get("scene_id"),
+                    "file_path": parsed.get("scene_file_path") or item.file_path,
+                    "imaging_date": parsed.get("scene_imaging_date") or item.imaging_date,
+                    "satellite": parsed.get("scene_satellite") or item.satellite,
+                }
+            )
+        if summary_payload is None:
+            return None
+        summary_payload["scenes"] = scene_records
+        summary_payload["scene_count"] = len(scene_records) or int(summary_payload.get("scene_count") or 0)
+        summary_payload["stack_dates"] = [
+            str(item.get("imaging_date")).strip()
+            for item in scene_records
+            if str(item.get("imaging_date") or "").strip()
+        ] or list(summary_payload.get("stack_dates") or [])
+        return summary_payload
+
+    def _build_plan_context(
+        self,
+        plan: TimeseriesStackPlanORM,
+        plan_items: List[TimeseriesStackPlanItemORM],
+    ) -> Dict[str, Any]:
+        request_params = plan.request_params_json if isinstance(plan.request_params_json, dict) else {}
+        ordered_items = sorted(
+            plan_items,
+            key=lambda item: (int(item.scene_rank or 0), int(item.id or 0)),
+        )
+        return {
+            "source": "timeseries_stack_plan",
+            "plan_id": plan.plan_id,
+            "strategy": plan.strategy,
+            "direction": plan.direction,
+            "scene_count": int(plan.scene_count or len(ordered_items)),
+            "stack_key": plan.stack_key,
+            "group_key": plan.group_key,
+            "request_hash": plan.request_hash,
+            "aoi_summary": plan.aoi_summary_json if isinstance(plan.aoi_summary_json, dict) else None,
+            "initial_overlap_threshold": request_params.get("initial_overlap_threshold"),
+            "final_overlap_threshold": request_params.get("final_overlap_threshold"),
+            "stack_dates": [
+                str(item.imaging_date).strip()
+                for item in ordered_items
+                if str(item.imaging_date or "").strip()
+            ],
+            "scenes": [
+                {
+                    "plan_item_id": item.id,
+                    "scene_id": item.radar_data_ref_id,
+                    "scene_rank": item.scene_rank,
+                    "file_path": item.file_path,
+                    "imaging_date": item.imaging_date,
+                    "satellite": item.satellite,
+                    "imaging_mode": item.imaging_mode,
+                    "polarization": item.polarization,
+                    "selection_meta": item.selection_meta_json if isinstance(item.selection_meta_json, dict) else None,
+                }
+                for item in ordered_items
+            ],
+        }
+
+    async def _load_stack_plan_context(
+        self,
+        db: AsyncSession,
+        plan_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        normalized_plan_id = str(plan_id or "").strip()
+        if not normalized_plan_id:
+            return None
+        plan_result = await db.execute(
+            select(TimeseriesStackPlanORM).where(TimeseriesStackPlanORM.plan_id == normalized_plan_id)
+        )
+        plan = plan_result.scalar_one_or_none()
+        if plan is None:
+            return {
+                "source": "timeseries_stack_plan",
+                "plan_id": normalized_plan_id,
+                "status": "missing",
+            }
+        items_result = await db.execute(
+            select(TimeseriesStackPlanItemORM)
+            .where(TimeseriesStackPlanItemORM.plan_ref_id == plan.id)
+            .order_by(TimeseriesStackPlanItemORM.scene_rank.asc(), TimeseriesStackPlanItemORM.id.asc())
+        )
+        return self._build_plan_context(plan, items_result.scalars().all())
 
     async def _load_run(self, run_id: str, db: AsyncSession) -> PsTimeseriesRunORM:
         result = await db.execute(
@@ -555,6 +734,441 @@ class TimeseriesService:
             raise ValueError("TIMESERIES_WSL_DISTRO is not configured.")
         return distro
 
+    def _runtime_stack_share_wsl(self, python_wsl: str) -> str:
+        text = str(python_wsl or "").strip()
+        if not text:
+            raise ValueError("TIMESERIES_PYTHON is not configured.")
+        python_path = PurePosixPath(text)
+        env_root = python_path.parent.parent
+        return str(env_root / "share" / "isce2")
+
+    def _retry_status_for_step(self, step_id: str) -> str:
+        return TIMESERIES_STEP_STATUS_HINTS.get(str(step_id or "").strip(), STATUS_PENDING)
+
+    def _retry_progress_for_step(self, step_id: str) -> int:
+        return int(TIMESERIES_STEP_PROGRESS_HINTS.get(str(step_id or "").strip(), 1))
+
+    async def get_preflight_report(
+        self,
+        *,
+        batch_id: str,
+        reference_date: Optional[str] = None,
+        water_mask_mode: str = "synthetic_fallback",
+        db: AsyncSession,
+    ) -> Dict[str, Any]:
+        checks: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        def add_check(
+            name: str,
+            ok: bool,
+            detail: str,
+            *,
+            severity: str = "error",
+            skipped: bool = False,
+        ) -> None:
+            checks.append(
+                {
+                    "name": name,
+                    "ok": bool(ok),
+                    "detail": detail,
+                    "severity": severity,
+                    "skipped": bool(skipped),
+                }
+            )
+            if skipped or ok:
+                return
+            if severity == "warn":
+                warnings.append(f"{name}: {detail}")
+            else:
+                errors.append(f"{name}: {detail}")
+
+        normalized_batch_id = str(batch_id or "").strip()
+        normalized_reference_date = _normalize_date(reference_date)
+        normalized_water_mask_mode = (
+            str(water_mask_mode or "synthetic_fallback").strip() or "synthetic_fallback"
+        )
+
+        add_check(
+            "TIMESERIES_ENABLED",
+            bool(settings.TIMESERIES_ENABLED),
+            "enabled" if settings.TIMESERIES_ENABLED else "TIMESERIES_ENABLED is false.",
+        )
+        if not normalized_batch_id:
+            add_check("batch_id", False, "batch_id is required.")
+            return {
+                "overall_ok": False,
+                "batch_id": normalized_batch_id,
+                "checks": checks,
+                "errors": errors,
+                "warnings": warnings,
+            }
+
+        batch_result = await db.execute(
+            select(PsTaskBatchORM).where(PsTaskBatchORM.batch_id == normalized_batch_id)
+        )
+        batch = batch_result.scalar_one_or_none()
+        add_check(
+            "batch_exists",
+            batch is not None,
+            f"batch_id={normalized_batch_id}" if batch is not None else "PS batch not found.",
+        )
+        if batch is None:
+            return {
+                "overall_ok": False,
+                "batch_id": normalized_batch_id,
+                "checks": checks,
+                "errors": errors,
+                "warnings": warnings,
+            }
+
+        items_result = await db.execute(
+            select(PsTaskItemORM)
+            .where(PsTaskItemORM.batch_id == normalized_batch_id)
+            .order_by(PsTaskItemORM.id.asc())
+        )
+        items = self._sorted_items(items_result.scalars().all())
+        add_check(
+            "scene_count",
+            len(items) >= 3,
+            f"{len(items)} scenes found; SBAS requires at least 3 scenes.",
+        )
+
+        valid_dates: List[str] = []
+        invalid_date_items: List[str] = []
+        scene_dir_errors = 0
+        tiff_errors = 0
+        meta_errors = 0
+        total_bytes = 0
+
+        for item in items:
+            normalized_date = _normalize_date(item.imaging_date)
+            if normalized_date:
+                valid_dates.append(normalized_date)
+            else:
+                invalid_date_items.append(str(item.file_path or item.id))
+
+            scene_dir = Path(_normalize_path(item.file_path))
+            if not scene_dir.exists() or not scene_dir.is_dir():
+                scene_dir_errors += 1
+                continue
+
+            try:
+                tiff_path = _choose_scene_tiff(scene_dir)
+                total_bytes += int(tiff_path.stat().st_size)
+            except Exception:
+                tiff_errors += 1
+                continue
+
+            try:
+                _scene_meta_from_tiff(tiff_path)
+            except Exception:
+                meta_errors += 1
+
+        add_check(
+            "scene_dates",
+            len(invalid_date_items) == 0 and len(valid_dates) == len(items),
+            (
+                "all scene dates are valid."
+                if len(invalid_date_items) == 0 and len(valid_dates) == len(items)
+                else f"invalid scene dates: {len(invalid_date_items)}"
+            ),
+        )
+        duplicate_dates = sorted({item for item in valid_dates if valid_dates.count(item) > 1})
+        add_check(
+            "unique_dates",
+            len(duplicate_dates) == 0,
+            "all scene dates are unique." if len(duplicate_dates) == 0 else f"duplicate dates: {', '.join(duplicate_dates)}",
+        )
+        add_check(
+            "scene_directories",
+            scene_dir_errors == 0,
+            "all scene directories are present." if scene_dir_errors == 0 else f"missing scene directories: {scene_dir_errors}",
+        )
+        add_check(
+            "scene_tiff_files",
+            tiff_errors == 0,
+            "all scene tiff files are present." if tiff_errors == 0 else f"scene tiff errors: {tiff_errors}",
+        )
+        add_check(
+            "scene_meta_files",
+            meta_errors == 0,
+            "all scene meta xml files are present." if meta_errors == 0 else f"scene meta xml errors: {meta_errors}",
+        )
+
+        if normalized_reference_date and normalized_reference_date not in valid_dates:
+            add_check(
+                "reference_date",
+                False,
+                f"requested reference date {normalized_reference_date} is not in the stack; system will fall back to the middle date.",
+                severity="warn",
+            )
+        else:
+            add_check(
+                "reference_date",
+                True,
+                normalized_reference_date or "no explicit reference date requested; middle date will be used.",
+            )
+
+        effective_reference_date = self._choose_reference_date(valid_dates, normalized_reference_date)
+        add_check(
+            "effective_reference_date",
+            bool(effective_reference_date),
+            effective_reference_date or "unable to determine a valid reference date.",
+        )
+
+        synthetic_allowed = bool(settings.TIMESERIES_ALLOW_SYNTHETIC_WATER_MASK)
+        water_mask_ok = not (
+            normalized_water_mask_mode == "synthetic_fallback" and not synthetic_allowed
+        )
+        add_check(
+            "water_mask_mode",
+            water_mask_ok,
+            (
+                f"{normalized_water_mask_mode} accepted."
+                if water_mask_ok
+                else "synthetic_fallback is disabled by configuration."
+            ),
+        )
+
+        dem_path = str(settings.TIMESERIES_DEM_PATH or "").strip()
+        add_check(
+            "dem_path",
+            bool(dem_path) and os.path.isfile(_normalize_path(dem_path)),
+            dem_path or "TIMESERIES_DEM_PATH is not configured.",
+        )
+        orbit_pool = str(settings.TIMESERIES_ORBIT_POOL_ISCE2 or "").strip()
+        add_check(
+            "orbit_pool",
+            bool(orbit_pool) and os.path.isdir(_normalize_path(orbit_pool)),
+            orbit_pool or "TIMESERIES_ORBIT_POOL_ISCE2 is not configured.",
+        )
+
+        stack_preview: Optional[Dict[str, Any]] = None
+        if not errors:
+            try:
+                stack_preview = await self._resolve_stack_scene_records(
+                    items=items,
+                    batch_direction=batch.direction,
+                    run_id="preflight",
+                    work_root_windows=_normalize_path(os.path.join(settings.TIMESERIES_WORK_ROOT, "_preflight")),
+                    db=db,
+                )
+                add_check(
+                    "stack_identity",
+                    True,
+                    (
+                        f"stack_key={stack_preview.get('stack_key')} "
+                        f"group_key={stack_preview.get('group_key')}"
+                    ),
+                )
+            except Exception as exc:
+                add_check("stack_identity", False, str(exc))
+
+        batch_status = str(batch.status or "").strip()
+        if batch_status and batch_status.upper() != "COMPLETED":
+            add_check(
+                "batch_status",
+                False,
+                f"batch status is {batch_status}; production can still run but the batch is not marked COMPLETED.",
+                severity="warn",
+            )
+        else:
+            add_check("batch_status", True, batch_status or "COMPLETED")
+
+        return {
+            "overall_ok": len(errors) == 0,
+            "batch_id": normalized_batch_id,
+            "batch_name": batch.name,
+            "batch_status": batch.status,
+            "plan_id": batch.plan_id,
+            "plan_strategy": batch.plan_strategy,
+            "reference_date_requested": normalized_reference_date,
+            "reference_date_effective": effective_reference_date,
+            "water_mask_mode": normalized_water_mask_mode,
+            "checks": checks,
+            "errors": errors,
+            "warnings": warnings,
+            "summary": {
+                "scene_count": len(items),
+                "valid_date_count": len(valid_dates),
+                "invalid_date_count": len(invalid_date_items),
+                "duplicate_date_count": len(duplicate_dates),
+                "item_has_orbit_data_count": sum(1 for item in items if item.has_orbit_data),
+                "total_scene_bytes": total_bytes,
+                "stack_dates": sorted(valid_dates),
+                "group_key": (stack_preview or {}).get("group_key"),
+                "stack_key": (stack_preview or {}).get("stack_key"),
+                "tile_key": (stack_preview or {}).get("tile_key"),
+                "source_root_windows": (stack_preview or {}).get("source_root_windows"),
+                "plan_id": batch.plan_id,
+                "plan_strategy": batch.plan_strategy,
+            },
+        }
+
+    async def get_runtime_report(
+        self,
+        *,
+        distro: Optional[str] = None,
+        smoke_test: bool = False,
+    ) -> Dict[str, Any]:
+        effective_distro = str(distro or settings.TIMESERIES_WSL_DISTRO or "").strip()
+        if not effective_distro:
+            raise ValueError("TIMESERIES_WSL_DISTRO is not configured.")
+
+        env_name = str(settings.TIMESERIES_ENV_NAME or "").strip()
+        python_wsl = str(settings.TIMESERIES_PYTHON or "").strip()
+        if not python_wsl and env_name:
+            python_wsl = f"/home/administrator/miniconda3/envs/{env_name}/bin/python"
+        if not python_wsl:
+            raise ValueError("TIMESERIES_PYTHON is not configured.")
+
+        stack_share_wsl = self._runtime_stack_share_wsl(python_wsl)
+        stack_script_wsl = str(PurePosixPath(stack_share_wsl) / "stripmapStack" / "stackStripMap.py")
+        prepare_dem_script_wsl = _windows_path_to_wsl_mount(settings.TIMESERIES_PREPARE_DEM_SCRIPT) or ""
+        report = await asyncio.to_thread(
+            check_wsl_environment,
+            distro=effective_distro,
+            python_cmd=python_wsl,
+            stripmap_app_path=stack_script_wsl,
+            pipeline_script_path=prepare_dem_script_wsl,
+            dem_path_win=settings.TIMESERIES_DEM_PATH,
+            orbit_dir_win=settings.TIMESERIES_ORBIT_POOL_ISCE2,
+            output_dir_win=settings.TIMESERIES_PRODUCT_DIR,
+            smoke_test=smoke_test,
+        )
+        payload = report.to_dict()
+        checks = list(payload.get("checks") or [])
+
+        script_checks = [
+            ("TIMESERIES_STACK_PREP_SCRIPT", settings.TIMESERIES_STACK_PREP_SCRIPT),
+            ("TIMESERIES_MATERIALIZE_SCRIPT", settings.TIMESERIES_MATERIALIZE_SCRIPT),
+            ("TIMESERIES_PREPARE_DEM_SCRIPT", settings.TIMESERIES_PREPARE_DEM_SCRIPT),
+            ("TIMESERIES_STACK_RUNNER_SCRIPT", settings.TIMESERIES_STACK_RUNNER_SCRIPT),
+            ("TIMESERIES_MINTPY_SBAS_SCRIPT", settings.TIMESERIES_MINTPY_SBAS_SCRIPT),
+            ("TIMESERIES_EXPORT_PUBLISH_SCRIPT", settings.TIMESERIES_EXPORT_PUBLISH_SCRIPT),
+        ]
+        extra_ok = True
+        for label, script_path in script_checks:
+            normalized = _normalize_path(script_path) if str(script_path or "").strip() else ""
+            exists_flag = bool(normalized) and os.path.isfile(normalized)
+            detail = normalized or "not configured"
+            checks.append(
+                {
+                    "name": label,
+                    "ok": exists_flag,
+                    "detail": detail,
+                    "skipped": not bool(normalized),
+                }
+            )
+            if normalized and not exists_flag:
+                extra_ok = False
+
+        local_dir_checks = [
+            ("TIMESERIES_WORK_ROOT", str(settings.TIMESERIES_WORK_ROOT or "").strip()),
+            ("TIMESERIES_PRODUCT_DIR", str(settings.TIMESERIES_PRODUCT_DIR or "").strip()),
+        ]
+        for label, dir_path in local_dir_checks:
+            normalized = _normalize_path(dir_path) if dir_path else ""
+            exists_flag = bool(normalized) and os.path.isdir(normalized)
+            checks.append(
+                {
+                    "name": f"{label} exists",
+                    "ok": exists_flag,
+                    "detail": normalized or "not configured",
+                    "skipped": not bool(normalized),
+                }
+            )
+            if normalized and not exists_flag:
+                extra_ok = False
+                continue
+            if normalized:
+                writable_ok, writable_detail = _probe_local_writable_dir(normalized)
+                checks.append(
+                    {
+                        "name": f"{label} writable",
+                        "ok": writable_ok,
+                        "detail": writable_detail,
+                        "skipped": False,
+                    }
+                )
+                if not writable_ok:
+                    extra_ok = False
+
+        work_root_wsl = _windows_path_to_wsl_mount(str(settings.TIMESERIES_WORK_ROOT or "").strip()) or ""
+        if work_root_wsl:
+            rc, _, stderr = await asyncio.to_thread(
+                run_wsl_command,
+                f"mkdir -p {shlex.quote(work_root_wsl)} && test -w {shlex.quote(work_root_wsl)}",
+                effective_distro,
+                20,
+                None,
+            )
+            work_root_wsl_ok = rc == 0
+            checks.append(
+                {
+                    "name": "TIMESERIES_WORK_ROOT writable in WSL",
+                    "ok": work_root_wsl_ok,
+                    "detail": work_root_wsl if work_root_wsl_ok else (stderr or work_root_wsl),
+                    "skipped": False,
+                }
+            )
+            if not work_root_wsl_ok:
+                extra_ok = False
+
+        dem_path_windows = str(settings.TIMESERIES_DEM_PATH or "").strip()
+        if dem_path_windows:
+            sidecar_candidates = _dem_sidecar_candidates(dem_path_windows)
+            missing_sidecars = [path for path in sidecar_candidates if not os.path.exists(path)]
+            checks.append(
+                {
+                    "name": "DEM sidecars",
+                    "ok": len(missing_sidecars) == 0,
+                    "detail": (
+                        "all expected local DEM sidecars exist."
+                        if len(missing_sidecars) == 0
+                        else "missing: " + ", ".join(missing_sidecars[:5])
+                    ),
+                    "skipped": False,
+                }
+            )
+            if missing_sidecars:
+                extra_ok = False
+
+        mintpy_command = f"{shlex.quote(python_wsl)} -c \"import mintpy; print('mintpy_ok')\""
+        rc, stdout, stderr = await asyncio.to_thread(
+            run_wsl_command,
+            mintpy_command,
+            effective_distro,
+            30,
+            None,
+        )
+        mintpy_ok = rc == 0 and "mintpy_ok" in stdout
+        checks.append(
+            {
+                "name": "mintpy import",
+                "ok": mintpy_ok,
+                "detail": stdout or stderr,
+                "skipped": False,
+            }
+        )
+        if not mintpy_ok:
+            extra_ok = False
+
+        payload["checks"] = checks
+        payload["env_name"] = env_name
+        payload["python_wsl"] = python_wsl
+        payload["stack_script_wsl"] = stack_script_wsl
+        payload["overall_ok"] = bool(payload.get("overall_ok")) and extra_ok
+        if payload["overall_ok"]:
+            payload["message"] = payload.get("message") or "Timeseries WSL runtime is ready."
+        else:
+            failed = [item.get("name") for item in checks if not item.get("ok") and not item.get("skipped")]
+            if failed:
+                payload["message"] = "Timeseries WSL runtime has issues: " + ", ".join(failed)
+        return payload
+
     async def _run_wsl_step(
         self,
         run: PsTimeseriesRunORM,
@@ -669,6 +1283,8 @@ class TimeseriesService:
         payload = _read_json(manifest_path)
         now_text = _utcnow().replace(microsecond=0).isoformat() + "Z"
         source_summary = {
+            "plan_id": run.plan_id,
+            "plan_strategy": run.plan_strategy,
             "selected_manifest_path_windows": str(self._selected_manifest_path(run)),
             "selected_manifest_path_wsl": _windows_path_to_wsl_mount(str(self._selected_manifest_path(run))),
             "generated_stack_manifest_path_windows": str(self._generated_stack_manifest_path(run)),
@@ -679,6 +1295,11 @@ class TimeseriesService:
             "mintpy_work_dir_wsl": _windows_path_to_wsl_mount(str(mintpy_work_dir)),
             "publish_dir_windows": str(run.publish_dir_windows or ""),
             "publish_dir_wsl": _windows_path_to_wsl_mount(str(run.publish_dir_windows or "")),
+            "planning_context": (
+                (run.params_json or {}).get("planning_context")
+                if isinstance(run.params_json, dict)
+                else None
+            ),
         }
         payload = upgrade_timeseries_package_manifest(
             payload,
@@ -686,6 +1307,8 @@ class TimeseriesService:
                 "run_id": run.run_id,
                 "run_name": run.run_name,
                 "batch_id": run.batch_id,
+                "plan_id": run.plan_id,
+                "plan_strategy": run.plan_strategy,
                 "task_id": run.task_id,
                 "workflow_run_id": run.workflow_run_id,
                 "mode": run.mode,
@@ -722,6 +1345,91 @@ class TimeseriesService:
         )
         _write_json(manifest_path, payload)
         return payload
+
+    def _validate_publish_bundle(self, manifest_path: Path) -> Dict[str, Any]:
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Publish manifest not found: {manifest_path}")
+
+        normalized = normalize_package_manifest(_read_json(manifest_path))
+        package_dir = manifest_path.parent
+        assets = list(normalized.get("assets") or [])
+        asset_by_role: Dict[str, List[Dict[str, Any]]] = {}
+        for asset in assets:
+            role = str(asset.get("role") or "").strip()
+            if not role:
+                continue
+            asset_by_role.setdefault(role, []).append(asset)
+
+        missing_roles: List[str] = []
+        missing_files: List[str] = []
+        zero_size_files: List[str] = []
+        for role in REQUIRED_TIMESERIES_ASSET_ROLES:
+            role_assets = asset_by_role.get(role) or []
+            if not role_assets:
+                missing_roles.append(role)
+                continue
+            relative_path = str(role_assets[0].get("relative_path") or "").strip()
+            absolute_path = package_dir / relative_path
+            if not absolute_path.is_file():
+                missing_files.append(relative_path)
+                continue
+            try:
+                if absolute_path.stat().st_size <= 0:
+                    zero_size_files.append(relative_path)
+            except OSError:
+                zero_size_files.append(relative_path)
+
+        missing_extra_files: List[str] = []
+        for relative_path in REQUIRED_TIMESERIES_EXTRA_FILES:
+            if not (package_dir / relative_path).is_file():
+                missing_extra_files.append(relative_path)
+
+        temporal = normalized.get("temporal") or {}
+        stack_dates = [
+            str(item).strip()
+            for item in (temporal.get("stack_dates") or normalized.get("stack_dates") or [])
+            if str(item).strip()
+        ]
+        reference_date = str(
+            temporal.get("reference_date") or normalized.get("reference_date") or ""
+        ).strip()
+        canonical = normalized.get("canonical") or {}
+        primary_role = str(canonical.get("primary_asset_role") or "").strip()
+        preview_role = str(canonical.get("preview_asset_role") or "").strip()
+
+        issues: List[str] = []
+        if not reference_date:
+            issues.append("reference_date_missing")
+        if not stack_dates:
+            issues.append("stack_dates_missing")
+        if not primary_role:
+            issues.append("primary_asset_role_missing")
+        if not preview_role:
+            issues.append("preview_asset_role_missing")
+
+        ok = not (
+            missing_roles
+            or missing_files
+            or zero_size_files
+            or missing_extra_files
+            or issues
+        )
+        return {
+            "ok": ok,
+            "schema_version": normalized.get("schema_version"),
+            "catalog_name": normalized.get("catalog_name"),
+            "product_family": normalized.get("product_family"),
+            "stack_size": len(stack_dates),
+            "reference_date": reference_date or None,
+            "primary_asset_role": primary_role or None,
+            "preview_asset_role": preview_role or None,
+            "asset_roles": sorted(asset_by_role.keys()),
+            "missing_roles": missing_roles,
+            "missing_files": missing_files,
+            "zero_size_files": zero_size_files,
+            "missing_extra_files": missing_extra_files,
+            "issues": issues,
+        }
 
     def _workflow_steps(self, *, run_id: str, task_id: str) -> List[Dict[str, Any]]:
         return [
@@ -794,6 +1502,8 @@ class TimeseriesService:
         return {
             "run_id": run.run_id,
             "batch_id": run.batch_id,
+            "plan_id": run.plan_id,
+            "plan_strategy": run.plan_strategy,
             "product_family": run.product_family,
             "run_name": run.run_name,
             "catalog_name": run.catalog_name,
@@ -907,7 +1617,55 @@ class TimeseriesService:
         if batch is None:
             raise ValueError(f"PS batch not found: {normalized_batch_id}")
 
+        preflight = await self.get_preflight_report(
+            batch_id=normalized_batch_id,
+            reference_date=reference_date,
+            water_mask_mode=water_mask_mode,
+            db=db,
+        )
+        if not preflight.get("overall_ok"):
+            problem_text = "; ".join(str(item) for item in (preflight.get("errors") or [])[:8]) or "unknown preflight failure"
+            raise ValueError("Timeseries preflight failed: " + problem_text)
+
         items = await self._load_batch_items(normalized_batch_id, db)
+        remark_planning_context = self._extract_planning_context(items)
+        stack_plan_context = await self._load_stack_plan_context(db, batch.plan_id)
+        planning_context = remark_planning_context
+        if stack_plan_context:
+            planning_context = {
+                **stack_plan_context,
+                **(remark_planning_context or {}),
+            }
+            planning_context["source"] = stack_plan_context.get("source")
+            planning_context["plan_id"] = stack_plan_context.get("plan_id")
+            planning_context["strategy"] = (
+                stack_plan_context.get("strategy")
+                or planning_context.get("strategy")
+            )
+            planning_context["scene_count"] = (
+                stack_plan_context.get("scene_count")
+                or planning_context.get("scene_count")
+            )
+            planning_context["stack_key"] = (
+                stack_plan_context.get("stack_key")
+                or planning_context.get("stack_key")
+            )
+            planning_context["group_key"] = (
+                stack_plan_context.get("group_key")
+                or planning_context.get("group_key")
+            )
+            if not planning_context.get("scenes"):
+                planning_context["scenes"] = stack_plan_context.get("scenes") or []
+        resolved_plan_id = str(
+            batch.plan_id
+            or ((planning_context or {}).get("plan_id"))
+            or ""
+        ).strip() or None
+        resolved_plan_strategy = str(
+            batch.plan_strategy
+            or ((planning_context or {}).get("strategy"))
+            or ""
+        ).strip() or None
         stack_dates = [
             normalized
             for normalized in (_normalize_date(item.imaging_date) for item in items)
@@ -954,6 +1712,7 @@ class TimeseriesService:
                 params={
                     "run_id": run_id,
                     "batch_id": normalized_batch_id,
+                    "plan_id": resolved_plan_id,
                     "reference_date": effective_reference_date,
                 },
                 db=db,
@@ -962,6 +1721,8 @@ class TimeseriesService:
             run = PsTimeseriesRunORM(
                 run_id=run_id,
                 batch_id=normalized_batch_id,
+                plan_id=resolved_plan_id,
+                plan_strategy=resolved_plan_strategy,
                 product_family="timeseries",
                 run_name=run_name_text,
                 catalog_name=CATALOG_NAME_PSINSAR,
@@ -990,6 +1751,8 @@ class TimeseriesService:
                 manifest_path_wsl=_windows_path_to_wsl_mount(str(selected_manifest_path)),
                 params_json={
                     "batch_id": normalized_batch_id,
+                    "plan_id": resolved_plan_id,
+                    "plan_strategy": resolved_plan_strategy,
                     "requested_reference_date": _normalize_date(reference_date),
                     "effective_reference_date": effective_reference_date,
                     "water_mask_mode": normalized_water_mask_mode,
@@ -997,24 +1760,42 @@ class TimeseriesService:
                     "stack_workflow": settings.TIMESERIES_STACK_WORKFLOW,
                     "group_key": stack_preview.get("group_key"),
                     "stack_key": stack_key,
+                    "planning_context": planning_context,
+                    "preflight": preflight,
                 },
                 summary_json={
                     "phase": "queued",
                     "workflow": settings.TIMESERIES_STACK_WORKFLOW,
+                    "plan_id": resolved_plan_id,
+                    "plan_strategy": resolved_plan_strategy,
                     "group_key": stack_preview.get("group_key"),
                     "stack_key": stack_key,
                     "stack_dates": stack_dates,
                     "task_name": task_name,
+                    "planning_context": {
+                        "source": (planning_context or {}).get("source"),
+                        "plan_id": (planning_context or {}).get("plan_id"),
+                        "strategy": (planning_context or {}).get("strategy"),
+                        "scene_count": (planning_context or {}).get("scene_count"),
+                    } if planning_context else None,
+                    "preflight": {
+                        "overall_ok": bool(preflight.get("overall_ok")),
+                        "warning_count": len(preflight.get("warnings") or []),
+                        "effective_reference_date": preflight.get("reference_date_effective"),
+                    },
                 },
                 input_snapshot_json={
                     "batch_id": normalized_batch_id,
                     "batch_name": batch.name,
                     "direction": batch.direction,
+                    "plan_id": resolved_plan_id,
+                    "plan_strategy": resolved_plan_strategy,
                     "scene_count": len(items),
                     "group_key": stack_preview.get("group_key"),
                     "stack_key": stack_key,
                     "stack_dates": stack_dates,
                     "source_root_windows": stack_preview.get("source_root_windows"),
+                    "planning_context": planning_context,
                     "items": self._scene_payload(items),
                 },
                 orbit_summary_json={
@@ -1024,9 +1805,13 @@ class TimeseriesService:
                     "orbit_pool_windows": str(settings.TIMESERIES_ORBIT_POOL_ISCE2 or "").strip() or None,
                 },
                 quality_summary_json={
+                    "plan_id": resolved_plan_id,
+                    "plan_strategy": resolved_plan_strategy,
                     "water_mask_mode": normalized_water_mask_mode,
                     "synthetic_water_mask_allowed": bool(settings.TIMESERIES_ALLOW_SYNTHETIC_WATER_MASK),
                     "notes": str(notes or "").strip() or None,
+                    "planning_context": planning_context,
+                    "preflight": preflight,
                 },
                 created_by=created_by,
             )
@@ -1039,6 +1824,7 @@ class TimeseriesService:
                 params={
                     "run_id": run_id,
                     "batch_id": normalized_batch_id,
+                    "plan_id": resolved_plan_id,
                     "reference_date": effective_reference_date,
                     "workflow": settings.TIMESERIES_STACK_WORKFLOW,
                 },
@@ -1047,6 +1833,7 @@ class TimeseriesService:
                     "product_family": "timeseries",
                     "processor_code": "isce2_stack_mintpy",
                     "batch_id": normalized_batch_id,
+                    "plan_id": resolved_plan_id,
                     "stack_key": stack_key,
                 },
                 created_by=created_by,
@@ -1061,6 +1848,7 @@ class TimeseriesService:
                 "task_id": run.task_id,
                 "workflow_run_id": run.workflow_run_id,
                 "status": run.status,
+                "plan_id": run.plan_id,
                 "reference_date": run.reference_date,
                 "stack_size": run.stack_size,
             }
@@ -1727,6 +2515,20 @@ class TimeseriesService:
             mintpy_cfg_path=mintpy_cfg_path,
             mintpy_work_dir=mintpy_work_dir,
         )
+        publish_validation = self._validate_publish_bundle(publish_manifest_path)
+        if not publish_validation.get("ok"):
+            problems = []
+            for key in (
+                "missing_roles",
+                "missing_files",
+                "zero_size_files",
+                "missing_extra_files",
+                "issues",
+            ):
+                values = [str(item) for item in (publish_validation.get(key) or []) if str(item)]
+                if values:
+                    problems.append(f"{key}={','.join(values)}")
+            raise ValueError("Publish bundle validation failed: " + "; ".join(problems or ["unknown"]))
 
         run.status = STATUS_EXPORTED
         run.summary_json = {
@@ -1740,12 +2542,14 @@ class TimeseriesService:
                 "stack_key": publish_manifest.get("stack_key"),
                 "group_key": publish_manifest.get("group_key"),
                 "export_runner": export_result,
+                "validation": publish_validation,
             },
         }
         run.quality_summary_json = {
             **(run.quality_summary_json or {}),
             "water_mask_mode": run.water_mask_mode,
             "phase": "publish_bundle_complete",
+            "publish_validation": publish_validation,
         }
         await db.commit()
         await db.refresh(run)
@@ -1772,6 +2576,9 @@ class TimeseriesService:
         run.error_message = None
         await db.commit()
         await db.refresh(run)
+        publish_validation = self._validate_publish_bundle(publish_manifest_path)
+        if not publish_validation.get("ok"):
+            raise ValueError("Managed publish bundle is not valid enough for catalog registration.")
         registration = await psinsar_catalog_service.register_manifest(
             db,
             manifest_path=str(publish_manifest_path),
@@ -1789,12 +2596,14 @@ class TimeseriesService:
                 "product_db_id": registration.get("product_db_id"),
                 "product_status": registration.get("status"),
                 "health_status": registration.get("health_status"),
+                "validation": publish_validation,
             },
         }
         run.quality_summary_json = {
             **(run.quality_summary_json or {}),
             "water_mask_mode": run.water_mask_mode,
             "phase": "catalog_registered",
+            "publish_validation": publish_validation,
         }
         await db.commit()
         await db.refresh(run)
@@ -1804,6 +2613,62 @@ class TimeseriesService:
             "status": run.status,
             "product_id": registration.get("product_id"),
             "product_db_id": registration.get("product_db_id"),
+        }
+
+    async def retry_step(
+        self,
+        run_id: str,
+        *,
+        step_id: str,
+        db: AsyncSession,
+    ) -> Dict[str, Any]:
+        run = await self._load_run(run_id, db)
+        workflow_run_id = str(run.workflow_run_id or "").strip()
+        target_step_id = str(step_id or "").strip()
+        if not workflow_run_id:
+            raise ValueError(f"Timeseries run has no workflow_run_id: {run_id}")
+        if not target_step_id:
+            raise ValueError("step_id is required.")
+
+        retry_result = await workflow_service.retry_step(
+            workflow_run_id,
+            target_step_id,
+            db=db,
+        )
+
+        run.status = self._retry_status_for_step(target_step_id)
+        run.error_message = None
+        run.ended_at = None
+        run.summary_json = {
+            **(run.summary_json or {}),
+            "phase": "retry_queued",
+            "retry": {
+                "step_id": target_step_id,
+                "queued_at": _utcnow().replace(microsecond=0).isoformat() + "Z",
+                "reset_steps": retry_result.get("reset_steps") or [],
+            },
+        }
+        run.quality_summary_json = {
+            **(run.quality_summary_json or {}),
+            "phase": "retry_queued",
+        }
+        if run.task_id:
+            await task_service.update_task(
+                run.task_id,
+                status="RUNNING",
+                progress=self._retry_progress_for_step(target_step_id),
+                message=f"Retry queued from workflow step: {target_step_id}",
+                db=db,
+            )
+
+        await db.commit()
+        await db.refresh(run)
+        return {
+            "run_id": run.run_id,
+            "workflow_run_id": workflow_run_id,
+            "step_id": target_step_id,
+            "status": run.status,
+            "reset_steps": retry_result.get("reset_steps") or [],
         }
 
     async def mark_run_failed(self, run_id: str, error: str, *, db: AsyncSession) -> Dict[str, Any]:
@@ -1895,6 +2760,8 @@ class TimeseriesService:
                 "product_id": product.product_id,
                 "display_name": product.display_name,
                 "run_key": product.run_key,
+                "plan_id": summary.get("plan_id"),
+                "plan_strategy": summary.get("plan_strategy"),
                 "package_schema": product.package_schema,
                 "processor_code": product.processor_code,
                 "runtime_id": product.runtime_id,

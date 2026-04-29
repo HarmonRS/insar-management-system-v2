@@ -273,6 +273,9 @@ class TaskService:
                 else:
                     # 显式更新心跳时间，防止 SQLAlchemy 因属性未变而跳过 UPDATE
                     task.updated_at = datetime.now()
+                    task.ended_at = None
+                    if status == "RUNNING" and task.started_at is None:
+                        task.started_at = datetime.now()
 
                 await db.commit()
             else:

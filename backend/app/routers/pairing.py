@@ -16,6 +16,11 @@ from ..models import (
     PairingResponse,
     PsRequest,
     RadarData,
+    TimeseriesStackPlan,
+    TimeseriesStackPlanDetail,
+    TimeseriesStackPlanItem,
+    TimeseriesStackPlanItemORM,
+    TimeseriesStackPlanORM,
 )
 from ..services.pairing_cache_service import pairing_cache_service
 from ..services.spatial_service import spatial_service
@@ -175,6 +180,37 @@ async def get_pairing_network_run_endpoint(
             for edge in edges
         ],
     }
+
+
+@router.get("/timeseries-plans/{plan_id}", response_model=TimeseriesStackPlanDetail)
+async def get_timeseries_stack_plan_endpoint(
+    plan_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUserORM = Depends(_require_admin),
+):
+    _ = current_user
+    normalized_plan_id = str(plan_id or "").strip()
+    if not normalized_plan_id:
+        raise HTTPException(status_code=400, detail="plan_id is required.")
+
+    plan_result = await db.execute(
+        select(TimeseriesStackPlanORM).where(TimeseriesStackPlanORM.plan_id == normalized_plan_id)
+    )
+    plan = plan_result.scalar_one_or_none()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Timeseries stack plan not found.")
+
+    items_result = await db.execute(
+        select(TimeseriesStackPlanItemORM)
+        .where(TimeseriesStackPlanItemORM.plan_ref_id == plan.id)
+        .order_by(TimeseriesStackPlanItemORM.scene_rank.asc(), TimeseriesStackPlanItemORM.id.asc())
+    )
+    payload = TimeseriesStackPlan.model_validate(plan).model_dump()
+    payload["items"] = [
+        TimeseriesStackPlanItem.model_validate(item)
+        for item in items_result.scalars().all()
+    ]
+    return TimeseriesStackPlanDetail.model_validate(payload)
 
 
 @router.post("/find-pairs", response_model=PairingResponse)

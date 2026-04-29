@@ -81,3 +81,104 @@ Delivered adjustments:
   operators do not treat post-processing heuristics as part of the standard workflow.
 - Revalidated the modified pipeline, engine, and WSL runner modules with `python3 -m py_compile`
   inside the target WSL runtime environment.
+
+## Additional Update: DEM Sidecar Path Repair
+
+After switching the managed DEM bundle to a copied `SRTMDEM_RSP_SARscape` dataset under
+`D:\DEM`, an ISCE2 run failed in `topo` even though the outer pipeline XML pointed at the
+new location. The root cause was that the copied DEM sidecar XML files still contained old
+absolute `/mnt/...` paths in `file_name`, `metadata_location`, and `extra_file_name`.
+
+Delivered adjustments:
+
+- Added `backend/app/isce2_pipeline/repair_dem_sidecars.py` to audit and repair moved DEM
+  sidecar XML files at directory scope.
+- Added sidecar self-repair for the selected ISCE2 DEM during pipeline resolution so the
+  managed run no longer depends on manually editing copied `.xml` files first.
+- Documented the migration risk and the recommended repair command in `docs/DEPLOYMENT.md`.
+
+## Additional Update: LT-1 Enhancement Alignment
+
+The managed `ISCE2` `lt1_stripmap` production profile now enables the built-in
+stripmap enhancement path by default:
+
+- dense offsets
+- range rubbersheeting
+- azimuth rubbersheeting
+
+This was done to bring the default ISCE2 LT-1 production semantics closer to the
+existing SARscape `custom6` chain, which already includes non-trivial refinement
+steps rather than shipping a bare minimum interferometric result.
+
+The implementation now passes these parameters end-to-end through:
+
+- `backend/app/dinsar_engines/isce2_engine.py`
+- `deploy/wsl/runners/isce2_runner.py`
+- `backend/app/isce2_pipeline/run_lt1_dinsar_pipeline.py`
+
+The rationale and the SARscape / ISCE2 mapping are documented in:
+
+- `docs/ISCE2_LT1_ENHANCEMENT_ALIGNMENT_20260427.md`
+
+## Additional Update: Rubbersheet Runtime Dependency
+
+The first enhanced LT-1 run reached ISCE2 `dense_offsets` successfully and then
+failed at `rubber_sheet_range` with:
+
+```text
+ModuleNotFoundError: No module named 'astropy'
+```
+
+Root cause:
+
+- ISCE2's `runRubbersheetRange.py` imports `astropy.convolution`.
+- The shared WSL runtime `insar_wsl_v1` had ISCE2 and SciPy installed, but did
+  not include `astropy`.
+
+Delivered adjustments:
+
+- Added `astropy` to `deploy/wsl/conda/insar_wsl_v1.environment.yml`.
+- Added a runtime dependency preflight in the WSL runner and LT-1 pipeline so
+  rubbersheeting fails immediately with a clear message instead of after the
+  dense-offset stage has already run.
+- Added `astropy.convolution` to the ISCE2 WSL availability check.
+
+Required deployment action:
+
+```bash
+conda install -n insar_wsl_v1 -c conda-forge astropy
+```
+
+## Additional Update: Real Ionosphere Stage Integration
+
+The managed `ISCE2` LT-1 stripmap workflow now runs the native stripmap
+dispersive correction path instead of faking `PICKLE/ionosphere` state during
+resume.
+
+Delivered adjustments:
+
+- Enabled `do split spectrum = True` and `do dispersive = True` in the generated
+  `stripmapApp` XML.
+- Changed stage-2 execution from a narrow `unwrap -> unwrap` run to a real
+  `filter_low_band/unwrap/ionosphere` resume path.
+- Changed stage-3 execution to resume from real `ionosphere` state when present,
+  or from the low/high-band unwrap state when only stage-2 products exist.
+- Extended the reduced geocode export list with:
+  - `ionosphere/dispersive.bil.unwCor.filt`
+  - `ionosphere/nondispersive.bil.unwCor.filt`
+  - `ionosphere/mask.bil`
+- Updated the export step to prefer geocoded
+  `ionosphere/nondispersive.bil.unwCor.filt` when available.
+
+Operational effect:
+
+- `resume_from=unwrap` now resumes the complete stage-2 chain up to
+  `ionosphere`
+- `resume_from=geocode` now performs real `ionosphere -> geocode` continuation
+  instead of relying on copied pickle files
+
+Deployment note:
+
+- The native ionosphere implementation imports `cv2` and `scipy`
+- The WSL runner, pipeline preflight, and health check now verify those modules
+  before production starts

@@ -487,6 +487,15 @@ $NginxConfPath = Join-Path -Path $ProjectRoot -ChildPath "nginx\nginx.conf"
 if (Test-Path -LiteralPath "$NginxConfPath") {
     Write-Host ">>> Configuring Nginx paths..." -ForegroundColor Yellow
 
+    $FrontendDistPath = Join-Path -Path $ProjectRoot -ChildPath "frontend\dist"
+    $FrontendIndexPath = Join-Path -Path $FrontendDistPath -ChildPath "index.html"
+    if (-not (Test-Path -LiteralPath "$FrontendIndexPath")) {
+        Write-Host "`n[ERROR] Frontend build output not found: $FrontendIndexPath" -ForegroundColor Red
+        Write-Host "Run scripts\bootstrap_clone.ps1 -InitFrontend -BuildFrontend or build frontend/dist manually before using start_system.bat." -ForegroundColor Red
+        $global:LASTEXITCODE = 1
+        return
+    }
+
     $NginxBase = Split-Path -Parent "$NginxExe"
     $SrcMime = Join-Path -Path $NginxBase -ChildPath "conf\mime.types"
     $DestMime = Join-Path -Path $ProjectRoot -ChildPath "nginx\mime.types"

@@ -143,6 +143,8 @@ def upgrade_timeseries_package_manifest(
             "run_id": run_context.get("run_id"),
             "run_name": run_context.get("run_name"),
             "batch_id": run_context.get("batch_id"),
+            "plan_id": run_context.get("plan_id"),
+            "plan_strategy": run_context.get("plan_strategy"),
             "task_id": run_context.get("task_id"),
             "workflow_run_id": run_context.get("workflow_run_id"),
             "mode": run_context.get("mode"),
@@ -173,6 +175,7 @@ def upgrade_timeseries_package_manifest(
         **_clean_dict(document.get("identity")),
         "stack_key": document.get("stack_key") or document.get("group_key"),
         "run_key": run_context.get("run_id") or _clean_dict(document.get("identity")).get("run_key"),
+        "plan_id": run_context.get("plan_id") or _clean_dict(document.get("identity")).get("plan_id"),
     }
     document["engine"] = {
         **_clean_dict(document.get("engine")),

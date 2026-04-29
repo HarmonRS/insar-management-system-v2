@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -67,7 +69,25 @@ def _build_pipeline_argv(payload: Mapping[str, Any], *, dry_run: bool = False) -
     _append_optional(argv, "--coh-threshold", params.get("coh_threshold"))
     _append_optional(argv, "--reference-mode", params.get("reference_mode"))
     _append_optional(argv, "--reference-coh-threshold", params.get("reference_coh_threshold"))
+    _append_optional(argv, "--deramp-mode", params.get("deramp_mode"))
+    _append_optional(argv, "--deramp-coh-threshold", params.get("deramp_coh_threshold"))
     _append_optional(argv, "--bbox-margin", params.get("bbox_margin"))
+    if not bool(params.get("ionosphere_correction", True)):
+        argv.append("--no-ionosphere-correction")
+    if bool(params.get("dense_offsets")):
+        argv.append("--dense-offsets")
+    if bool(params.get("rubbersheet_range")):
+        argv.append("--rubbersheet-range")
+    if bool(params.get("rubbersheet_azimuth")):
+        argv.append("--rubbersheet-azimuth")
+    _append_optional(argv, "--rubber-sheet-snr-threshold", params.get("rubber_sheet_snr_threshold"))
+    _append_optional(argv, "--rubber-sheet-filter-size", params.get("rubber_sheet_filter_size"))
+    _append_optional(argv, "--dense-window-width", params.get("dense_window_width"))
+    _append_optional(argv, "--dense-window-height", params.get("dense_window_height"))
+    _append_optional(argv, "--dense-search-width", params.get("dense_search_width"))
+    _append_optional(argv, "--dense-search-height", params.get("dense_search_height"))
+    _append_optional(argv, "--dense-skip-width", params.get("dense_skip_width"))
+    _append_optional(argv, "--dense-skip-height", params.get("dense_skip_height"))
     _append_optional(argv, "--wavelength", params.get("wavelength"))
     _append_optional(argv, "--orbit-margin-sec", params.get("orbit_margin_sec"))
     _append_optional(argv, "--resume-from", params.get("resume_from"))
@@ -82,12 +102,70 @@ def _build_pipeline_argv(payload: Mapping[str, Any], *, dry_run: bool = False) -
 
 def _build_child_env() -> Dict[str, str]:
     env = os.environ.copy()
+    env_bin = Path(sys.executable).resolve().parent
+    path_prefixes = [env_bin.as_posix()]
+    isce_spec = importlib.util.find_spec("isce")
+    if isce_spec and isce_spec.origin:
+        isce_app_dir = Path(isce_spec.origin).resolve().parent / "applications"
+        if isce_app_dir.exists():
+            path_prefixes.append(isce_app_dir.as_posix())
+
+    current_path = str(env.get("PATH") or "")
+    env["PATH"] = ":".join(path_prefixes + ([current_path] if current_path else []))
     env_root = Path(sys.executable).resolve().parents[1]
     proj_data = env_root / "share" / "proj"
     if proj_data.exists():
         env["PROJ_DATA"] = proj_data.as_posix()
         env["PROJ_LIB"] = proj_data.as_posix()
     return env
+
+
+def _find_python_module(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def _validate_runtime_dependencies(payload: Mapping[str, Any], child_env: Mapping[str, str]) -> str:
+    params = payload.get("params") or {}
+    errors: List[str] = []
+    ionosphere_correction = bool(params.get("ionosphere_correction", True))
+
+    if ionosphere_correction:
+        missing_ionosphere_modules: List[str] = []
+        if not _find_python_module("cv2"):
+            missing_ionosphere_modules.append("cv2")
+        if not _find_python_module("scipy"):
+            missing_ionosphere_modules.append("scipy")
+        if missing_ionosphere_modules:
+            errors.append(
+                "Missing WSL Python dependencies for the ISCE2 stripmap ionosphere step: "
+                + ", ".join(missing_ionosphere_modules)
+                + ". The managed LT-1 workflow enables split-spectrum dispersive correction before geocode. "
+                "Install the missing packages in insar_wsl_v1, for example: "
+                "conda install -n insar_wsl_v1 -c conda-forge opencv scipy."
+            )
+
+    needs_rubbersheet = bool(params.get("rubbersheet_range")) or bool(
+        params.get("rubbersheet_azimuth")
+    )
+    if needs_rubbersheet and not _find_python_module("astropy.convolution"):
+        errors.append(
+            "Missing WSL Python dependency 'astropy.convolution'. "
+            "The managed LT-1 ISCE2 profile enables rubbersheeting, and ISCE2 "
+            "imports astropy.convolution while running runRubbersheetRange.py. "
+            "Install astropy in insar_wsl_v1 before running production."
+        )
+
+    if ionosphere_correction and not shutil.which("imageMath.py", path=str(child_env.get("PATH") or "")):
+        errors.append(
+            "Missing WSL CLI dependency 'imageMath.py' on PATH. "
+            "The ISCE2 stripmap ionosphere step shells out to imageMath.py late in the run. "
+            "Make sure the active conda env bin directory is exported into PATH before launching production."
+        )
+
+    return "\n".join(errors)
 
 
 def main() -> int:
@@ -113,11 +191,20 @@ def main() -> int:
     if not pipeline_path.exists():
         raise FileNotFoundError(f"ISCE2 pipeline script not found: {pipeline_path}")
 
+    child_env = _build_child_env()
+    dependency_error = _validate_runtime_dependencies(payload, child_env)
+    if dependency_error:
+        print(
+            json.dumps({"runtime_dependency_error": dependency_error}, ensure_ascii=False),
+            file=sys.stderr,
+        )
+        return 2
+
     argv = _build_pipeline_argv(payload, dry_run=bool(args.dry_run))
     print(json.dumps({"pipeline_argv": argv}, ensure_ascii=False))
     completed = subprocess.run(
         argv,
-        env=_build_child_env(),
+        env=child_env,
         check=False,
     )
     return int(completed.returncode or 0)

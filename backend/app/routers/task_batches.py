@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
@@ -23,6 +25,8 @@ from ..models import (
     PsTaskItemORM,
     RadarData,
     RadarPair,
+    TimeseriesStackPlanItemORM,
+    TimeseriesStackPlanORM,
 )
 from .dependencies import (
     _add_operation_audit_log,
@@ -109,7 +113,9 @@ class DinsarBatchCreateRequest(BaseModel):
 class PsBatchCreateRequest(BaseModel):
     name: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
     direction: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
+    plan_id: Optional[str] = Field(default=None, max_length=64)
     stack: List[RadarData]
+    planning_context: Optional[Dict[str, Any]] = None
 
     @field_validator("stack")
     @classmethod
@@ -118,12 +124,65 @@ class PsBatchCreateRequest(BaseModel):
             raise ValueError(
                 f"stack exceeds max item count ({TASK_BATCH_MAX_ITEMS})."
             )
+        if len(value) < 3:
+            raise ValueError("SBAS timeseries batch requires at least 3 scenes.")
         return value
 
 
 class BatchItemUpdateRequest(BaseModel):
     status: Optional[str] = None
     remark: Optional[str] = Field(default=None, max_length=BATCH_REMARK_MAX_LENGTH)
+
+
+def _normalize_lookup_key(value: Optional[str]) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return os.path.normcase(os.path.normpath(text))
+
+
+def _build_plan_context(
+    plan: TimeseriesStackPlanORM,
+    plan_items: List[TimeseriesStackPlanItemORM],
+) -> Dict[str, Any]:
+    request_params = plan.request_params_json if isinstance(plan.request_params_json, dict) else {}
+    ordered_items = sorted(
+        plan_items,
+        key=lambda item: (int(item.scene_rank or 0), int(item.id or 0)),
+    )
+    scenes = [
+        {
+            "plan_item_id": item.id,
+            "scene_id": item.radar_data_ref_id,
+            "scene_rank": item.scene_rank,
+            "scene_file_path": item.file_path,
+            "scene_imaging_date": item.imaging_date,
+            "scene_satellite": item.satellite,
+            "scene_imaging_mode": item.imaging_mode,
+            "scene_polarization": item.polarization,
+            "selection_meta": item.selection_meta_json if isinstance(item.selection_meta_json, dict) else None,
+        }
+        for item in ordered_items
+    ]
+    return {
+        "source": "timeseries_stack_plan",
+        "plan_id": plan.plan_id,
+        "strategy": plan.strategy,
+        "direction": plan.direction,
+        "scene_count": int(plan.scene_count or len(scenes)),
+        "stack_key": plan.stack_key,
+        "group_key": plan.group_key,
+        "request_hash": plan.request_hash,
+        "aoi_summary": plan.aoi_summary_json if isinstance(plan.aoi_summary_json, dict) else None,
+        "initial_overlap_threshold": request_params.get("initial_overlap_threshold"),
+        "final_overlap_threshold": request_params.get("final_overlap_threshold"),
+        "stack_dates": [
+            str(item.imaging_date).strip()
+            for item in ordered_items
+            if str(item.imaging_date or "").strip()
+        ],
+        "scenes": scenes,
+    }
 
 
 @router.post("/task-batches/dinsar", response_model=DinsarTaskBatch)
@@ -303,12 +362,85 @@ async def create_ps_batch_endpoint(
     if not request.stack:
         raise HTTPException(status_code=400, detail="No PS items provided.")
 
+    request_plan_id = (
+        request.planning_context.get("plan_id")
+        if isinstance(request.planning_context, dict)
+        else None
+    )
+    explicit_plan_id = str(request.plan_id or request_plan_id or "").strip() or None
+    inferred_plan_ids = sorted(
+        {
+            str(item.stack_plan_id or "").strip()
+            for item in request.stack
+            if str(item.stack_plan_id or "").strip()
+        }
+    )
+    if len(inferred_plan_ids) > 1:
+        raise HTTPException(status_code=400, detail="PS stack items belong to multiple stack plans.")
+    if explicit_plan_id and inferred_plan_ids and explicit_plan_id != inferred_plan_ids[0]:
+        raise HTTPException(status_code=400, detail="request.plan_id does not match stack scene plan metadata.")
+
+    effective_plan_id = explicit_plan_id or (inferred_plan_ids[0] if inferred_plan_ids else None)
+    plan: Optional[TimeseriesStackPlanORM] = None
+    plan_items: List[TimeseriesStackPlanItemORM] = []
+    plan_item_by_id: Dict[int, TimeseriesStackPlanItemORM] = {}
+    plan_item_by_scene_id: Dict[int, TimeseriesStackPlanItemORM] = {}
+    plan_item_by_path: Dict[str, TimeseriesStackPlanItemORM] = {}
+    planning_context = request.planning_context if isinstance(request.planning_context, dict) else None
+
+    if effective_plan_id:
+        plan_result = await db.execute(
+            select(TimeseriesStackPlanORM).where(TimeseriesStackPlanORM.plan_id == effective_plan_id)
+        )
+        plan = plan_result.scalar_one_or_none()
+        if plan is None:
+            raise HTTPException(status_code=404, detail=f"Timeseries stack plan not found: {effective_plan_id}")
+        if (
+            str(request.direction or "").strip()
+            and str(plan.direction or "").strip()
+            and str(request.direction).strip().upper() != str(plan.direction).strip().upper()
+        ):
+            raise HTTPException(status_code=400, detail="request.direction does not match the referenced stack plan.")
+
+        items_result = await db.execute(
+            select(TimeseriesStackPlanItemORM)
+            .where(TimeseriesStackPlanItemORM.plan_ref_id == plan.id)
+            .order_by(TimeseriesStackPlanItemORM.scene_rank.asc(), TimeseriesStackPlanItemORM.id.asc())
+        )
+        plan_items = items_result.scalars().all()
+        plan_item_by_id = {int(item.id): item for item in plan_items if item.id is not None}
+        plan_item_by_scene_id = {
+            int(item.radar_data_ref_id): item
+            for item in plan_items
+            if item.radar_data_ref_id is not None
+        }
+        plan_item_by_path = {
+            _normalize_lookup_key(item.file_path): item
+            for item in plan_items
+            if _normalize_lookup_key(item.file_path)
+        }
+        if not planning_context:
+            planning_context = _build_plan_context(plan, plan_items)
+        else:
+            merged_context = {
+                **_build_plan_context(plan, plan_items),
+                **planning_context,
+            }
+            if "scenes" not in planning_context:
+                merged_context["scenes"] = _build_plan_context(plan, plan_items).get("scenes") or []
+            planning_context = merged_context
+
     batch_id = str(uuid.uuid4())
     batch_name = request.name or f"PS_{(request.direction or 'STACK')}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
     batch = PsTaskBatchORM(
         batch_id=batch_id,
         name=batch_name,
         direction=request.direction,
+        plan_id=plan.plan_id if plan is not None else effective_plan_id,
+        plan_strategy=(
+            (plan.strategy if plan is not None else None)
+            or (planning_context or {}).get("strategy")
+        ),
         status="PENDING",
         total_items=len(request.stack),
         completed_items=0,
@@ -316,14 +448,49 @@ async def create_ps_batch_endpoint(
     db.add(batch)
 
     for img in request.stack:
+        matched_plan_item: Optional[TimeseriesStackPlanItemORM] = None
+        if img.stack_plan_item_id is not None and int(img.stack_plan_item_id) in plan_item_by_id:
+            matched_plan_item = plan_item_by_id[int(img.stack_plan_item_id)]
+        elif img.id is not None and int(img.id) in plan_item_by_scene_id:
+            matched_plan_item = plan_item_by_scene_id[int(img.id)]
+        else:
+            matched_plan_item = plan_item_by_path.get(_normalize_lookup_key(img.file_path))
+        if batch.plan_id and matched_plan_item is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"PS stack scene is not part of referenced stack plan: {img.file_path}",
+            )
+
+        remark_payload = None
+        if planning_context:
+            planning_summary = {
+                key: value
+                for key, value in planning_context.items()
+                if key != "scenes"
+            }
+            remark_payload = {
+                **planning_summary,
+                "plan_id": batch.plan_id,
+                "plan_item_id": int(matched_plan_item.id) if matched_plan_item and matched_plan_item.id is not None else None,
+                "scene_id": img.id,
+                "scene_file_path": img.file_path,
+                "scene_imaging_date": img.imaging_date,
+                "scene_satellite": img.satellite,
+            }
         item = PsTaskItemORM(
             batch_id=batch_id,
+            plan_item_ref_id=(
+                int(matched_plan_item.id)
+                if matched_plan_item is not None and matched_plan_item.id is not None
+                else None
+            ),
             file_path=img.file_path,
             satellite=img.satellite,
             imaging_date=img.imaging_date,
             polarization=img.polarization,
             has_orbit_data=bool(img.has_orbit_data),
             status="PENDING",
+            remark=json.dumps(remark_payload, ensure_ascii=False) if remark_payload else None,
         )
         db.add(item)
 
@@ -332,7 +499,14 @@ async def create_ps_batch_endpoint(
         request=http_request,
         action="batch_created",
         resource=f"task-batches/ps/{batch_id}",
-        detail={"batch_name": batch_name, "items": len(request.stack), "direction": request.direction},
+        detail={
+            "batch_name": batch_name,
+            "items": len(request.stack),
+            "direction": request.direction,
+            "plan_id": batch.plan_id,
+            "plan_strategy": batch.plan_strategy,
+            "planning_context": planning_context,
+        },
     )
     await db.commit()
     await db.refresh(batch)

@@ -7,16 +7,28 @@
     "osgeo": true,
     "numpy": true,
     "scipy": true,
-    "mintpy": true
+    "mintpy": true,
+    "astropy": true,
+    "cv2": true
   },
   "versions": {
+    "isce": "2.6.3",
     "rasterio": "1.4.4",
-    "gdal": "3100300",
+    "osgeo": "3.10.3",
     "numpy": "1.26.4",
-    "scipy": "1.17.1"
+    "scipy": "1.17.1",
+    "mintpy": "1.6.2",
+    "astropy": "7.2.0",
+    "cv2": "4.13.0"
   },
   "module_paths": {
     "isce": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/isce/__init__.py",
-    "mintpy": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/mintpy/__init__.py"
+    "rasterio": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/rasterio/__init__.py",
+    "osgeo": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/osgeo/__init__.py",
+    "numpy": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/numpy/__init__.py",
+    "scipy": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/scipy/__init__.py",
+    "mintpy": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/mintpy/__init__.py",
+    "astropy": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/astropy/__init__.py",
+    "cv2": "/home/administrator/miniconda3/envs/insar_wsl_v1/lib/python3.11/site-packages/cv2/__init__.py"
   }
 }

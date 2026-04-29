@@ -276,6 +276,8 @@ function App() {
     const activeLayersRef = useRef({});
     const radarPreviewLayersRef = useRef({});
     const pairLayersRef = useRef({});
+    const psStackPreviewLayerRef = useRef(null);
+    const psStackPreviewStateRef = useRef({ previousVisibilityById: new Map() });
     const hazardLayersGroupRef = useRef(null);
     const aoeLayerRef = useRef(null);
     const waterSceneLayersRef = useRef({});
@@ -394,6 +396,11 @@ function App() {
             aoeLayerRef.current.remove();
             aoeLayerRef.current = null;
         }
+        if (psStackPreviewLayerRef.current) {
+            psStackPreviewLayerRef.current.remove();
+            psStackPreviewLayerRef.current = null;
+        }
+        psStackPreviewStateRef.current = { previousVisibilityById: new Map() };
         setAoiLayer(null);
 
         Object.values(activeLayersRef.current).forEach(layer => layer.remove());
@@ -938,10 +945,59 @@ function App() {
         }
     }, [aoiLayer]);
 
+    const restorePsStackPreviewVisibility = () => {
+        const previousVisibilityById = psStackPreviewStateRef.current?.previousVisibilityById;
+        if (!(previousVisibilityById instanceof Map) || previousVisibilityById.size === 0) {
+            psStackPreviewStateRef.current = { previousVisibilityById: new Map() };
+            return false;
+        }
+
+        let changed = false;
+        const currentData = allDataRef.current;
+        const restoredData = currentData.map(item => {
+            if (!previousVisibilityById.has(item.id)) {
+                return item;
+            }
+            const shouldBeVisible = previousVisibilityById.get(item.id);
+            if (item.isVisible !== shouldBeVisible) {
+                updateLayerVisibility(item, shouldBeVisible);
+                changed = true;
+                return { ...item, isVisible: shouldBeVisible };
+            }
+            return item;
+        });
+
+        if (changed) {
+            allDataRef.current = restoredData;
+            setAllData(restoredData);
+        }
+        psStackPreviewStateRef.current = { previousVisibilityById: new Map() };
+        return changed;
+    };
+
+    const clearPsStackPreview = ({ silent = false } = {}) => {
+        const hadLayer = !!psStackPreviewLayerRef.current;
+        if (psStackPreviewLayerRef.current) {
+            psStackPreviewLayerRef.current.remove();
+            psStackPreviewLayerRef.current = null;
+        }
+        const restoredVisibility = restorePsStackPreviewVisibility();
+        if (silent) {
+            return;
+        }
+        if (!hadLayer && !restoredVisibility) {
+            addLog('info', '当前没有打开的时序候选栈预览范围。');
+            return;
+        }
+        addLog('info', '已关闭时序候选栈预览范围。');
+    };
+
     const previewPsStack = (stack) => {
         cancelMapBatch();
+        clearPsStackPreview({ silent: true });
         const stackIds = new Set(stack.map(img => img.id));
         const currentData = allDataRef.current;
+        const previousVisibilityById = new Map(currentData.map(item => [item.id, item.isVisible]));
         const newAllData = currentData.map(item => {
             const shouldBeVisible = stackIds.has(item.id);
             if (item.isVisible !== shouldBeVisible) {
@@ -952,7 +1008,63 @@ function App() {
         });
         allDataRef.current = newAllData;
         setAllData(newAllData);
-        addLog('info', `正在预览包含 ${stack.length} 个场景的时序InSAR候选栈。`);
+        psStackPreviewStateRef.current = { previousVisibilityById };
+
+        if (!mapRef.current) {
+            clearPsStackPreview({ silent: true });
+            addLog('warn', '地图尚未就绪，无法预览时序候选栈范围。');
+            return;
+        }
+
+        const previewGroup = L.layerGroup();
+        const allLatLngs = [];
+        const palette = ['#f59e0b', '#06b6d4', '#a855f7', '#22c55e', '#ef4444', '#3b82f6'];
+        let validSceneCount = 0;
+
+        stack.forEach((scene, index) => {
+            const polygon = scene.coverage_polygon;
+            if (!Array.isArray(polygon) || polygon.length < 3) {
+                return;
+            }
+            const latLngs = polygon
+                .filter((point) => Array.isArray(point) && point.length >= 2)
+                .map((point) => [Number(point[1]), Number(point[0])])
+                .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+            if (latLngs.length < 3) {
+                return;
+            }
+
+            validSceneCount += 1;
+            allLatLngs.push(...latLngs);
+            const color = palette[index % palette.length];
+            const scenePolygon = L.polygon(latLngs, {
+                color,
+                weight: 3,
+                opacity: 0.95,
+                fillColor: color,
+                fillOpacity: 0.08,
+                dashArray: scene.stack_selection_mode === 'pairwise_sbas_network' ? '8, 5' : null,
+            });
+            scenePolygon.bindPopup(
+                `<strong>时序候选场景</strong><br>` +
+                `ID: ${escapeHtml(scene.id)}<br>` +
+                `日期: ${escapeHtml(scene.imaging_date || '-')}<br>` +
+                `卫星: ${escapeHtml(scene.satellite || '-')}<br>` +
+                `模式: ${escapeHtml(scene.imaging_mode || '-')} / ${escapeHtml(scene.polarization || '-')}`
+            );
+            previewGroup.addLayer(scenePolygon);
+        });
+
+        if (validSceneCount === 0 || allLatLngs.length < 3) {
+            clearPsStackPreview({ silent: true });
+            addLog('warn', `时序候选栈包含 ${stack.length} 个场景，但没有可绘制的覆盖范围。`);
+            return;
+        }
+
+        previewGroup.addTo(mapRef.current);
+        psStackPreviewLayerRef.current = previewGroup;
+        mapRef.current.fitBounds(L.latLngBounds(allLatLngs), { padding: [50, 50], maxZoom: 10 });
+        addLog('info', `正在预览包含 ${stack.length} 个场景的时序InSAR候选栈，已绘制 ${validSceneCount} 个覆盖范围。`);
     };
 
     const updateLayerTooltip = useCallback((layer, result, show) => {
@@ -1560,7 +1672,9 @@ function App() {
     };
     const psPanel = {
         onPreviewPsStack: previewPsStack,
+        onClearPsStackPreview: clearPsStackPreview,
         onCreatePsBatch: createPsBatch,
+        onSendToTimeseriesProduction: (direction, stack) => createPsBatch(direction, stack, { sendToProduction: true }),
         onClearPsResults: clearPsResults,
     };
 

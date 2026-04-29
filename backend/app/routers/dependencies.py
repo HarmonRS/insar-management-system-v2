@@ -158,6 +158,7 @@ AOI_UPLOAD_MAX_TOTAL_BYTES = max(
     AOI_UPLOAD_MAX_SINGLE_FILE_BYTES,
 )
 AOI_UPLOAD_STREAM_CHUNK_BYTES = 1024 * 1024
+_SHAPEFILE_READ_LOCK = asyncio.Lock()
 
 # ---------------------------------------------------------------------------
 # Region index caches
@@ -805,6 +806,20 @@ def _parse_aoi_geojson_form_value(aoi_geojson: Optional[str]) -> Optional[Tuple[
     return merged_geometry.wkt, feature_collection
 
 
+def _read_aoi_shapefile_with_restore_shx(shp_path: str):
+    import geopandas as gpd
+
+    previous_restore_shx = os.environ.get("SHAPE_RESTORE_SHX")
+    os.environ["SHAPE_RESTORE_SHX"] = "YES"
+    try:
+        return gpd.read_file(shp_path, engine="pyogrio")
+    finally:
+        if previous_restore_shx is None:
+            os.environ.pop("SHAPE_RESTORE_SHX", None)
+        else:
+            os.environ["SHAPE_RESTORE_SHX"] = previous_restore_shx
+
+
 async def _parse_aoi_from_files(files: Optional[List[UploadFile]]) -> Optional[Tuple[str, Dict[str, Any]]]:
     if not files:
         return None
@@ -869,9 +884,17 @@ async def _parse_aoi_from_files(files: Optional[List[UploadFile]]) -> Optional[T
                     geojson_payload = json.loads(Path(dest_path).read_text(encoding="gbk"))
 
         if shp_path:
-            import geopandas as gpd
-
-            gdf = await asyncio.to_thread(gpd.read_file, shp_path, engine="pyogrio")
+            try:
+                async with _SHAPEFILE_READ_LOCK:
+                    gdf = await asyncio.to_thread(_read_aoi_shapefile_with_restore_shx, shp_path)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "AOI Shapefile 读取失败。系统已尝试自动恢复缺失的 .shx 索引；"
+                        f"请确认已上传 .shp/.dbf/.prj/.shx 或可恢复的标准 Shapefile。原始错误: {exc}"
+                    ),
+                ) from exc
             if gdf.crs and gdf.crs.to_epsg() != 4326:
                 gdf = gdf.to_crs(epsg=4326)
             feature_collection = json.loads(gdf.to_json())

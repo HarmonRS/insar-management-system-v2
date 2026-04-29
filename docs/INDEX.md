@@ -49,6 +49,8 @@
 
 - [ISCE2_SBAS_TIMESERIES_DESIGN.md](ISCE2_SBAS_TIMESERIES_DESIGN.md)
 - [ISCE2_SBAS_PRODUCT_SPEC.md](ISCE2_SBAS_PRODUCT_SPEC.md)
+- [ISCE2_SBAS_ENGINEERING_DESIGN_20260428.md](ISCE2_SBAS_ENGINEERING_DESIGN_20260428.md)
+  Current-phase engineering design for the managed ISCE2 + MintPy SBAS route.
 
 说明：
 
@@ -82,6 +84,13 @@
 ## 6. 安全与审计
 
 - [SECURITY_AUDIT_2026-03-12.md](SECURITY_AUDIT_2026-03-12.md)
+
+## Clone Bootstrap
+
+- [../scripts/bootstrap_clone.ps1](../scripts/bootstrap_clone.ps1)
+  Fresh-server bootstrap entry for clone-based deployment. It keeps `.env`
+  initialization, frontend dependency install/build, runtime bootstrap, and
+  deployment validation in one place without changing the main startup chain.
 
 ## 7. 工作笔记
 

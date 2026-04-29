@@ -5,9 +5,11 @@
 """
 import hashlib
 import json
+import logging
 import math
 import uuid
 from collections import defaultdict
+from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +35,8 @@ from ..models import (
     RadarDataORM,
     RadarPair,
     ResultProductORM,
+    TimeseriesStackPlanItemORM,
+    TimeseriesStackPlanORM,
 )
 from .dinsar_naming import build_pair_key, build_task_alias, ensure_unique_task_aliases
 from .pairing_state_service import pairing_state_service
@@ -40,6 +44,7 @@ from .pairing_state_service import pairing_state_service
 
 PAIRING_POLICY_VERSION = "2026.04.phase3.v1"
 PAIRING_WARNING_CANDIDATE_THRESHOLD = 3000
+logger = logging.getLogger(__name__)
 
 
 class SpatialService:
@@ -359,6 +364,142 @@ class SpatialService:
         else:
             payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _build_timeseries_stack_identity(
+        self,
+        direction: Optional[str],
+        scenes: List[RadarDataORM],
+    ) -> Dict[str, Any]:
+        sorted_scenes = sorted(scenes, key=lambda item: str(item.imaging_date or ""))
+        first = sorted_scenes[0]
+        satellite = self._normalize_timeseries_satellite_family(first)
+        imaging_mode = str(first.imaging_mode or "").strip() or "UNKNOWN"
+        polarization = str(first.polarization or "").strip() or "UNKNOWN"
+        orbit_direction = (
+            str(direction or first.orbit_direction or "").strip().upper() or "UNKNOWN"
+        )
+        group_key = "_".join(
+            part
+            for part in (satellite, imaging_mode, polarization, orbit_direction)
+            if str(part).strip()
+        )
+        stack_dates = [
+            str(item.imaging_date or "").strip()
+            for item in sorted_scenes
+            if str(item.imaging_date or "").strip()
+        ]
+        digest = self._stable_sha1(
+            {
+                "direction": orbit_direction,
+                "scene_ids": [int(item.id) for item in sorted_scenes],
+                "stack_dates": stack_dates,
+            }
+        )[:10]
+        date_start = stack_dates[0] if stack_dates else "NA"
+        date_end = stack_dates[-1] if stack_dates else "NA"
+        return {
+            "direction": orbit_direction,
+            "group_key": group_key,
+            "stack_key": f"{group_key}_{date_start}_{date_end}_{digest}",
+            "stack_dates": stack_dates,
+        }
+
+    async def _persist_timeseries_stack_plan(
+        self,
+        db: AsyncSession,
+        *,
+        direction: Optional[str],
+        params: PsRequest,
+        aoi_wkt: Optional[str],
+        scenes: List[RadarDataORM],
+        common_aoi_coverage_ratio: Optional[float] = None,
+        coverage_consistency_ratio: Optional[float] = None,
+        threshold_satisfied: Optional[bool] = None,
+        selection_mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        request_payload = params.model_dump(exclude_none=True)
+        aoi_hash = self._stable_sha1(aoi_wkt) if aoi_wkt else None
+        identity = self._build_timeseries_stack_identity(direction, scenes)
+        plan = TimeseriesStackPlanORM(
+            plan_id=f"tsp_{uuid.uuid4().hex[:24]}",
+            strategy="sbas_stack",
+            request_hash=self._stable_sha1(
+                {
+                    "params": request_payload,
+                    "aoi_hash": aoi_hash,
+                    "direction": identity.get("direction"),
+                    "scene_ids": [int(item.id) for item in scenes],
+                }
+            ),
+            request_params_json=request_payload,
+            aoi_source="wkt" if aoi_wkt else None,
+            aoi_hash=aoi_hash,
+            aoi_summary_json=self._build_aoi_summary(aoi_wkt),
+            direction=identity.get("direction"),
+            scene_count=len(scenes),
+            stack_key=identity.get("stack_key"),
+            group_key=identity.get("group_key"),
+            status="READY",
+            created_by="system:find_ps_timeseries",
+        )
+        db.add(plan)
+        await db.flush()
+
+        sorted_scenes = sorted(scenes, key=lambda item: str(item.imaging_date or ""))
+        scene_payloads: List[RadarData] = []
+        for rank, item in enumerate(sorted_scenes, start=1):
+            plan_item = TimeseriesStackPlanItemORM(
+                plan_ref_id=plan.id,
+                radar_data_ref_id=int(item.id) if item.id is not None else None,
+                scene_rank=rank,
+                file_path=item.file_path,
+                satellite=item.satellite,
+                imaging_date=item.imaging_date,
+                imaging_mode=item.imaging_mode,
+                polarization=item.polarization,
+                has_orbit_data=bool(item.has_orbit_data),
+                selection_meta_json={
+                    "source": "find_ps_timeseries",
+                    "direction": identity.get("direction"),
+                    "group_key": identity.get("group_key"),
+                    "stack_key": identity.get("stack_key"),
+                    "initial_overlap_threshold": params.initial_overlap_threshold,
+                    "final_overlap_threshold": params.final_overlap_threshold,
+                    "common_aoi_coverage_ratio": common_aoi_coverage_ratio,
+                    "coverage_consistency_ratio": coverage_consistency_ratio,
+                    "threshold_satisfied": threshold_satisfied,
+                    "selection_mode": selection_mode,
+                    "orbit_direction": item.orbit_direction,
+                    "satellite_family": self._normalize_timeseries_satellite_family(item),
+                    "bbox": [item.min_lon, item.min_lat, item.max_lon, item.max_lat],
+                    "scene_unique_id": item.unique_id,
+                },
+            )
+            db.add(plan_item)
+            await db.flush()
+            scene_payloads.append(
+                RadarData.model_validate(item).model_copy(
+                    update={
+                        "orbit_direction": identity.get("direction") or item.orbit_direction,
+                        "stack_plan_id": plan.plan_id,
+                        "stack_plan_item_id": int(plan_item.id),
+                        "stack_scene_rank": rank,
+                        "stack_group_key": identity.get("group_key"),
+                        "stack_key": identity.get("stack_key"),
+                        "stack_common_aoi_coverage_ratio": common_aoi_coverage_ratio,
+                        "stack_coverage_consistency_ratio": coverage_consistency_ratio,
+                        "stack_threshold_satisfied": threshold_satisfied,
+                        "stack_selection_mode": selection_mode,
+                    }
+                )
+            )
+
+        return {
+            "plan_id": plan.plan_id,
+            "group_key": identity.get("group_key"),
+            "stack_key": identity.get("stack_key"),
+            "scenes": scene_payloads,
+        }
 
     def _apply_strategy(
         self,
@@ -833,6 +974,220 @@ class SpatialService:
     def _generate_task_names(self, pairs: List[RadarPair]) -> List[RadarPair]:
         return ensure_unique_task_aliases(pairs)
 
+    def _normalize_timeseries_direction(self, image: RadarDataORM) -> str:
+        raw_direction = str(image.orbit_direction or "").strip().upper()
+        if raw_direction in {"ASC", "ASCENDING"}:
+            return "ASC"
+        if raw_direction in {"DSC", "DESC", "DESCENDING"}:
+            return "DSC"
+        if "ASC" in raw_direction:
+            return "ASC"
+        if "DSC" in raw_direction or "DESC" in raw_direction:
+            return "DSC"
+        return raw_direction or "UNKNOWN"
+
+    def _normalize_timeseries_satellite_family(self, image: RadarDataORM) -> str:
+        raw_satellite = str(image.satellite or "").strip().upper()
+        compact = raw_satellite.replace("-", "").replace("_", "").replace(" ", "")
+        if compact in {"LT1", "LT1A", "LT1B", "LUTAN1", "LUTAN1A", "LUTAN1B"}:
+            return "LT1"
+        if compact in {"S1", "S1A", "S1B", "SENTINEL1", "SENTINEL1A", "SENTINEL1B"}:
+            return "S1"
+        return raw_satellite or "UNKNOWN"
+
+    def _timeseries_compatibility_key(self, image: RadarDataORM) -> Tuple[str, str, str, str]:
+        return (
+            self._normalize_timeseries_direction(image),
+            self._normalize_timeseries_satellite_family(image),
+            str(image.imaging_mode or "UNKNOWN").strip().upper() or "UNKNOWN",
+            str(image.polarization or "UNKNOWN").strip().upper() or "UNKNOWN",
+        )
+
+    def _format_timeseries_group_label(self, group_key: Tuple[str, str, str, str]) -> str:
+        return "_".join(part for part in group_key if part and part != "UNKNOWN") or "STACK"
+
+    async def _calculate_wkt_area(self, db: AsyncSession, geom_wkt: str) -> float:
+        geom = func.ST_GeomFromText(geom_wkt, 4326)
+        result = await db.execute(select(ST_Area(cast(geom, Geography))))
+        return float(result.scalar() or 0.0)
+
+    async def _select_stable_timeseries_stack(
+        self,
+        db: AsyncSession,
+        images: List[RadarDataORM],
+        params: PsRequest,
+        *,
+        aoi_wkt: str,
+        aoi_area: float,
+    ) -> Tuple[List[RadarDataORM], float, float, bool, str]:
+        original_images = sorted(images, key=lambda item: (str(item.imaging_date or ""), int(item.id or 0)))
+        remaining = list(original_images)
+        best_stack: List[RadarDataORM] = []
+        best_consistency_ratio = 0.0
+        best_common_aoi_ratio = 0.0
+        min_stack_size = 3
+        target_ratio = float(params.final_overlap_threshold)
+        scene_aoi_areas: Dict[int, float] = {}
+        for img in remaining:
+            if img.id is None:
+                continue
+            scene_aoi_areas[int(img.id)] = await self._calculate_overlap_area(db, int(img.id), aoi_wkt)
+
+        def _score_stack(stack: List[RadarDataORM], common_area: float) -> Tuple[float, float]:
+            scene_areas = [
+                float(scene_aoi_areas.get(int(img.id or 0)) or 0.0)
+                for img in stack
+                if img.id is not None
+            ]
+            min_scene_area = min(scene_areas) if scene_areas else 0.0
+            consistency_ratio = common_area / min_scene_area if min_scene_area > 0 else 0.0
+            common_aoi_ratio = common_area / aoi_area if aoi_area > 0 else 0.0
+            return (
+                max(0.0, min(consistency_ratio, 1.0)),
+                max(0.0, min(common_aoi_ratio, 1.0)),
+            )
+
+        while len(remaining) >= min_stack_size:
+            common_overlap = await self._find_common_overlap(
+                db,
+                [int(img.id) for img in remaining if img.id is not None],
+                clip_wkt=aoi_wkt,
+            )
+            common_area = float((common_overlap or {}).get("area") or 0.0)
+            consistency_ratio, common_aoi_ratio = _score_stack(remaining, common_area)
+
+            if (
+                consistency_ratio > best_consistency_ratio + 1e-9
+                or (
+                    abs(consistency_ratio - best_consistency_ratio) <= 1e-9
+                    and common_aoi_ratio > best_common_aoi_ratio + 1e-9
+                )
+                or (
+                    abs(consistency_ratio - best_consistency_ratio) <= 1e-9
+                    and abs(common_aoi_ratio - best_common_aoi_ratio) <= 1e-9
+                    and len(remaining) > len(best_stack)
+                )
+            ):
+                best_stack = list(remaining)
+                best_consistency_ratio = consistency_ratio
+                best_common_aoi_ratio = common_aoi_ratio
+
+            if consistency_ratio >= target_ratio:
+                return remaining, consistency_ratio, common_aoi_ratio, True, "common_overlap"
+
+            if len(remaining) == min_stack_size:
+                break
+
+            trial_options: List[Tuple[float, float, int, List[RadarDataORM]]] = []
+            for remove_index, _ in enumerate(remaining):
+                trial = remaining[:remove_index] + remaining[remove_index + 1:]
+                trial_overlap = await self._find_common_overlap(
+                    db,
+                    [int(img.id) for img in trial if img.id is not None],
+                    clip_wkt=aoi_wkt,
+                )
+                trial_area = float((trial_overlap or {}).get("area") or 0.0)
+                trial_consistency_ratio, trial_common_aoi_ratio = _score_stack(trial, trial_area)
+                removed_id = int(remaining[remove_index].id or 0)
+                trial_options.append((trial_consistency_ratio, trial_common_aoi_ratio, -removed_id, trial))
+
+            if not trial_options:
+                break
+
+            _, _, _, remaining = max(trial_options, key=lambda item: (item[0], item[1], item[2]))
+
+        if best_consistency_ratio >= target_ratio and len(best_stack) >= min_stack_size:
+            return best_stack, best_consistency_ratio, best_common_aoi_ratio, True, "common_overlap"
+
+        network_stack, network_ratio = await self._select_pairwise_sbas_network_stack(
+            db,
+            original_images,
+            scene_aoi_areas,
+            target_ratio,
+            aoi_wkt=aoi_wkt,
+        )
+        if len(network_stack) >= min_stack_size:
+            return network_stack, network_ratio, best_common_aoi_ratio, True, "pairwise_sbas_network"
+
+        return [], best_consistency_ratio, best_common_aoi_ratio, False, "none"
+
+    async def _select_pairwise_sbas_network_stack(
+        self,
+        db: AsyncSession,
+        images: List[RadarDataORM],
+        scene_aoi_areas: Dict[int, float],
+        target_ratio: float,
+        *,
+        aoi_wkt: str,
+    ) -> Tuple[List[RadarDataORM], float]:
+        if len(images) < 3:
+            return [], 0.0
+
+        image_by_id = {int(img.id): img for img in images if img.id is not None}
+        adjacency: Dict[int, List[Tuple[int, float]]] = {scene_id: [] for scene_id in image_by_id}
+
+        aoi_geom = func.ST_GeomFromText(aoi_wkt, 4326)
+        for left, right in combinations(images, 2):
+            if left.id is None or right.id is None:
+                continue
+            left_id = int(left.id)
+            right_id = int(right.id)
+            left_area = float(scene_aoi_areas.get(left_id) or 0.0)
+            right_area = float(scene_aoi_areas.get(right_id) or 0.0)
+            min_scene_area = min(left_area, right_area)
+            if min_scene_area <= 0:
+                continue
+
+            left_geom = select(RadarDataORM.geom).where(RadarDataORM.id == left_id).scalar_subquery()
+            right_geom = select(RadarDataORM.geom).where(RadarDataORM.id == right_id).scalar_subquery()
+            pair_geom = ST_Intersection(ST_Intersection(left_geom, right_geom), aoi_geom)
+            result = await db.execute(select(ST_Area(cast(pair_geom, Geography))))
+            pair_area = float(result.scalar() or 0.0)
+            pair_ratio = max(0.0, min(pair_area / min_scene_area, 1.0))
+            if pair_ratio >= target_ratio:
+                adjacency[left_id].append((right_id, pair_ratio))
+                adjacency[right_id].append((left_id, pair_ratio))
+
+        visited: set[int] = set()
+        best_component: List[int] = []
+        best_component_ratio = 0.0
+
+        for scene_id in sorted(adjacency):
+            if scene_id in visited:
+                continue
+            stack = [scene_id]
+            visited.add(scene_id)
+            component: List[int] = []
+            component_edge_ratios: List[float] = []
+            while stack:
+                current = stack.pop()
+                component.append(current)
+                for neighbor, ratio in adjacency.get(current, []):
+                    component_edge_ratios.append(float(ratio))
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        stack.append(neighbor)
+
+            if len(component) < 3:
+                continue
+            component_ratio = min(component_edge_ratios) if component_edge_ratios else 0.0
+            if (
+                len(component) > len(best_component)
+                or (
+                    len(component) == len(best_component)
+                    and component_ratio > best_component_ratio
+                )
+            ):
+                best_component = component
+                best_component_ratio = component_ratio
+
+        if len(best_component) < 3:
+            return [], 0.0
+
+        selected = [image_by_id[scene_id] for scene_id in best_component if scene_id in image_by_id]
+        selected.sort(key=lambda item: (str(item.imaging_date or ""), int(item.id or 0)))
+        return selected, best_component_ratio
+
     async def find_ps_timeseries_data(
         self,
         db: AsyncSession,
@@ -850,9 +1205,14 @@ class SpatialService:
         Returns:
             按轨道方向分组的影像字典
         """
-        # 1. 初始筛选：找到与 AOI 相交的影像
+        # 1. 初始筛选：找到与 AOI 相交且单景覆盖率达标的影像
         aoi_geom = func.ST_GeomFromText(aoi_wkt, 4326)
         aoi_geog = cast(aoi_geom, Geography)
+        aoi_area = await self._calculate_wkt_area(db, aoi_wkt)
+        if aoi_area <= 0:
+            logger.warning("timeseries stack planning skipped: AOI area is empty")
+            return {}
+
         intersection_geog = cast(ST_Intersection(RadarDataORM.geom, aoi_geom), Geography)
         stmt = select(RadarDataORM).where(
             and_(
@@ -863,49 +1223,93 @@ class SpatialService:
         
         result = await db.execute(stmt)
         candidates = result.scalars().all()
+        logger.info(
+            "timeseries stack planning: candidates_after_aoi_gate=%s initial_threshold=%.3f final_consistency_threshold=%.3f",
+            len(candidates),
+            float(params.initial_overlap_threshold),
+            float(params.final_overlap_threshold),
+        )
         
         if not candidates:
             return {}
         
-        # 2. 按轨道分组
-        images_by_orbit: Dict[str, List[RadarDataORM]] = {}
+        # 2. 按轨道方向、卫星、成像模式、极化分组，避免混入不兼容场景。
+        images_by_group: Dict[Tuple[str, str, str, str], List[RadarDataORM]] = {}
         for img in candidates:
-            direction = img.orbit_direction or ("ASC" if "ASC" in img.satellite else "DSC")
-            images_by_orbit.setdefault(direction, []).append(img)
+            images_by_group.setdefault(self._timeseries_compatibility_key(img), []).append(img)
+        logger.info(
+            "timeseries stack planning: compatible_groups=%s group_sizes=%s",
+            len(images_by_group),
+            {
+                self._format_timeseries_group_label(group_key): len(items)
+                for group_key, items in images_by_group.items()
+            },
+        )
         
-        # 3. 计算每个轨道的公共重叠区
+        # 3. 每个兼容组内寻找满足公共 AOI 覆盖阈值的最大稳定候选栈。
         final_results: Dict[str, List[RadarData]] = {}
+        plans_created = False
         
-        for direction, images in images_by_orbit.items():
-            if len(images) < 2:
+        for group_key, images in images_by_group.items():
+            if len(images) < 3:
+                logger.info(
+                    "timeseries stack planning: group=%s skipped because scene_count=%s < 3",
+                    self._format_timeseries_group_label(group_key),
+                    len(images),
+                )
                 continue
             
             try:
-                # 查找公共重叠区
-                common_overlap = await self._find_common_overlap(db, [img.id for img in images])
-
-                if not common_overlap or common_overlap["area"] < 1e-6:
-                    continue
-
-                common_geom = common_overlap["geom"]
-                common_area = common_overlap["area"]
-
-                # 4. 最终筛选：覆盖公共区域一定比例的影像
-                final_stack = []
-
-                for img in images:
-                    img_overlap = await self._calculate_overlap_area(db, img.id, common_geom.wkt)
-                    if img_overlap / common_area >= params.final_overlap_threshold:
-                        final_stack.append(RadarData.model_validate(img))
-                
-                if len(final_stack) >= 2:
-                    final_stack.sort(key=lambda x: x.imaging_date)
-                    final_results[direction] = final_stack
+                (
+                    final_stack,
+                    consistency_ratio,
+                    common_aoi_ratio,
+                    threshold_satisfied,
+                    selection_mode,
+                ) = await self._select_stable_timeseries_stack(
+                    db,
+                    images,
+                    params,
+                    aoi_wkt=aoi_wkt,
+                    aoi_area=aoi_area,
+                )
+                logger.info(
+                    "timeseries stack planning: group=%s input_scenes=%s selected_scenes=%s consistency=%.4f common_aoi=%.4f threshold_satisfied=%s mode=%s",
+                    self._format_timeseries_group_label(group_key),
+                    len(images),
+                    len(final_stack),
+                    consistency_ratio,
+                    common_aoi_ratio,
+                    threshold_satisfied,
+                    selection_mode,
+                )
+                if len(final_stack) >= 3:
+                    final_stack.sort(key=lambda x: str(x.imaging_date or ""))
+                    direction = group_key[0]
+                    persisted_plan = await self._persist_timeseries_stack_plan(
+                        db,
+                        direction=direction,
+                        params=params,
+                        aoi_wkt=aoi_wkt,
+                        scenes=final_stack,
+                        common_aoi_coverage_ratio=common_aoi_ratio,
+                        coverage_consistency_ratio=consistency_ratio,
+                        threshold_satisfied=threshold_satisfied,
+                        selection_mode=selection_mode,
+                    )
+                    result_key = persisted_plan.get("group_key") or self._format_timeseries_group_label(group_key)
+                    if result_key in final_results:
+                        result_key = f"{result_key}_{len(final_results) + 1}"
+                    final_results[result_key] = persisted_plan["scenes"]
+                    plans_created = True
                     
             except Exception as e:
-                print(f"处理轨道 {direction} 时出错: {e}")
+                print(f"处理时序候选组 {self._format_timeseries_group_label(group_key)} 时出错: {e}")
                 continue
         
+        if plans_created:
+            await db.commit()
+
         return final_results
     
     async def find_hazard_points_in_area(
@@ -1044,7 +1448,8 @@ class SpatialService:
     async def _find_common_overlap(
         self,
         db: AsyncSession,
-        image_ids: List[int]
+        image_ids: List[int],
+        clip_wkt: Optional[str] = None,
     ) -> Optional[dict]:
         """
         Compute common overlap geometry and area using DB aggregation.
@@ -1052,7 +1457,12 @@ class SpatialService:
         if not image_ids:
             return None
 
-        intersection_expr = func.st_intersection_agg(RadarDataORM.geom)
+        geom_expr = RadarDataORM.geom
+        if clip_wkt:
+            clip_geom = func.ST_GeomFromText(clip_wkt, 4326)
+            geom_expr = ST_Intersection(RadarDataORM.geom, clip_geom)
+
+        intersection_expr = func.st_intersection_agg(geom_expr)
         stmt = select(
             ST_Area(cast(intersection_expr, Geography)).label("common_area"),
             intersection_expr.label("common_geom")
@@ -1062,11 +1472,7 @@ class SpatialService:
         if not row or not row.common_geom:
             return None
 
-        try:
-            return {"geom": to_shape(row.common_geom), "area": float(row.common_area or 0)}
-        except Exception as exc:
-            print(f"[WARN] _compute_footprint: {exc}")
-            return None
+        return {"geom": row.common_geom, "area": float(row.common_area or 0)}
 
     def _optimize_coverage_diversity(
         self,

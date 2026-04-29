@@ -26,7 +26,7 @@ export default function usePairingLogic({
         psParams, setShowPsModal, setPsResults,
     } = usePairingStore();
     const { setAoiLayer } = useMapStore();
-    const { setBatchTab, setSelectedBatchId, setBatchItems } = useBatchStore();
+    const { setBatchTab, setSelectedBatchId, setBatchItems, setPendingTimeseriesBatchId } = useBatchStore();
     const { currentUser } = useAuthStore();
 
     const isAdmin = currentUser?.role === 'admin';
@@ -51,15 +51,48 @@ export default function usePairingLogic({
 
     const createPsBatch = async (direction, stack, options = {}) => {
         if (!ensureCanOperate()) return;
-        const { focusAfterCreate = true } = options;
+        const { focusAfterCreate = true, sendToProduction = false } = options;
+        if (!Array.isArray(stack) || stack.length < 3) {
+            addLog('warn', `当前候选栈仅 ${Array.isArray(stack) ? stack.length : 0} 景，SBAS 至少需要 3 景。`);
+            return;
+        }
+        const firstScene = stack[0] || {};
+        const planId = firstScene.stack_plan_id || null;
+        const batchDirection = firstScene.orbit_direction || direction;
+        const planningContext = {
+            source: planId ? 'timeseries_stack_plan' : 'find_ps_timeseries',
+            plan_id: planId,
+            strategy: 'sbas_stack',
+            direction: batchDirection,
+            display_group: direction,
+            scene_count: stack.length,
+            group_key: firstScene.stack_group_key || null,
+            stack_key: firstScene.stack_key || null,
+            initial_overlap_threshold: psParams?.initial_overlap_threshold ?? null,
+            final_overlap_threshold: psParams?.final_overlap_threshold ?? null,
+            stack_dates: stack.map(item => item.imaging_date).filter(Boolean),
+        };
         try {
             const response = await apiClient.post('/task-batches/ps', {
-                direction,
+                direction: batchDirection,
+                plan_id: planId,
                 stack,
-                name: `PS_${direction}_${new Date().toISOString().slice(0, 10)}`
+                name: `TS_${batchDirection}_${new Date().toISOString().slice(0, 10)}`,
+                planning_context: planningContext,
             });
             const batchId = response.data?.batch_id || '';
-            addLog('success', `已创建时序批次: ${batchId || direction}`);
+            if (planId && batchId) {
+                addLog('info', `时序批次已关联候选栈计划 ${planId}`);
+            }
+            addLog('success', `已创建时序批次: ${batchId || batchDirection}`);
+            if (batchId && sendToProduction) {
+                setBatchTab('ps');
+                setSelectedBatchId(batchId);
+                setPendingTimeseriesBatchId(batchId);
+                setLeftPanelTab('ps_production');
+                addLog('info', `已将批次 ${batchId} 送入时序生产入口。`);
+                return;
+            }
             if (focusAfterCreate && batchId) {
                 await focusBatchAfterCreate('ps', batchId);
             }
@@ -264,7 +297,7 @@ export default function usePairingLogic({
                     await createPsBatch(direction, stack, { focusAfterCreate: false });
                 }
             } else {
-                addLog('info', '在给定的AOI和阈值下，未找到合适的时序影像栈。');
+                addLog('info', '在给定的AOI和阈值下，未找到满足 SBAS 至少 3 景要求的时序影像栈。');
                 setLeftPanelTab('ps_results');
             }
         } catch (error) {

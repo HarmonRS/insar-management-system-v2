@@ -442,6 +442,72 @@ class PairingNetworkEdgeORM(Base):
     )
 
 
+class TimeseriesStackPlanORM(Base):
+    __tablename__ = "timeseries_stack_plans"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plan_id = Column(String(64), unique=True, index=True, nullable=False)
+    strategy = Column(String(32), index=True, nullable=False, default="sbas_stack")
+    request_hash = Column(String(64), index=True, nullable=True)
+    request_params_json = Column(JSON, nullable=True)
+    aoi_source = Column(String(32), nullable=True)
+    aoi_hash = Column(String(64), index=True, nullable=True)
+    aoi_summary_json = Column(JSON, nullable=True)
+    direction = Column(String(32), index=True, nullable=True)
+    scene_count = Column(Integer, nullable=False, default=0)
+    stack_key = Column(String(128), index=True, nullable=True)
+    group_key = Column(String(128), index=True, nullable=True)
+    status = Column(String(16), index=True, nullable=False, default="READY")
+    created_by = Column(String(64), nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    items = relationship(
+        "TimeseriesStackPlanItemORM",
+        back_populates="plan",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("idx_timeseries_stack_plans_direction_created", "direction", "created_at"),
+    )
+
+
+class TimeseriesStackPlanItemORM(Base):
+    __tablename__ = "timeseries_stack_plan_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plan_ref_id = Column(
+        Integer,
+        ForeignKey("timeseries_stack_plans.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    radar_data_ref_id = Column(
+        Integer,
+        ForeignKey("radar_data.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    scene_rank = Column(Integer, nullable=False, default=0)
+    file_path = Column(String, nullable=False)
+    satellite = Column(String, nullable=True)
+    imaging_date = Column(String, nullable=True)
+    imaging_mode = Column(String, nullable=True)
+    polarization = Column(String, nullable=True)
+    has_orbit_data = Column(Boolean, nullable=False, default=False)
+    selection_meta_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    plan = relationship("TimeseriesStackPlanORM", back_populates="items")
+    radar_data = relationship("RadarDataORM")
+
+    __table_args__ = (
+        UniqueConstraint("plan_ref_id", "scene_rank", name="uq_timeseries_plan_items_plan_rank"),
+        Index("idx_timeseries_plan_items_plan_date", "plan_ref_id", "imaging_date"),
+    )
+
+
 class HazardPointORM(Base):
     __tablename__ = 'hazard_points'
 
@@ -901,6 +967,8 @@ class PsTaskBatchORM(Base):
     batch_id = Column(String, unique=True, index=True, nullable=False)
     name = Column(String, nullable=True)
     direction = Column(String, nullable=True)
+    plan_id = Column(String(64), index=True, nullable=True)
+    plan_strategy = Column(String(32), nullable=True)
     status = Column(String, index=True, nullable=False, default="PENDING")
     total_items = Column(Integer, default=0)
     completed_items = Column(Integer, default=0)
@@ -915,6 +983,7 @@ class PsTaskItemORM(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     batch_id = Column(String, ForeignKey("ps_task_batches.batch_id"), index=True, nullable=False)
+    plan_item_ref_id = Column(Integer, index=True, nullable=True)
 
     file_path = Column(String, nullable=False)
     satellite = Column(String, nullable=True)
@@ -937,6 +1006,8 @@ class PsTimeseriesRunORM(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(String(64), unique=True, index=True, nullable=False)
     batch_id = Column(String, ForeignKey("ps_task_batches.batch_id"), index=True, nullable=False)
+    plan_id = Column(String(64), index=True, nullable=True)
+    plan_strategy = Column(String(32), nullable=True)
 
     product_family = Column(String(32), index=True, nullable=True)
     run_name = Column(String(255), nullable=False)

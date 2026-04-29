@@ -194,6 +194,15 @@ class RadarData(BaseModel):
     preview_cache_version: Optional[str] = None
     preview_cache_updated_at: Optional[datetime] = None
     preview_cache_error: Optional[str] = None
+    stack_plan_id: Optional[str] = None
+    stack_plan_item_id: Optional[int] = None
+    stack_scene_rank: Optional[int] = None
+    stack_group_key: Optional[str] = None
+    stack_key: Optional[str] = None
+    stack_common_aoi_coverage_ratio: Optional[float] = None
+    stack_coverage_consistency_ratio: Optional[float] = None
+    stack_threshold_satisfied: Optional[bool] = None
+    stack_selection_mode: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -342,8 +351,50 @@ class PairingResponse(BaseModel):
 
 class PsRequest(BaseModel):
     """PS-InSAR 时序分析数据准备的请求模型。"""
-    initial_overlap_threshold: float = 0.3
-    final_overlap_threshold: float = 0.95
+    initial_overlap_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    final_overlap_threshold: float = Field(default=0.95, ge=0.0, le=1.0)
+
+
+class TimeseriesStackPlanItem(BaseModel):
+    id: int
+    plan_ref_id: int
+    radar_data_ref_id: Optional[int] = None
+    scene_rank: int
+    file_path: str
+    satellite: Optional[str] = None
+    imaging_date: Optional[str] = None
+    imaging_mode: Optional[str] = None
+    polarization: Optional[str] = None
+    has_orbit_data: bool
+    selection_meta_json: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TimeseriesStackPlan(BaseModel):
+    id: int
+    plan_id: str
+    strategy: str
+    request_hash: Optional[str] = None
+    request_params_json: Optional[Dict[str, Any]] = None
+    aoi_source: Optional[str] = None
+    aoi_hash: Optional[str] = None
+    aoi_summary_json: Optional[Dict[str, Any]] = None
+    direction: Optional[str] = None
+    scene_count: int
+    stack_key: Optional[str] = None
+    group_key: Optional[str] = None
+    status: str
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TimeseriesStackPlanDetail(TimeseriesStackPlan):
+    items: List[TimeseriesStackPlanItem] = Field(default_factory=list)
 
 
 class TaskInfo(BaseModel):
@@ -446,6 +497,8 @@ class PsTaskBatch(BaseModel):
     batch_id: str
     name: Optional[str] = None
     direction: Optional[str] = None
+    plan_id: Optional[str] = None
+    plan_strategy: Optional[str] = None
     status: str
     total_items: int
     completed_items: int
@@ -458,6 +511,7 @@ class PsTaskBatch(BaseModel):
 class PsTaskItem(BaseModel):
     id: int
     batch_id: str
+    plan_item_ref_id: Optional[int] = None
     file_path: str
     satellite: Optional[str] = None
     imaging_date: Optional[str] = None
@@ -474,6 +528,8 @@ class PsTaskItem(BaseModel):
 class PsTimeseriesRun(BaseModel):
     run_id: str
     batch_id: str
+    plan_id: Optional[str] = None
+    plan_strategy: Optional[str] = None
     product_family: Optional[str] = None
     run_name: str
     catalog_name: str

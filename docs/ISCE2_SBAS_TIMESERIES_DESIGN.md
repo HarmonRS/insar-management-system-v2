@@ -1,6 +1,6 @@
 # ISCE2 SBAS Time-Series Production Design
 
-Updated: 2026-04-06
+Updated: 2026-04-29
 
 ## 1. Goal
 
@@ -125,6 +125,33 @@ Current LT-1 stack experiment status already de-risks the processing side of pha
   - compatibility rule:
     - the original pair-oriented D-InSAR public entry was not removed
     - `backend/app/isce2_pipeline/run_lt1_dinsar_pipeline.py` still owns the existing workflow entry and now delegates shared input preparation to the helper
+
+### 2.5 Stack Planning Thresholds
+
+The planning entry that historically used the old PS preparation label is now treated as time-series stack preparation.
+The internal API path remains `/find-ps-timeseries` for compatibility.
+
+Current threshold meaning:
+
+- `initial_overlap_threshold`
+  - single-scene AOI coverage gate
+  - formula: `area(scene footprint ∩ AOI) / area(AOI)`
+  - default: `0.30`
+  - purpose: remove scenes that barely intersect the study area
+- `final_overlap_threshold`
+  - final stack footprint consistency gate
+  - formula: `area(common footprint of selected stack ∩ AOI) / min(area(each selected scene footprint ∩ AOI))`
+  - default: `0.95`
+  - purpose: ensure the retained stack has a stable common processing area without requiring each strip to cover the whole AOI
+
+Planning algorithm rule:
+
+- first group candidates by orbit direction, satellite family, imaging mode, and polarization
+- `LT1A` and `LT1B` are treated as the same `LT1` satellite family for stack planning
+- then search each compatible group for the largest stack whose footprint consistency satisfies `final_overlap_threshold`
+- when one or more outlier scenes break the common area, the planner may drop scenes until a valid stack is found
+- if no all-scene common-overlap stack exists, the planner may return a connected pairwise SBAS network when each retained network edge satisfies `final_overlap_threshold`
+- at least 3 scenes are required before a stack can be persisted as a `TimeseriesStackPlan`
 
 ## 3. Recommendation
 

@@ -193,6 +193,9 @@ def check_wsl_environment(
         "bash -lc 可执行",
         "Python 可执行",
         "ISCE2 可 import",
+        "astropy.convolution import",
+        "cv2 import",
+        "scipy import",
         "stripmapApp 存在",
         "生产脚本存在",
         "DEM 路径可读",
@@ -278,6 +281,27 @@ def check_wsl_environment(
     )
     isce_ok = rc == 0
     add("ISCE2 可 import", isce_ok, out or err)
+
+    rc, out, err = run_wsl_command(
+        f'{python_cmd} -c "from astropy.convolution import convolve; print(\'astropy_ok\')"',
+        distro=distro, timeout=30,
+    )
+    astropy_ok = rc == 0 and "astropy_ok" in out
+    add("astropy.convolution import", astropy_ok, out or err)
+
+    rc, out, err = run_wsl_command(
+        f'{python_cmd} -c "import cv2; print(\'cv2_ok\')"',
+        distro=distro, timeout=30,
+    )
+    cv2_ok = rc == 0 and "cv2_ok" in out
+    add("cv2 import", cv2_ok, out or err)
+
+    rc, out, err = run_wsl_command(
+        f'{python_cmd} -c "import scipy; print(\'scipy_ok\')"',
+        distro=distro, timeout=30,
+    )
+    scipy_ok = rc == 0 and "scipy_ok" in out
+    add("scipy import", scipy_ok, out or err)
 
     # 8. stripmapApp.py 存在（全路径检查）
     if stripmap_app_path:

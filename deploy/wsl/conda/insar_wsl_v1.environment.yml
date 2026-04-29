@@ -8,6 +8,7 @@ dependencies:
   - aom=3.9.1
   - argcomplete=3.6.3
   - attr=2.5.2
+  - astropy=7.2.0
   - attrs=26.1.0
   - aws-c-auth=0.9.3
   - aws-c-cal=0.9.13
@@ -251,6 +252,7 @@ dependencies:
   - nss=3.118
   - numpy=1.26.4
   - openjpeg=2.5.4
+  - opencv
   - openjph=0.26.3
   - openldap=2.6.10
   - openmotif=2.3.8
