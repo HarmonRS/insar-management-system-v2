@@ -968,6 +968,59 @@ def has_pickle_state(work_dir: Path, state_name: str) -> bool:
     return (pickle_dir / state_name).exists() and (pickle_dir / f"{state_name}.xml").exists()
 
 
+def copy_pickle_state(work_dir: Path, source_state: str, target_state: str) -> Path:
+    pickle_dir = work_dir / "PICKLE"
+    src = pickle_dir / source_state
+    src_xml = pickle_dir / f"{source_state}.xml"
+    dst = pickle_dir / target_state
+    dst_xml = pickle_dir / f"{target_state}.xml"
+
+    if not src.exists() or not src_xml.exists():
+        raise FileNotFoundError(
+            f"PICKLE/{source_state} state is missing; cannot prepare PICKLE/{target_state}."
+        )
+
+    shutil.copy2(src, dst)
+    shutil.copy2(src_xml, dst_xml)
+    return dst_xml
+
+
+def prepare_no_ionosphere_snaphu_resume(work_dir: Path, bbox: list[float] | None) -> None:
+    dst_xml = copy_pickle_state(work_dir, "filter", "filter_high_band")
+    root = ET.fromstring(dst_xml.read_text(encoding="utf-8"))
+    props = {prop.attrib.get("name"): prop for prop in root.findall("property")}
+
+    required = {
+        "referenceslccroppedproduct": "reference_slc.xml",
+        "secondaryslccroppedproduct": "secondary_slc.xml",
+        "referenceslcproduct": "reference_slc.xml",
+        "secondaryslcproduct": "secondary_slc.xml",
+        "referencegeometrysystem": "Zero Doppler",
+        "secondarygeometrysystem": "Zero Doppler",
+    }
+    if bbox is not None:
+        required["estimatedboundingbox"] = str(bbox)
+
+    for name, value in required.items():
+        if name in props:
+            node = props[name].find("value")
+            if node is None:
+                node = ET.SubElement(props[name], "value")
+            node.text = value
+            continue
+
+        prop = ET.SubElement(root, "property", {"name": name})
+        ET.SubElement(prop, "value").text = value
+
+    dst_xml.write_text(ET.tostring(root, encoding="unicode"), encoding="utf-8")
+    print("Prepared no-ionosphere SNAPHU resume state: PICKLE/filter_high_band", flush=True)
+
+
+def prepare_no_ionosphere_geocode_resume(work_dir: Path) -> None:
+    copy_pickle_state(work_dir, "unwrap", "ionosphere")
+    print("Prepared no-ionosphere geocode resume state: PICKLE/ionosphere", flush=True)
+
+
 def resolve_unwrap_start_step(work_dir: Path, *, ionosphere_correction: bool) -> str:
     if ionosphere_correction:
         if has_pickle_state(work_dir, "ionosphere"):
@@ -1181,6 +1234,8 @@ def main() -> int:
         write_stripmap_xml(xml_path, config)
 
     if should_run_stage(start_stage, "unwrap"):
+        if not config.ionosphere_correction:
+            prepare_no_ionosphere_snaphu_resume(work_dir, config.bbox)
         unwrap_start_step = resolve_unwrap_start_step(
             work_dir,
             ionosphere_correction=config.ionosphere_correction,
@@ -1202,6 +1257,8 @@ def main() -> int:
         )
 
     if should_run_stage(start_stage, "geocode"):
+        if not config.ionosphere_correction:
+            prepare_no_ionosphere_geocode_resume(work_dir)
         geocode_start_step = resolve_geocode_start_step(
             work_dir,
             ionosphere_correction=config.ionosphere_correction,
