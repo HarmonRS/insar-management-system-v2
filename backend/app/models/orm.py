@@ -467,6 +467,11 @@ class TimeseriesStackPlanORM(Base):
         back_populates="plan",
         cascade="all, delete-orphan",
     )
+    edges = relationship(
+        "TimeseriesStackPlanEdgeORM",
+        back_populates="plan",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("idx_timeseries_stack_plans_direction_created", "direction", "created_at"),
@@ -505,6 +510,83 @@ class TimeseriesStackPlanItemORM(Base):
     __table_args__ = (
         UniqueConstraint("plan_ref_id", "scene_rank", name="uq_timeseries_plan_items_plan_rank"),
         Index("idx_timeseries_plan_items_plan_date", "plan_ref_id", "imaging_date"),
+    )
+
+
+class TimeseriesStackPlanEdgeORM(Base):
+    __tablename__ = "timeseries_stack_plan_edges"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plan_ref_id = Column(
+        Integer,
+        ForeignKey("timeseries_stack_plans.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    master_plan_item_ref_id = Column(
+        Integer,
+        ForeignKey("timeseries_stack_plan_items.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    slave_plan_item_ref_id = Column(
+        Integer,
+        ForeignKey("timeseries_stack_plan_items.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    metric_cache_ref_id = Column(
+        Integer,
+        ForeignKey("pairing_metric_cache.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    master_scene_ref_id = Column(
+        Integer,
+        ForeignKey("radar_data.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    slave_scene_ref_id = Column(
+        Integer,
+        ForeignKey("radar_data.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    edge_rank = Column(Integer, nullable=False, default=0)
+    master_imaging_date = Column(String(8), index=True, nullable=True)
+    slave_imaging_date = Column(String(8), index=True, nullable=True)
+    temporal_baseline_days = Column(Integer, nullable=True)
+    spatial_baseline_meters = Column(Float, nullable=True)
+    perpendicular_baseline_meters = Column(Float, nullable=True)
+    scene_overlap_ratio = Column(Float, nullable=True)
+    pair_aoi_overlap_ratio = Column(Float, nullable=True)
+    selection_reason = Column(String(64), nullable=True)
+    selection_score = Column(Float, nullable=True)
+    selection_meta_json = Column(JSON, nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    plan = relationship("TimeseriesStackPlanORM", back_populates="edges")
+    master_plan_item = relationship("TimeseriesStackPlanItemORM", foreign_keys=[master_plan_item_ref_id])
+    slave_plan_item = relationship("TimeseriesStackPlanItemORM", foreign_keys=[slave_plan_item_ref_id])
+    metric_cache = relationship("PairingMetricCacheORM")
+    master_scene = relationship("RadarDataORM", foreign_keys=[master_scene_ref_id])
+    slave_scene = relationship("RadarDataORM", foreign_keys=[slave_scene_ref_id])
+
+    __table_args__ = (
+        UniqueConstraint(
+            "plan_ref_id",
+            "edge_rank",
+            name="uq_timeseries_plan_edges_plan_rank",
+        ),
+        Index("idx_timeseries_plan_edges_plan_enabled", "plan_ref_id", "enabled"),
+        Index(
+            "idx_timeseries_plan_edges_plan_scenes",
+            "plan_ref_id",
+            "master_scene_ref_id",
+            "slave_scene_ref_id",
+        ),
     )
 
 

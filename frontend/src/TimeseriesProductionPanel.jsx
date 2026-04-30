@@ -4,9 +4,11 @@ import { getPsBatches } from './api/taskBatches';
 import { useBatchStore } from './store';
 import {
   createTimeseriesRun,
+  getTimeseriesPreparedStack,
   getTimeseriesRunDetail,
   listTimeseriesRuns,
   retryTimeseriesStep,
+  runSarscapeSbasPreflight,
   runTimeseriesPreflight,
   runTimeseriesWslCheck,
 } from './api/timeseriesProduction';
@@ -40,6 +42,15 @@ const STATUS_COLOR = {
   PUBLISHED: '#16a34a',
 };
 
+const PREPARED_STACK_STATE = {
+  not_prepared: { label: 'Not prepared', color: '#64748b' },
+  manifest_unreadable: { label: 'Manifest unreadable', color: '#dc2626' },
+  prepared_invalid: { label: 'Prepared invalid', color: '#dc2626' },
+  prepared: { label: 'Prepared', color: '#16a34a' },
+  processor_blocked: { label: 'Processor blocked', color: '#d97706' },
+  ready_for_execution: { label: 'Ready for execution', color: '#15803d' },
+};
+
 function formatDateTime(value) {
   if (!value) return '-';
   try {
@@ -47,6 +58,36 @@ function formatDateTime(value) {
   } catch {
     return String(value);
   }
+}
+
+function StateBadge({ value }) {
+  const state = PREPARED_STACK_STATE[value] || { label: value || 'Unknown', color: '#64748b' };
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '2px 10px',
+        borderRadius: 999,
+        background: `${state.color}14`,
+        color: state.color,
+        fontSize: 12,
+        fontWeight: 600,
+      }}
+    >
+      <span
+        style={{
+          width: 7,
+          height: 7,
+          borderRadius: '50%',
+          background: state.color,
+          display: 'inline-block',
+        }}
+      />
+      {state.label}
+    </span>
+  );
 }
 
 function StatusPill({ value }) {
@@ -153,6 +194,7 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const [selectedRunId, setSelectedRunId] = useState('');
   const [selectedRunDetail, setSelectedRunDetail] = useState(null);
+  const [preparedStackSummary, setPreparedStackSummary] = useState(null);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -160,6 +202,8 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
   const [runName, setRunName] = useState('');
   const [referenceDate, setReferenceDate] = useState('');
   const [waterMaskMode, setWaterMaskMode] = useState('synthetic_fallback');
+  const [processorCode, setProcessorCode] = useState('sarscape_sbas');
+  const [executionMode, setExecutionMode] = useState('preflight_only');
   const [notes, setNotes] = useState('');
   const [wslChecking, setWslChecking] = useState(false);
   const [wslReport, setWslReport] = useState(null);
@@ -205,12 +249,19 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
   const loadRunDetail = useCallback(async runId => {
     if (!runId) {
       setSelectedRunDetail(null);
+      setPreparedStackSummary(null);
       return;
     }
     setDetailLoading(true);
     try {
-      const detail = await getTimeseriesRunDetail(runId);
+      const [detail, stackSummary] = await Promise.all([
+        getTimeseriesRunDetail(runId),
+        getTimeseriesPreparedStack(runId).catch(error => ({
+          error: error?.response?.data?.detail || error.message || 'Prepared stack summary load failed',
+        })),
+      ]);
       setSelectedRunDetail(detail);
+      setPreparedStackSummary(stackSummary);
     } catch (error) {
       setSelectedRunDetail({
         error: error?.response?.data?.detail || error.message || '运行详情加载失败',
@@ -231,6 +282,7 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
         message: error?.response?.data?.detail || error.message || 'WSL 检查失败',
         checks: [],
       });
+      setPreparedStackSummary(null);
     } finally {
       setWslChecking(false);
     }
@@ -265,18 +317,29 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
     }
     setPreflightLoading(true);
     try {
-      const report = await runTimeseriesPreflight({
+      const basePayload = {
         batch_id: selectedBatchId,
         reference_date: referenceDate.trim() || null,
-        water_mask_mode: waterMaskMode,
-      });
+      };
+      const report = processorCode === 'sarscape_sbas'
+        ? await runSarscapeSbasPreflight({
+          ...basePayload,
+          include_task_discovery: true,
+          discovery_timeout_seconds: 120,
+        })
+        : await runTimeseriesPreflight({
+          ...basePayload,
+          water_mask_mode: waterMaskMode,
+        });
       setPreflightReport(report);
     } catch (error) {
       const detail = error?.response?.data?.detail || error.message || '预检失败';
       setPreflightReport({
         overall_ok: false,
+        ready_for_pipeline_design: false,
         batch_id: selectedBatchId,
         errors: [detail],
+        blockers: [detail],
         warnings: [],
         checks: [],
         summary: {},
@@ -284,7 +347,7 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
     } finally {
       setPreflightLoading(false);
     }
-  }, [referenceDate, selectedBatchId, waterMaskMode]);
+  }, [processorCode, referenceDate, selectedBatchId, waterMaskMode]);
 
   useEffect(() => {
     loadBatches();
@@ -312,7 +375,7 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
 
   useEffect(() => {
     setPreflightReport(null);
-  }, [selectedBatchId, referenceDate, waterMaskMode]);
+  }, [selectedBatchId, referenceDate, waterMaskMode, processorCode, executionMode]);
 
   const handleSubmit = async () => {
     if (!selectedBatchId) {
@@ -327,6 +390,8 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
         run_name: runName.trim() || null,
         reference_date: referenceDate.trim() || null,
         water_mask_mode: waterMaskMode,
+        processor_code: processorCode,
+        execution_mode: executionMode,
         notes: notes.trim() || null,
       });
       setMessage(`运行已入队：${result.run_id} / task=${result.task_id}`);
@@ -343,12 +408,29 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
   const runData = selectedRunDetail?.run || null;
   const linkedProduct = selectedRunDetail?.product || null;
   const workflowSteps = selectedRunDetail?.workflow?.steps || [];
+  const isSarscapePreflight = preflightReport?.schema === 'insar.sarscape-sbas-preview/v1';
   const preflightChecks = Array.isArray(preflightReport?.checks) ? preflightReport.checks : [];
-  const preflightErrors = Array.isArray(preflightReport?.errors) ? preflightReport.errors : [];
+  const preflightErrors = Array.isArray(preflightReport?.errors)
+    ? preflightReport.errors
+    : (Array.isArray(preflightReport?.blockers) ? preflightReport.blockers : []);
   const preflightWarnings = Array.isArray(preflightReport?.warnings) ? preflightReport.warnings : [];
-  const preflightSummary = preflightReport?.summary || {};
+  const preflightSummary = preflightReport?.summary || preflightReport?.stack_manifest || {};
+  const preflightOk = isSarscapePreflight
+    ? !!preflightReport?.ready_for_pipeline_design
+    : !!preflightReport?.overall_ok;
   const runPreflightQuality = runData?.quality_summary_json?.preflight || null;
   const runPublishValidation = runData?.quality_summary_json?.publish_validation || null;
+  const preparedStack = preparedStackSummary && !preparedStackSummary.error ? preparedStackSummary : null;
+  const preparedValidation = preparedStack?.validation || runData?.input_snapshot_json?.prepared_stack_validation || null;
+  const preparedBlockers = Array.isArray(preparedStack?.blockers)
+    ? preparedStack.blockers
+    : (Array.isArray(preparedValidation?.blockers) ? preparedValidation.blockers : []);
+  const preparedWarnings = Array.isArray(preparedStack?.warnings)
+    ? preparedStack.warnings
+    : (Array.isArray(preparedValidation?.warnings) ? preparedValidation.warnings : []);
+  const processorManifest = preparedStack?.processor_manifest || null;
+  const processorBlockers = Array.isArray(processorManifest?.blockers) ? processorManifest.blockers : [];
+  const showPreparedStack = !!(preparedStack || preparedStackSummary?.error || runData?.summary_json?.prepared_stack_id);
 
   return (
     <div style={{ padding: '16px 0', width: '100%' }}>
@@ -382,10 +464,9 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
             borderRadius: 6,
           }}
         >
-          当前接入实现为 SBAS。现阶段已连通完整八步链路：prepare、stack_prep_initial、materialize、
-          stack_prep_refresh、run_isce2_stack、run_mintpy_sbas、export_publish_bundle、
-          register_psinsar_product。提交后系统会依次生成选栈 manifest、物化 LT-1 SLC、执行 ISCE2
-          stack、运行 MintPy SBAS、导出 publish bundle，并把结果注册进时序InSAR catalog。
+          当前生产入口采用分层 SBAS 模型：时序配对先形成候选大池，提交 run 后由 prepare 冻结 prepared SBAS 小栈。
+          ENVI/SARscape SBAS 后续只读取 prepared manifest 和 selected_network_edges 审计图，不再重新扫描全量数据。
+          ISCE2 + MintPy 路径仍沿用 stack_prep、materialize、stack、MintPy、publish、register 链路。
         </div>
         {wslReport && (
           <div
@@ -466,6 +547,34 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
               <option value="local">local</option>
             </select>
           </div>
+          <div>
+            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>Processor</div>
+            <select
+              value={processorCode}
+              onChange={event => {
+                const next = event.target.value;
+                setProcessorCode(next);
+                setExecutionMode(next === 'sarscape_sbas' ? 'preflight_only' : 'full');
+              }}
+              disabled={readOnly || submitting}
+              style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1' }}
+            >
+              <option value="sarscape_sbas">ENVI/SARscape SBAS</option>
+              <option value="isce2_stack_mintpy">ISCE2 + MintPy</option>
+            </select>
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>Execution</div>
+            <select
+              value={executionMode}
+              onChange={event => setExecutionMode(event.target.value)}
+              disabled={readOnly || submitting}
+              style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1' }}
+            >
+              <option value="preflight_only">Preflight only</option>
+              <option value="full">Full execution</option>
+            </select>
+          </div>
         </div>
 
         <div style={{ marginTop: 10 }}>
@@ -542,16 +651,16 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
               marginTop: 12,
               padding: '10px 12px',
               borderRadius: 6,
-              border: `1px solid ${preflightReport.overall_ok ? '#bbf7d0' : '#fecaca'}`,
-              background: preflightReport.overall_ok ? '#f0fdf4' : '#fef2f2',
+              border: `1px solid ${preflightOk ? '#bbf7d0' : '#fecaca'}`,
+              background: preflightOk ? '#f0fdf4' : '#fef2f2',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <strong style={{ fontSize: 13, color: preflightReport.overall_ok ? '#166534' : '#991b1b' }}>
-                  {preflightReport.overall_ok ? '预检通过' : '预检发现问题'}
+                <strong style={{ fontSize: 13, color: preflightOk ? '#166534' : '#991b1b' }}>
+                  {preflightOk ? '预检通过' : '预检发现问题'}
                 </strong>
-                <QualityBadge ok={!!preflightReport.overall_ok} okLabel="可提交" failLabel="需处理" />
+                <QualityBadge ok={preflightOk} okLabel="可提交" failLabel="需处理" />
               </div>
               <div style={{ fontSize: 11, color: '#475569' }}>
                 错误 {preflightErrors.length} / 告警 {preflightWarnings.length}
@@ -561,11 +670,15 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 8 }}>
               <div style={{ padding: '8px 10px', borderRadius: 6, background: '#fff', border: '1px solid #e2e8f0', fontSize: 12 }}>
                 <div style={{ color: '#64748b', marginBottom: 4 }}>有效参考日期</div>
-                <strong>{preflightReport.reference_date_effective || '-'}</strong>
+                <strong>{preflightReport.reference_date_effective || preflightReport.reference_date || '-'}</strong>
               </div>
               <div style={{ padding: '8px 10px', borderRadius: 6, background: '#fff', border: '1px solid #e2e8f0', fontSize: 12 }}>
                 <div style={{ color: '#64748b', marginBottom: 4 }}>场景规模</div>
                 <strong>{preflightSummary.scene_count || 0} 景</strong>
+              </div>
+              <div style={{ padding: '8px 10px', borderRadius: 6, background: '#fff', border: '1px solid #e2e8f0', fontSize: 12 }}>
+                <div style={{ color: '#64748b', marginBottom: 4 }}>Network edges</div>
+                <strong>{preflightReport.network_edge_count ?? preflightSummary.network_edge_count ?? 0}</strong>
               </div>
               <div style={{ padding: '8px 10px', borderRadius: 6, background: '#fff', border: '1px solid #e2e8f0', fontSize: 12 }}>
                 <div style={{ color: '#64748b', marginBottom: 4 }}>Stack Key</div>
@@ -582,11 +695,18 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
               <div><strong>Plan Strategy:</strong>{preflightReport.plan_strategy || preflightSummary.plan_strategy || '-'}</div>
               <div><strong>批次：</strong>{preflightReport.batch_name || preflightReport.batch_id || '-'}</div>
               <div><strong>批次状态：</strong>{preflightReport.batch_status || '-'}</div>
+              <div><strong>Processor:</strong>{preflightReport.processor_manifest?.processor_code || processorCode || '-'}</div>
               <div><strong>水体掩膜：</strong>{preflightReport.water_mask_mode || '-'}</div>
               <div><strong>分组：</strong>{preflightSummary.group_key || '-'}</div>
               <div><strong>源目录：</strong>{preflightSummary.source_root_windows || '-'}</div>
               <div><strong>日期列表：</strong>{(preflightSummary.stack_dates || []).join(', ') || '-'}</div>
             </div>
+
+            {isSarscapePreflight && (
+              <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 6, background: '#fff', border: '1px solid #bfdbfe', fontSize: 12, color: '#1e3a8a', lineHeight: 1.6 }}>
+                当前预检针对候选批次/候选图。提交 run 后，prepare 步骤会冻结一个 prepared SBAS stack；SARscape 后续只读取这个 prepared manifest，不再重新访问全量数据池。
+              </div>
+            )}
 
             {preflightErrors.length > 0 && (
               <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 6, background: '#fff', border: '1px solid #fecaca', fontSize: 12, color: '#991b1b' }}>
@@ -692,6 +812,7 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
                       </span>
                     </div>
                     <div style={{ fontSize: 11, color: '#64748b' }}>
+                      {item.processor_code || '-'} /
                       {item.reference_date || '-'} / {item.stack_size || 0} 景 / {formatDateTime(item.created_at)}
                     </div>
                   </button>
@@ -716,6 +837,7 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
                 </div>
                 <div><strong>Stack Plan:</strong>{runData?.plan_id || '-'}</div>
                 <div><strong>Plan Strategy:</strong>{runData?.plan_strategy || '-'}</div>
+                <div><strong>Processor:</strong>{runData?.processor_code || '-'} / {runData?.engine_code || '-'}</div>
                 <div><strong>运行标识：</strong>{runData?.run_id || '-'}</div>
                 <div><strong>批次标识：</strong>{runData?.batch_id || '-'}</div>
                 <div><strong>参考日期：</strong>{runData?.reference_date || '-'}</div>
@@ -731,6 +853,79 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
                 <div><strong>创建时间：</strong>{formatDateTime(runData?.created_at)}</div>
                 <div><strong>结束时间：</strong>{formatDateTime(runData?.ended_at)}</div>
                 <div><strong>输入日期：</strong>{(runData?.input_snapshot_json?.stack_dates || []).join(', ') || '-'}</div>
+                {showPreparedStack && (
+                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed #cbd5e1' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+                      <strong>Prepared SBAS Stack</strong>
+                      {preparedStackSummary?.error ? (
+                        <StateBadge value="manifest_unreadable" />
+                      ) : (
+                        <StateBadge value={preparedStack?.state || (runData?.summary_json?.prepared_stack_id ? 'prepared' : 'not_prepared')} />
+                      )}
+                    </div>
+                    {preparedStackSummary?.error ? (
+                      <div style={{ padding: '8px 10px', borderRadius: 6, background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
+                        {preparedStackSummary.error}
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 8 }}>
+                          <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                            <div style={{ color: '#64748b', marginBottom: 4 }}>Prepared ID</div>
+                            <strong style={{ wordBreak: 'break-all' }}>{preparedStack?.prepared_stack_id || runData?.summary_json?.prepared_stack_id || '-'}</strong>
+                          </div>
+                          <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                            <div style={{ color: '#64748b', marginBottom: 4 }}>Validation</div>
+                            <QualityBadge ok={!!(preparedValidation?.ok ?? preparedStack?.prepared)} okLabel="OK" failLabel="Blocked" />
+                          </div>
+                          <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                            <div style={{ color: '#64748b', marginBottom: 4 }}>Scenes</div>
+                            <strong>{preparedStack?.scene_count ?? runData?.stack_size ?? 0}</strong>
+                          </div>
+                          <div style={{ padding: '8px 10px', borderRadius: 6, background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                            <div style={{ color: '#64748b', marginBottom: 4 }}>Network edges</div>
+                            <strong>{preparedStack?.network_edge_count ?? runData?.input_snapshot_json?.network_edge_count ?? 0}</strong>
+                          </div>
+                        </div>
+                        <div style={{ marginTop: 8, lineHeight: 1.7 }}>
+                          <div><strong>Schema:</strong>{preparedStack?.prepared_stack_schema || runData?.summary_json?.prepared_stack_schema || '-'}</div>
+                          <div><strong>Source plan:</strong>{preparedStack?.source_plan_id || runData?.plan_id || '-'}</div>
+                          <div><strong>Source batch:</strong>{preparedStack?.source_batch_id || runData?.batch_id || '-'}</div>
+                          <div><strong>Prepared manifest:</strong>{preparedStack?.manifest_path_windows || runData?.manifest_path_windows || '-'}</div>
+                          <div><strong>Selected network edges:</strong>{preparedStack?.selected_network_edges_path_windows || runData?.input_snapshot_json?.selected_network_edges_path_windows || '-'}</div>
+                          <div><strong>Policy:</strong>{preparedStack?.production_contract?.input_policy || '-'} / catalog_scan_after_prepare={String(preparedStack?.production_contract?.catalog_scan_allowed_after_prepare ?? false)}</div>
+                        </div>
+                        {processorManifest && (
+                          <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 6, background: processorManifest.ready_for_execution ? '#f0fdf4' : '#fffbeb', border: `1px solid ${processorManifest.ready_for_execution ? '#bbf7d0' : '#fde68a'}` }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                              <strong>SARscape processor</strong>
+                              <QualityBadge ok={!!processorManifest.ready_for_execution} okLabel="Executable" failLabel="Blocked" />
+                            </div>
+                            <div style={{ marginTop: 4 }}><strong>Strategy:</strong>{processorManifest.execution_strategy || '-'}</div>
+                            <div><strong>Template:</strong>{processorManifest.parameter_template?.validated ? 'validated' : 'not validated'}</div>
+                            <div><strong>Execution enabled:</strong>{String(!!processorManifest.execution_enabled)}</div>
+                          </div>
+                        )}
+                        {(preparedBlockers.length > 0 || processorBlockers.length > 0) && (
+                          <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 6, background: '#fff7ed', border: '1px solid #fed7aa', color: '#9a3412' }}>
+                            <div style={{ fontWeight: 600, marginBottom: 4 }}>Blockers</div>
+                            {[...preparedBlockers, ...processorBlockers].map((item, index) => (
+                              <div key={`prepared-blocker-${index}`}>{item}</div>
+                            ))}
+                          </div>
+                        )}
+                        {preparedWarnings.length > 0 && (
+                          <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 6, background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e' }}>
+                            <div style={{ fontWeight: 600, marginBottom: 4 }}>Warnings</div>
+                            {preparedWarnings.map((item, index) => (
+                              <div key={`prepared-warning-${index}`}>{item}</div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
                 <div>
                   <strong>轨道摘要：</strong>
                   <div style={{ marginTop: 4 }}>

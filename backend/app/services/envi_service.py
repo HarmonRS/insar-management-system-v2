@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import defusedxml.ElementTree as ET
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from glob import glob
@@ -67,13 +68,43 @@ def get_envi_runner_python() -> str:
     return os.path.normpath(sys.executable)
 
 
+def get_envi_taskengine_cwd() -> str:
+    """Dedicated cwd for envipyengine/taskengine temp files.
+
+    SARscape can create zero-byte env_*.xyz and IDL*.tmp files in the current
+    working directory. Keep those files under runtime instead of the repo root.
+    """
+    base_dir = _to_local_path(
+        getattr(settings, "IDL_WORKER_RUNTIME_DIR", "")
+        or os.path.join(_BACKEND_DIR, "runtime", "idl_worker")
+    )
+    cwd = os.path.join(base_dir, "envi_cwd")
+    os.makedirs(cwd, exist_ok=True)
+    return os.path.normpath(os.path.abspath(cwd))
+
+
+def get_envi_custom_code_dir() -> str:
+    envi_root = _envi_install_root()
+    if not envi_root:
+        return ""
+    candidates = [
+        os.path.join(envi_root, "user_custom_code"),
+        os.path.join(envi_root, "custom_code"),
+    ]
+    for path in candidates:
+        if os.path.isdir(path):
+            return os.path.normpath(os.path.abspath(path))
+    return ""
+
+
 def get_envi_runner_cwd() -> str:
-    return os.path.normpath(os.path.abspath(type(settings).PROJECT_ROOT))
+    return get_envi_taskengine_cwd()
 
 
 def get_envi_runner_env() -> Dict[str, str]:
     env = os.environ.copy()
-    project_root = get_envi_runner_cwd()
+    project_root = os.path.normpath(os.path.abspath(type(settings).PROJECT_ROOT))
+    taskengine_cwd = get_envi_taskengine_cwd()
     existing = [part for part in str(env.get("PYTHONPATH") or "").split(os.pathsep) if str(part).strip()]
     ordered = [project_root, *existing]
     deduped: List[str] = []
@@ -88,7 +119,34 @@ def get_envi_runner_env() -> Dict[str, str]:
         seen.add(key)
         deduped.append(str(raw_path))
     env["PYTHONPATH"] = os.pathsep.join(deduped)
+    env["TEMP"] = taskengine_cwd
+    env["TMP"] = taskengine_cwd
+    env["IDL_TMPDIR"] = taskengine_cwd
+    custom_code_dir = get_envi_custom_code_dir()
+    if custom_code_dir:
+        env["ENVI_CUSTOM_CODE"] = custom_code_dir
     return env
+
+
+@contextmanager
+def _envi_taskengine_runtime_context():
+    """Run in-process ENVI calls from the dedicated runtime cwd."""
+    target_cwd = get_envi_taskengine_cwd()
+    old_cwd = os.getcwd()
+    old_env = {name: os.environ.get(name) for name in ("TEMP", "TMP", "IDL_TMPDIR")}
+    os.environ["TEMP"] = target_cwd
+    os.environ["TMP"] = target_cwd
+    os.environ["IDL_TMPDIR"] = target_cwd
+    try:
+        os.chdir(target_cwd)
+        yield target_cwd
+    finally:
+        os.chdir(old_cwd)
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def build_envi_runner_command(*args: Any) -> List[str]:
@@ -99,6 +157,79 @@ def build_envi_runner_command(*args: Any) -> List[str]:
     ]
     command.extend(str(arg) for arg in args if arg is not None)
     return command
+
+
+def _list_taskengine_pids() -> set[int]:
+    """Return taskengine.exe PIDs on Windows without importing optional deps."""
+    if os.name != "nt":
+        return set()
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "Get-Process taskengine -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return set()
+
+    pids: set[int] = set()
+    for line in str(completed.stdout or "").splitlines():
+        raw = line.strip()
+        if raw.isdigit():
+            pids.add(int(raw))
+    return pids
+
+
+def _stop_taskengine_pids(pids: set[int]) -> List[int]:
+    """Stop specific taskengine.exe PIDs; avoids killing pre-existing sessions."""
+    stopped: List[int] = []
+    if os.name != "nt":
+        return stopped
+    for pid in sorted(pids):
+        try:
+            subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-Command",
+                    f"Stop-Process -Id {int(pid)} -Force -ErrorAction SilentlyContinue",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            stopped.append(int(pid))
+        except Exception:
+            continue
+    return stopped
+
+
+def _cleanup_new_taskengine_processes(existing_pids: set[int]) -> Dict[str, Any]:
+    """Best-effort cleanup for taskengine.exe children spawned by a timed-out runner."""
+    existing = set(existing_pids or set())
+    first_targets = _list_taskengine_pids() - existing
+    stopped = _stop_taskengine_pids(first_targets)
+
+    # taskengine can take a moment to detach from the runner process. Re-check once.
+    time.sleep(1)
+    second_targets = _list_taskengine_pids() - existing
+    stopped.extend(pid for pid in _stop_taskengine_pids(second_targets) if pid not in stopped)
+
+    time.sleep(1)
+    remaining = sorted(_list_taskengine_pids() - existing)
+    return {
+        "taskengine_cleanup_attempted": True,
+        "taskengine_stopped_pids": sorted(set(stopped)),
+        "taskengine_remaining_new_pids": remaining,
+    }
 
 
 def probe_envi_runner() -> Dict[str, Any]:
@@ -236,6 +367,39 @@ _ENVI_TASK_TIMEOUT = int(_read_env("ENVI_TASK_TIMEOUT_SECONDS", "300") or 300)
 # concurrent calls. All execute_envi_task() calls must be serialized.
 import threading
 _ENVI_GLOBAL_LOCK = threading.Lock()
+
+
+SARSCAPE_SBAS_NATIVE_WORKFLOW_CANDIDATES = [
+    "wf_sbas",
+    "wf_esbas",
+]
+
+SARSCAPE_SBAS_SUPPORT_TASK_CANDIDATES = [
+    "SARscape_setting_output_folders",
+    "SARsLoadPreferences",
+    "SARsImportSarSelector",
+    "SARscapeSuggestLooks",
+    "SARscapeEnviuriToShape",
+]
+
+SARSCAPE_SBAS_STACK_TASK_CANDIDATES = [
+    "SARsInSARStackSBASGenerateConnectionGraph",
+    "SARsInSARStackSBASInterferogramGeneration",
+    "SARsInSARStackSBASInversionStep1",
+    "SARsInSARStackSBASInversionStep2",
+    "SARsInSARStackSBASGeocode",
+    "SARsInSARStackSBASVariogram",
+    "SARsInSARStackESBASInterferogramGeneration",
+    "SARsInSARStackESBASInversion",
+    "SARsInSARStackESBASGeocode",
+    "SARsInSARConnectionGraphESBAS",
+]
+
+SARSCAPE_SBAS_TASK_CANDIDATES = [
+    *SARSCAPE_SBAS_NATIVE_WORKFLOW_CANDIDATES,
+    *SARSCAPE_SBAS_SUPPORT_TASK_CANDIDATES,
+    *SARSCAPE_SBAS_STACK_TASK_CANDIDATES,
+]
 
 
 # ---------------------------------------------------------------------------
@@ -417,26 +581,32 @@ def execute_envi_task(task_name: str, parameters: Dict[str, Any]) -> Dict[str, A
         ) from exc
 
     with _ENVI_GLOBAL_LOCK:
-        engine = Engine("ENVI")
-        task = engine.task(task_name)
+        with _envi_taskengine_runtime_context():
+            engine = Engine("ENVI")
+            task = engine.task(task_name)
+            existing_taskengine_pids = _list_taskengine_pids()
 
-        # Run with timeout to handle envipyengine hangs
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(task.execute, parameters)
-            try:
-                result = future.result(timeout=_ENVI_TASK_TIMEOUT)
-            except FuturesTimeoutError:
+            # Run with timeout to handle envipyengine hangs
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(task.execute, parameters)
                 try:
-                    import subprocess as _sp
-                    _sp.run(["taskkill", "/F", "/IM", "taskengine.exe"],
-                            capture_output=True, timeout=10)
-                    print("[WARN] execute_envi_task: killed taskengine after timeout")
-                except Exception as _exc:
-                    print(f"[WARN] execute_envi_task: taskengine cleanup failed — {_exc}")
-                raise RuntimeError(
-                    f"Task {task_name} timed out after {_ENVI_TASK_TIMEOUT}s "
-                    f"(envipyengine hung). Output files may still exist."
-                )
+                    result = future.result(timeout=_ENVI_TASK_TIMEOUT)
+                except FuturesTimeoutError:
+                    try:
+                        cleanup = _cleanup_new_taskengine_processes(existing_taskengine_pids)
+                        stopped = cleanup.get("taskengine_stopped_pids") or []
+                        remaining = cleanup.get("taskengine_remaining_new_pids") or []
+                        print(
+                            "[WARN] execute_envi_task: task timed out; "
+                            f"stopped_new_taskengine_pids={stopped}; "
+                            f"remaining_new_taskengine_pids={remaining}"
+                        )
+                    except Exception as _exc:
+                        print(f"[WARN] execute_envi_task: taskengine cleanup failed — {_exc}")
+                    raise RuntimeError(
+                        f"Task {task_name} timed out after {_ENVI_TASK_TIMEOUT}s "
+                        f"(envipyengine hung). Output files may still exist."
+                    )
 
     # taskengine returns {"outputParameters": {...}, ...}
     return result.get("outputParameters", result)
@@ -451,6 +621,374 @@ def _unwrap_sarscapedata(value: Any) -> Any:
     if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
         return value[0]
     return value
+
+
+def _configured_sarscape_sbas_task_candidates() -> List[str]:
+    configured = str(_read_env("SARSCAPE_SBAS_TASK_NAMES", "") or "").strip()
+    if not configured:
+        return list(SARSCAPE_SBAS_TASK_CANDIDATES)
+    names: List[str] = []
+    for raw in configured.replace(";", ",").split(","):
+        name = raw.strip()
+        if name and name not in names:
+            names.append(name)
+    return names or list(SARSCAPE_SBAS_TASK_CANDIDATES)
+
+
+def _envi_install_root() -> str:
+    executable = _to_local_path(IDL_EXECUTABLE)
+    if not executable:
+        return ""
+    return os.path.abspath(os.path.join(os.path.dirname(executable), "..", "..", ".."))
+
+
+def _static_envi_task_template_path(task_name: str) -> str:
+    name = str(task_name or "").strip()
+    if not name:
+        return ""
+    envi_root = _envi_install_root()
+    if not envi_root:
+        return ""
+    candidates = [
+        os.path.join(envi_root, "user_custom_code", f"{name}.task"),
+        os.path.join(envi_root, "resource", "templates", "tasks", "SARscape", f"{name}.task"),
+        os.path.join(envi_root, "resource", "templates", "tasks", f"{name}.task"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
+def _json_safe_parameter(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe_parameter(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_parameter(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _summarize_task_parameters(raw_parameters: Any) -> Dict[str, Any]:
+    safe_parameters = _json_safe_parameter(raw_parameters)
+    input_names: List[str] = []
+    output_names: List[str] = []
+    required_input_names: List[str] = []
+
+    if isinstance(safe_parameters, dict):
+        iterable = safe_parameters.values()
+    elif isinstance(safe_parameters, list):
+        iterable = safe_parameters
+    else:
+        iterable = []
+
+    for item in iterable:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("NAME") or "").strip()
+        direction = str(item.get("direction") or item.get("DIRECTION") or "").strip().lower()
+        required = bool(item.get("required") or item.get("REQUIRED"))
+        if not name:
+            continue
+        if direction == "input":
+            input_names.append(name)
+            if required:
+                required_input_names.append(name)
+        elif direction == "output":
+            output_names.append(name)
+
+    return {
+        "parameter_count": (
+            len(safe_parameters)
+            if isinstance(safe_parameters, (dict, list))
+            else 0
+        ),
+        "input_names": input_names,
+        "required_input_names": required_input_names,
+        "output_names": output_names,
+        "parameters": safe_parameters,
+    }
+
+
+def list_envi_tasks() -> Dict[str, Any]:
+    """List ENVI task names without instantiating individual task parameters."""
+    result: Dict[str, Any] = {
+        "ok": False,
+        "engine": "envipyengine",
+        "task_count": 0,
+        "tasks": [],
+        "error": None,
+    }
+    try:
+        _ensure_envipyengine_config()
+        from envipyengine import Engine
+    except ImportError:
+        result["error"] = (
+            "envipyengine is not installed. Install it with: pip install envipyengine"
+        )
+        return result
+
+    with _ENVI_GLOBAL_LOCK:
+        with _envi_taskengine_runtime_context():
+            try:
+                names = Engine("ENVI").tasks()
+            except Exception as exc:
+                result["error"] = str(exc)
+                return result
+
+    result["tasks"] = [str(name) for name in names]
+    result["task_count"] = len(result["tasks"])
+    result["ok"] = True
+    return result
+
+
+def discover_sarscape_sbas_tasks() -> Dict[str, Any]:
+    """Discover installed SARscape SBAS/E-SBAS task names by filtering Engine.tasks()."""
+    report = list_envi_tasks()
+    task_names = list(report.get("tasks") or [])
+    keywords = (
+        "StackSBAS",
+        "StackESBAS",
+        "ConnectionGraphESBAS",
+    )
+    explicit_names = set(SARSCAPE_SBAS_NATIVE_WORKFLOW_CANDIDATES) | set(SARSCAPE_SBAS_SUPPORT_TASK_CANDIDATES)
+    matches = [
+        name
+        for name in task_names
+        if (
+            str(name) in explicit_names
+            or (
+                str(name).startswith("SARsInSAR")
+                and any(keyword.lower() in str(name).lower() for keyword in keywords)
+            )
+        )
+    ]
+    static_task_files: Dict[str, str] = {}
+    for name in SARSCAPE_SBAS_TASK_CANDIDATES:
+        path = _static_envi_task_template_path(name)
+        if path:
+            static_task_files[name] = path
+            if name not in matches:
+                matches.append(name)
+    preferred_order = [
+        *SARSCAPE_SBAS_NATIVE_WORKFLOW_CANDIDATES,
+        *SARSCAPE_SBAS_SUPPORT_TASK_CANDIDATES,
+        "SARsInSARStackSBASGenerateConnectionGraph",
+        "SARsInSARStackSBASInterferogramGeneration",
+        "SARsInSARStackSBASInversionStep1",
+        "SARsInSARStackSBASInversionStep2",
+        "SARsInSARStackSBASGeocode",
+        "SARsInSARStackSBASVariogram",
+        "SARsInSARStackESBASInterferogramGeneration",
+        "SARsInSARStackESBASInversion",
+        "SARsInSARStackESBASGeocode",
+        "SARsInSARConnectionGraphESBAS",
+    ]
+    ordered: List[str] = []
+    for name in preferred_order:
+        if name in matches and name not in ordered:
+            ordered.append(name)
+    for name in sorted(matches):
+        if name not in ordered:
+            ordered.append(name)
+
+    return {
+        "ok": bool(report.get("ok")) and bool(ordered),
+        "engine": report.get("engine"),
+        "task_count": int(report.get("task_count") or 0),
+        "sarscape_sbas_task_count": len(ordered),
+        "sarscape_sbas_tasks": ordered,
+        "static_task_files": {
+            name: static_task_files[name]
+            for name in ordered
+            if name in static_task_files
+        },
+        "error": report.get("error"),
+    }
+
+
+def inspect_envi_tasks(task_names: List[str]) -> Dict[str, Any]:
+    """Inspect ENVI/SARscape tasks without executing them."""
+    started_at = _utc_now_text()
+    deduped_names: List[str] = []
+    for raw_name in task_names:
+        name = str(raw_name or "").strip()
+        if name and name not in deduped_names:
+            deduped_names.append(name)
+
+    result: Dict[str, Any] = {
+        "ok": False,
+        "engine": "envipyengine",
+        "started_at": started_at,
+        "finished_at": None,
+        "task_count": len(deduped_names),
+        "available_count": 0,
+        "missing_count": 0,
+        "tasks": [],
+        "error": None,
+    }
+    if not deduped_names:
+        result["error"] = "No task names provided."
+        result["finished_at"] = _utc_now_text()
+        return result
+
+    try:
+        _ensure_envipyengine_config()
+        from envipyengine import Engine
+    except ImportError as exc:
+        result["error"] = (
+            "envipyengine is not installed. Install it with: pip install envipyengine"
+        )
+        result["finished_at"] = _utc_now_text()
+        return result
+
+    with _ENVI_GLOBAL_LOCK:
+        with _envi_taskengine_runtime_context():
+            try:
+                engine = Engine("ENVI")
+            except Exception as exc:
+                result["error"] = f"Failed to initialize ENVI engine: {exc}"
+                result["finished_at"] = _utc_now_text()
+                return result
+
+            for task_name in deduped_names:
+                item: Dict[str, Any] = {
+                    "name": task_name,
+                    "available": False,
+                    "error": None,
+                    "parameter_count": 0,
+                    "input_names": [],
+                    "required_input_names": [],
+                    "output_names": [],
+                    "parameters": [],
+                }
+                try:
+                    task = engine.task(task_name)
+                    summary = _summarize_task_parameters(getattr(task, "parameters", []))
+                    item.update(summary)
+                    item["available"] = True
+                except Exception as exc:
+                    item["error"] = str(exc)
+                result["tasks"].append(item)
+
+    result["available_count"] = sum(1 for item in result["tasks"] if item.get("available"))
+    result["missing_count"] = sum(1 for item in result["tasks"] if not item.get("available"))
+    result["ok"] = result["available_count"] > 0
+    result["finished_at"] = _utc_now_text()
+    return result
+
+
+def inspect_sarscape_sbas_tasks(
+    task_names: Optional[List[str]] = None,
+    *,
+    include_parameters: bool = False,
+) -> Dict[str, Any]:
+    """Inspect likely SARscape SBAS/E-SBAS task names for the installed version."""
+    status = get_status()
+    discovery = discover_sarscape_sbas_tasks()
+    names = task_names or list(discovery.get("sarscape_sbas_tasks") or _configured_sarscape_sbas_task_candidates())
+    if include_parameters:
+        task_report = inspect_envi_tasks(names)
+    else:
+        discovered_set = set(discovery.get("sarscape_sbas_tasks") or [])
+        task_report = {
+            "ok": bool(discovery.get("ok")),
+            "engine": "envipyengine",
+            "task_count": len(names),
+            "available_count": sum(1 for name in names if name in discovered_set),
+            "missing_count": sum(1 for name in names if name not in discovered_set),
+            "tasks": [
+                {
+                    "name": name,
+                    "available": name in discovered_set,
+                    "error": None if name in discovered_set else "Task name not listed by Engine.tasks().",
+                    "parameter_count": None,
+                    "input_names": [],
+                    "required_input_names": [],
+                    "output_names": [],
+                    "parameters": [],
+                }
+                for name in names
+            ],
+            "error": discovery.get("error"),
+        }
+    task_report["status"] = {
+        "idl_installed": status.get("idl_installed"),
+        "idl_executable": status.get("idl_executable"),
+        "runner_ready": status.get("runner_ready"),
+        "runner_python": status.get("runner_python"),
+        "runner_message": status.get("runner_message"),
+        "dem_base_file": status.get("dem_base_file"),
+        "dem_exists": status.get("dem_exists"),
+    }
+    task_report["candidate_source"] = (
+        "SARSCAPE_SBAS_TASK_NAMES"
+        if str(_read_env("SARSCAPE_SBAS_TASK_NAMES", "") or "").strip()
+        else "engine_task_list"
+    )
+    task_report["include_parameters"] = bool(include_parameters)
+    task_report["discovery"] = discovery
+    task_report["ready_for_pipeline_design"] = bool(task_report.get("ok"))
+    return task_report
+
+
+def inspect_sarscape_sbas_tasks_subprocess(
+    task_names: Optional[List[str]] = None,
+    *,
+    timeout_seconds: int = 120,
+    include_parameters: bool = False,
+) -> Dict[str, Any]:
+    """Run SARscape SBAS task inspection through the isolated ENVI runner."""
+    command = build_envi_runner_command("--inspect-sarscape-sbas")
+    if include_parameters:
+        command.append("--include-parameters")
+    for name in task_names or []:
+        if str(name or "").strip():
+            command.extend(["--task-name", str(name).strip()])
+    existing_taskengine_pids = _list_taskengine_pids()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=get_envi_runner_cwd(),
+            env=get_envi_runner_env(),
+            capture_output=True,
+            text=True,
+            timeout=max(10, int(timeout_seconds or 120)),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        cleanup = _cleanup_new_taskengine_processes(existing_taskengine_pids)
+        stdout_text = str(exc.stdout or "").strip()
+        stderr_text = str(exc.stderr or "").strip()
+        return {
+            "ok": False,
+            "returncode": None,
+            "timeout": True,
+            "timeout_seconds": max(10, int(timeout_seconds or 120)),
+            "stdout": stdout_text[:2000],
+            "stderr": stderr_text[:2000],
+            "error": (
+                "SARscape SBAS task inspection timed out. "
+                "Use lightweight discovery without include_parameters, or provide a manually verified task template."
+            ),
+            "runner_command": command,
+            **cleanup,
+        }
+    stdout_text = str(completed.stdout or "").strip()
+    stderr_text = str(completed.stderr or "").strip()
+    try:
+        payload = json.loads(stdout_text) if stdout_text else {}
+    except Exception:
+        payload = {}
+    payload.setdefault("returncode", int(completed.returncode))
+    payload.setdefault("stdout", stdout_text[:2000])
+    payload.setdefault("stderr", stderr_text[:2000])
+    payload["runner_command"] = command
+    if completed.returncode != 0:
+        payload["ok"] = False
+        payload.setdefault("error", stderr_text or stdout_text or f"returncode={completed.returncode}")
+    return payload
 
 
 # ---------------------------------------------------------------------------

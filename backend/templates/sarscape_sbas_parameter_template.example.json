@@ -1,0 +1,398 @@
+{
+  "schema": "insar.sarscape-sbas-template/v1",
+  "template_name": "SARscape SBAS native wf_sbas integration template",
+  "sarscape_version_hint": "ENVI 5.6 / SARscape taskengine, .task version 5.3",
+  "validated": false,
+  "execution_strategy": "native_workflow_metatask",
+  "source": {
+    "method": "static_task_json",
+    "extractor": "scripts/extract_sarscape_sbas_task_templates.py",
+    "envi_root": "C:\\Program Files\\Harris\\ENVI56",
+    "workflow_task_file": "C:\\Program Files\\Harris\\ENVI56\\user_custom_code\\wf_sbas.task",
+    "available_task_count_on_reference_machine": 17
+  },
+  "notes": [
+    "This file is a checked-in contract and is intentionally not executable until validated=true.",
+    "The preferred first execution strategy is SARscape's native wf_sbas metatask.",
+    "wf_sbas includes import, preferences, suggested looks, SBAS connection graph, interferogram generation, inversion step 1, inversion step 2, geocode, and shape export in its embedded DAG.",
+    "Static wf_sbas.task contains a DAG parameter with an embedded default, but live taskengine QueryTask exposes 17 parameters and does not require the caller to pass DAG.",
+    "wf_sbas builds the connection graph internally. The system-selected network_edges remain the authoritative planning and audit graph until explicit stack-task graph injection is verified.",
+    "Do not use live task.parameters for stack SBAS tasks on this workstation; it can hang taskengine.exe."
+  ],
+  "macros": {
+    "${work_root}": "Run work root directory.",
+    "${output_root}": "SARscape SBAS output root directory.",
+    "${phase_output_dir}": "Output directory for the current phase.",
+    "${selected_stack_manifest}": "Selected stack manifest JSON path.",
+    "${selected_network_edges}": "Selected network edges JSON path.",
+    "${scene_input_uris}": "Ordered source scene input URI list, preferring scene meta_path.",
+    "${scene_meta_paths}": "Ordered source scene metadata paths.",
+    "${scene_folder_paths}": "Ordered source scene folders.",
+    "${selection_params}": "SBAS network selection parameters from stack_manifest.selection_params.",
+    "${dem_sarscapedata}": "DEM SARSCAPEDATA object built from IDL_DINSAR_DEM_BASE_FILE.",
+    "${previous_outputs}": "Outputs from earlier explicit task phases."
+  },
+  "native_workflow": {
+    "phase_id": "native_wf_sbas",
+    "task_name": "wf_sbas",
+    "source_task_file": "C:\\Program Files\\Harris\\ENVI56\\user_custom_code\\wf_sbas.task",
+    "parameters": {
+      "INPUT_FILE_LIST": "${scene_input_uris}",
+      "SARSCAPE_PREFERENCE": "Use actual preferences",
+      "DEM_SARSCAPEDATA": "${dem_sarscapedata}",
+      "OUTPUT_FOLDER": "${output_root}",
+      "GEOCODE_RG_GRID_SIZE": 10.0,
+      "ESTIMATE_RESIDUAL_HEIGHT": true,
+      "DISPLACEMENT_MODEL_TYPE": "linear"
+    },
+    "parameter_schema_summary": [
+      {
+        "name": "INPUT_FILE_LIST",
+        "type": "ENVIURI",
+        "dimensions": "[*]",
+        "direction": "input",
+        "required": true
+      },
+      {
+        "name": "SARSCAPE_PREFERENCE",
+        "type": "STRING",
+        "direction": "input",
+        "required": false,
+        "default": "Use actual preferences"
+      },
+      {
+        "name": "DEM_SARSCAPEDATA",
+        "type": "SARSCAPEDATA",
+        "direction": "input",
+        "required": false
+      },
+      {
+        "name": "REFINEMENT_GCP_FILE_NAME",
+        "type": "ENVIURI",
+        "direction": "input",
+        "required": false
+      },
+      {
+        "name": "OUTPUT_FOLDER",
+        "type": "ENVIURI",
+        "direction": "input",
+        "required": false
+      },
+      {
+        "name": "GEOCODE_RG_GRID_SIZE",
+        "type": "DOUBLE",
+        "direction": "input",
+        "required": false
+      },
+      {
+        "name": "ESTIMATE_RESIDUAL_HEIGHT",
+        "type": "BOOLEAN",
+        "direction": "input",
+        "required": false,
+        "default": true
+      },
+      {
+        "name": "DISPLACEMENT_MODEL_TYPE",
+        "type": "STRING",
+        "direction": "input",
+        "required": false,
+        "choices": [
+          "no_displacement",
+          "linear",
+          "quadratic",
+          "cubic",
+          "linear_periodic"
+        ]
+      },
+      {
+        "name": "OUTPUT_ENVI_CARTOGRAPHIC_SYSTEM",
+        "type": "ENVICOORDSYS",
+        "direction": "input",
+        "required": false
+      },
+      {
+        "name": "DAG",
+        "type": "ENVIMETATASKDAG",
+        "direction": "input",
+        "required": false,
+        "provided_by_task_default": true,
+        "static_task_only": true,
+        "live_taskengine_querytask_exposes": false
+      }
+    ],
+    "output_parameters": [
+      "OUTPUT_SHAPES",
+      "DISPLACEMENT_SARSCAPEDATA",
+      "DEM_OUT_SARSCAPEDATA",
+      "CORRECTION_H_SARSCAPEDATA",
+      "COHERENCE_SARSCAPEDATA",
+      "ALOS_SARSCAPEDATA",
+      "ILOS_SARSCAPEDATA",
+      "VELOCITY_SARSCAPEDATA"
+    ],
+    "dag_summary": [
+      {
+        "node_id": "task_10",
+        "task_name": "SARscape_setting_output_folders",
+        "external_input": {
+          "output_folder": "OUTPUT_FOLDER"
+        },
+        "static_input": {
+          "sub_1_folder": "imported_data"
+        }
+      },
+      {
+        "node_id": "task_6",
+        "task_name": "SARsLoadPreferences",
+        "external_input": {
+          "sarscape_preference": "SARSCAPE_PREFERENCE"
+        }
+      },
+      {
+        "node_id": "task_8",
+        "task_name": "SARsImportSarSelector",
+        "external_input": {
+          "input_file_list": "INPUT_FILE_LIST"
+        },
+        "internal_input": {
+          "root_uri_for_output": "task_10.root_uri_1_for_output"
+        },
+        "static_input": {
+          "cross_copolarization": "ONLY_COPOL_POL"
+        }
+      },
+      {
+        "node_id": "elementExtractor_1",
+        "task_name": "ENVIEXTRACTELEMENTSFROMARRAYTASK",
+        "internal_input": {
+          "input_array": "task_8.output_sarscapedata"
+        },
+        "static_input": {
+          "indices": [
+            0
+          ]
+        }
+      },
+      {
+        "node_id": "task_9",
+        "task_name": "SARscapeSuggestLooks",
+        "external_input": {
+          "grid_size_for_suggested_looks": "GEOCODE_RG_GRID_SIZE"
+        },
+        "internal_input": {
+          "reference_data": "elementExtractor_1.output_element"
+        }
+      },
+      {
+        "node_id": "task_1",
+        "task_name": "SARsInSARStackSBASGenerateConnectionGraph",
+        "internal_input": {
+          "input_sarscapedata": "task_8.output_sarscapedata",
+          "root_uri_for_output": "task_10.root_uri_for_output"
+        }
+      },
+      {
+        "node_id": "task_2",
+        "task_name": "SARsInSARStackSBASInterferogramGeneration",
+        "external_input": {
+          "dem_sarscapedata": "DEM_SARSCAPEDATA"
+        },
+        "internal_input": {
+          "auxiliary_file_name": "task_1.auxiliary_processing_info_file",
+          "az_looks_nbr": "task_9.looks_az",
+          "rg_looks_nbr": "task_9.looks_rg"
+        }
+      },
+      {
+        "node_id": "task_3",
+        "task_name": "SARsInSARStackSBASInversionStep1",
+        "external_input": {
+          "refinement_gcp_file_name": "REFINEMENT_GCP_FILE_NAME",
+          "estimate_residual_height": "ESTIMATE_RESIDUAL_HEIGHT",
+          "displacement_model_type": "DISPLACEMENT_MODEL_TYPE"
+        },
+        "internal_input": {
+          "auxiliary_file_name": "task_2.auxiliary_processing_info_file"
+        }
+      },
+      {
+        "node_id": "task_4",
+        "task_name": "SARsInSARStackSBASInversionStep2",
+        "external_input": {
+          "refinement_gcp_file_name": "REFINEMENT_GCP_FILE_NAME"
+        },
+        "internal_input": {
+          "auxiliary_file_name": "task_3.auxiliary_processing_info_file"
+        }
+      },
+      {
+        "node_id": "task_5",
+        "task_name": "SARsInSARStackSBASGeocode",
+        "external_input": {
+          "geocode_rg_grid_size": "GEOCODE_RG_GRID_SIZE",
+          "geocode_az_grid_size": "GEOCODE_RG_GRID_SIZE",
+          "output_envi_cartographic_system": "OUTPUT_ENVI_CARTOGRAPHIC_SYSTEM",
+          "refinement_gcp_file_name": "REFINEMENT_GCP_FILE_NAME",
+          "dem_sarscapedata": "DEM_SARSCAPEDATA"
+        },
+        "internal_input": {
+          "auxiliary_file_name": "task_4.auxiliary_processing_info_file"
+        },
+        "output": {
+          "displacement_sarscapedata": "DISPLACEMENT_SARSCAPEDATA",
+          "dem_out_sarscapedata": "DEM_OUT_SARSCAPEDATA",
+          "correction_h_sarscapedata": "CORRECTION_H_SARSCAPEDATA",
+          "coherence_sarscapedata": "COHERENCE_SARSCAPEDATA",
+          "alos_sarscapedata": "ALOS_SARSCAPEDATA",
+          "ilos_sarscapedata": "ILOS_SARSCAPEDATA",
+          "velocity_sarscapedata": "VELOCITY_SARSCAPEDATA"
+        }
+      },
+      {
+        "node_id": "task_7",
+        "task_name": "SARscapeEnviuriToShape",
+        "external_input": {
+          "arcgis_output_folder": "OUTPUT_FOLDER"
+        },
+        "internal_input": {
+          "input_data": "task_5.output_sbas_shapes"
+        },
+        "output": {
+          "output_shapes": "OUTPUT_SHAPES"
+        }
+      }
+    ]
+  },
+  "explicit_stack_task_chain": {
+    "status": "available_but_not_validated_for_system_edge_injection",
+    "required_tasks": [
+      "SARsInSARStackSBASGenerateConnectionGraph",
+      "SARsInSARStackSBASInterferogramGeneration",
+      "SARsInSARStackSBASInversionStep1",
+      "SARsInSARStackSBASInversionStep2",
+      "SARsInSARStackSBASGeocode"
+    ],
+    "optional_tasks": [
+      "SARsInSARStackSBASVariogram"
+    ],
+    "chaining_rule": "Each phase consumes the previous phase AUXILIARY_PROCESSING_INFO_FILE as AUXILIARY_FILE_NAME.",
+    "open_issue": "Need SARscape-supported method to force or import the system-selected network_edges instead of allowing GenerateConnectionGraph to rebuild the graph."
+  },
+  "tasks": [
+    {
+      "phase_id": "connection_graph",
+      "task_name": "SARsInSARStackSBASGenerateConnectionGraph",
+      "enabled": false,
+      "source_task_file": "C:\\Program Files\\Harris\\ENVI56\\resource\\templates\\tasks\\SARscape\\SARsInSARStackSBASGenerateConnectionGraph.task",
+      "required_inputs": [
+        "INPUT_SARSCAPEDATA"
+      ],
+      "outputs": [
+        "OUT_TRIGGERING_EXECUTION_OPTION",
+        "AUXILIARY_PROCESSING_INFO_FILE"
+      ],
+      "parameter_count": 18,
+      "parameters": {}
+    },
+    {
+      "phase_id": "interferogram_generation",
+      "task_name": "SARsInSARStackSBASInterferogramGeneration",
+      "enabled": false,
+      "source_task_file": "C:\\Program Files\\Harris\\ENVI56\\resource\\templates\\tasks\\SARscape\\SARsInSARStackSBASInterferogramGeneration.task",
+      "required_inputs": [
+        "AUXILIARY_FILE_NAME"
+      ],
+      "outputs": [
+        "OUT_TRIGGERING_EXECUTION_OPTION",
+        "AUXILIARY_PROCESSING_INFO_FILE"
+      ],
+      "parameter_count": 36,
+      "parameters": {}
+    },
+    {
+      "phase_id": "inversion_step1",
+      "task_name": "SARsInSARStackSBASInversionStep1",
+      "enabled": false,
+      "source_task_file": "C:\\Program Files\\Harris\\ENVI56\\resource\\templates\\tasks\\SARscape\\SARsInSARStackSBASInversionStep1.task",
+      "required_inputs": [
+        "AUXILIARY_FILE_NAME"
+      ],
+      "outputs": [
+        "OUT_TRIGGERING_EXECUTION_OPTION",
+        "AUXILIARY_PROCESSING_INFO_FILE"
+      ],
+      "parameter_count": 24,
+      "parameters": {}
+    },
+    {
+      "phase_id": "inversion_step2",
+      "task_name": "SARsInSARStackSBASInversionStep2",
+      "enabled": false,
+      "source_task_file": "C:\\Program Files\\Harris\\ENVI56\\resource\\templates\\tasks\\SARscape\\SARsInSARStackSBASInversionStep2.task",
+      "required_inputs": [
+        "AUXILIARY_FILE_NAME"
+      ],
+      "outputs": [
+        "OUT_TRIGGERING_EXECUTION_OPTION",
+        "AUXILIARY_PROCESSING_INFO_FILE"
+      ],
+      "parameter_count": 19,
+      "parameters": {}
+    },
+    {
+      "phase_id": "geocode_export",
+      "task_name": "SARsInSARStackSBASGeocode",
+      "enabled": false,
+      "source_task_file": "C:\\Program Files\\Harris\\ENVI56\\resource\\templates\\tasks\\SARscape\\SARsInSARStackSBASGeocode.task",
+      "required_inputs": [
+        "AUXILIARY_FILE_NAME"
+      ],
+      "outputs": [
+        "OUT_TRIGGERING_EXECUTION_OPTION",
+        "OUTPUT_SBAS_DIRECTORY",
+        "DISPLACEMENT_SARSCAPEDATA",
+        "DEM_OUT_SARSCAPEDATA",
+        "CORRECTION_H_SARSCAPEDATA",
+        "COHERENCE_SARSCAPEDATA",
+        "ALOS_SARSCAPEDATA",
+        "ILOS_SARSCAPEDATA",
+        "VELOCITY_SARSCAPEDATA",
+        "OUTPUT_SBAS_SHAPES"
+      ],
+      "parameter_count": 44,
+      "parameters": {}
+    },
+    {
+      "phase_id": "variogram_optional",
+      "task_name": "SARsInSARStackSBASVariogram",
+      "enabled": false,
+      "optional": true,
+      "source_task_file": "C:\\Program Files\\Harris\\ENVI56\\resource\\templates\\tasks\\SARscape\\SARsInSARStackSBASVariogram.task",
+      "required_inputs": [
+        "AUXILIARY_FILE_NAME"
+      ],
+      "outputs": [
+        "OUT_TRIGGERING_EXECUTION_OPTION"
+      ],
+      "parameter_count": 21,
+      "parameters": {}
+    }
+  ],
+  "expected_outputs": {
+    "velocity_product": [
+      "VELOCITY_SARSCAPEDATA"
+    ],
+    "timeseries_product": [
+      "DISPLACEMENT_SARSCAPEDATA",
+      "ALOS_SARSCAPEDATA",
+      "ILOS_SARSCAPEDATA"
+    ],
+    "temporal_coherence": [
+      "COHERENCE_SARSCAPEDATA"
+    ],
+    "geocoded_raster": [
+      "OUTPUT_SBAS_DIRECTORY"
+    ],
+    "preview_png": []
+  }
+}

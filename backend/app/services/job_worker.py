@@ -17,7 +17,13 @@ from .. import database
 from ..config import settings
 from ..models import SystemWorkerHeartbeatORM
 
-IDL_JOB_TYPES = {"IDL_RUN_IMPORT", "IDL_RUN_DINSAR", "WATER_GEOCODE", "WATER_FLOOD"}
+IDL_JOB_TYPES = {
+    "IDL_RUN_IMPORT",
+    "IDL_RUN_DINSAR",
+    "WATER_GEOCODE",
+    "WATER_FLOOD",
+    "TIMESERIES_RUN_SARSCAPE_SBAS",
+}
 
 
 def _default_worker_id() -> str:

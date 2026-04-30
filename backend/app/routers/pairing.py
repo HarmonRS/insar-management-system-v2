@@ -18,6 +18,8 @@ from ..models import (
     RadarData,
     TimeseriesStackPlan,
     TimeseriesStackPlanDetail,
+    TimeseriesStackPlanEdge,
+    TimeseriesStackPlanEdgeORM,
     TimeseriesStackPlanItem,
     TimeseriesStackPlanItemORM,
     TimeseriesStackPlanORM,
@@ -89,11 +91,21 @@ def get_pairing_request_from_form(
 
 def get_ps_request_from_form(
     initial_overlap_threshold: float = Form(0.3),
-    final_overlap_threshold: float = Form(0.95)
+    final_overlap_threshold: float = Form(0.95),
+    time_baseline_min: int = Form(1),
+    time_baseline_max: int = Form(90),
+    spatial_baseline_max_meters: int = Form(3000),
+    network_overlap_threshold: float = Form(0.5),
+    num_connections: int = Form(1),
 ) -> PsRequest:
     return PsRequest(
         initial_overlap_threshold=initial_overlap_threshold,
         final_overlap_threshold=final_overlap_threshold,
+        time_baseline_min=time_baseline_min,
+        time_baseline_max=time_baseline_max,
+        spatial_baseline_max_meters=spatial_baseline_max_meters,
+        network_overlap_threshold=network_overlap_threshold,
+        num_connections=num_connections,
     )
 
 
@@ -205,10 +217,19 @@ async def get_timeseries_stack_plan_endpoint(
         .where(TimeseriesStackPlanItemORM.plan_ref_id == plan.id)
         .order_by(TimeseriesStackPlanItemORM.scene_rank.asc(), TimeseriesStackPlanItemORM.id.asc())
     )
+    edges_result = await db.execute(
+        select(TimeseriesStackPlanEdgeORM)
+        .where(TimeseriesStackPlanEdgeORM.plan_ref_id == plan.id)
+        .order_by(TimeseriesStackPlanEdgeORM.edge_rank.asc(), TimeseriesStackPlanEdgeORM.id.asc())
+    )
     payload = TimeseriesStackPlan.model_validate(plan).model_dump()
     payload["items"] = [
         TimeseriesStackPlanItem.model_validate(item)
         for item in items_result.scalars().all()
+    ]
+    payload["edges"] = [
+        TimeseriesStackPlanEdge.model_validate(edge)
+        for edge in edges_result.scalars().all()
     ]
     return TimeseriesStackPlanDetail.model_validate(payload)
 

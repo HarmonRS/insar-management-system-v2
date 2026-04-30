@@ -9,11 +9,17 @@ export const runTimeseriesWslCheck = (payload = {}) =>
 export const runTimeseriesPreflight = payload =>
   apiClient.post('/timeseries-production/preflight', payload).then(r => r.data);
 
+export const runSarscapeSbasPreflight = payload =>
+  apiClient.post('/timeseries-production/sarscape-sbas/preflight', payload).then(r => r.data);
+
 export const listTimeseriesRuns = (params = {}) =>
   apiClient.get('/timeseries-production/runs', { params }).then(r => r.data);
 
 export const getTimeseriesRunDetail = runId =>
   apiClient.get(`/timeseries-production/runs/${encodeURIComponent(runId)}`).then(r => r.data);
+
+export const getTimeseriesPreparedStack = runId =>
+  apiClient.get(`/timeseries-production/runs/${encodeURIComponent(runId)}/prepared-stack`).then(r => r.data);
 
 export const retryTimeseriesStep = (runId, payload) =>
   apiClient.post(`/timeseries-production/runs/${encodeURIComponent(runId)}/retry-step`, payload).then(r => r.data);

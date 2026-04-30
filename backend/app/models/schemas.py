@@ -203,6 +203,8 @@ class RadarData(BaseModel):
     stack_coverage_consistency_ratio: Optional[float] = None
     stack_threshold_satisfied: Optional[bool] = None
     stack_selection_mode: Optional[str] = None
+    stack_network_edge_count: Optional[int] = None
+    stack_network_warnings: Optional[List[str]] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -353,6 +355,11 @@ class PsRequest(BaseModel):
     """PS-InSAR 时序分析数据准备的请求模型。"""
     initial_overlap_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     final_overlap_threshold: float = Field(default=0.95, ge=0.0, le=1.0)
+    time_baseline_min: int = Field(default=1, ge=0, le=3650)
+    time_baseline_max: int = Field(default=90, ge=1, le=3650)
+    spatial_baseline_max_meters: int = Field(default=3000, ge=0, le=100000)
+    network_overlap_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    num_connections: int = Field(default=1, ge=1, le=10)
 
 
 class TimeseriesStackPlanItem(BaseModel):
@@ -393,8 +400,34 @@ class TimeseriesStackPlan(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class TimeseriesStackPlanEdge(BaseModel):
+    id: int
+    plan_ref_id: int
+    master_plan_item_ref_id: Optional[int] = None
+    slave_plan_item_ref_id: Optional[int] = None
+    metric_cache_ref_id: Optional[int] = None
+    master_scene_ref_id: Optional[int] = None
+    slave_scene_ref_id: Optional[int] = None
+    edge_rank: int
+    master_imaging_date: Optional[str] = None
+    slave_imaging_date: Optional[str] = None
+    temporal_baseline_days: Optional[int] = None
+    spatial_baseline_meters: Optional[float] = None
+    perpendicular_baseline_meters: Optional[float] = None
+    scene_overlap_ratio: Optional[float] = None
+    pair_aoi_overlap_ratio: Optional[float] = None
+    selection_reason: Optional[str] = None
+    selection_score: Optional[float] = None
+    selection_meta_json: Optional[Dict[str, Any]] = None
+    enabled: bool = True
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class TimeseriesStackPlanDetail(TimeseriesStackPlan):
     items: List[TimeseriesStackPlanItem] = Field(default_factory=list)
+    edges: List[TimeseriesStackPlanEdge] = Field(default_factory=list)
 
 
 class TaskInfo(BaseModel):

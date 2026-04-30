@@ -63,6 +63,8 @@ export default function usePairingLogic({
             source: planId ? 'timeseries_stack_plan' : 'find_ps_timeseries',
             plan_id: planId,
             strategy: 'sbas_stack',
+            pool_role: 'candidate_timeseries_pool',
+            production_contract: 'prepare_run_will_freeze_prepared_sbas_stack',
             direction: batchDirection,
             display_group: direction,
             scene_count: stack.length,
@@ -70,6 +72,8 @@ export default function usePairingLogic({
             stack_key: firstScene.stack_key || null,
             initial_overlap_threshold: psParams?.initial_overlap_threshold ?? null,
             final_overlap_threshold: psParams?.final_overlap_threshold ?? null,
+            network_edge_count: firstScene.stack_network_edge_count ?? null,
+            network_warnings: firstScene.stack_network_warnings ?? [],
             stack_dates: stack.map(item => item.imaging_date).filter(Boolean),
         };
         try {
@@ -85,6 +89,7 @@ export default function usePairingLogic({
                 addLog('info', `时序批次已关联候选栈计划 ${planId}`);
             }
             addLog('success', `已创建时序批次: ${batchId || batchDirection}`);
+            addLog('info', '当前批次是候选时序池；正式生产会先执行 prepare，冻结 prepared SBAS 小栈后再进入处理器。');
             if (batchId && sendToProduction) {
                 setBatchTab('ps');
                 setSelectedBatchId(batchId);
@@ -293,9 +298,7 @@ export default function usePairingLogic({
             if (Object.keys(processedResults).length > 0) {
                 addLog('success', `成功找到 ${Object.keys(processedResults).length} 个时序InSAR候选栈。`);
                 setLeftPanelTab('ps_results');
-                for (const [direction, stack] of Object.entries(processedResults)) {
-                    await createPsBatch(direction, stack, { focusAfterCreate: false });
-                }
+                addLog('info', '候选栈仅作为预览结果保留；需要生产时请手动保存批次或送入生产。');
             } else {
                 addLog('info', '在给定的AOI和阈值下，未找到满足 SBAS 至少 3 景要求的时序影像栈。');
                 setLeftPanelTab('ps_results');

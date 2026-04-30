@@ -56,6 +56,8 @@ nginx/temp/
 experiments/**/scratch/
 backend/quality_model.pkl
 /_par_win_*.xls
+/IDL*.tmp
+/env_*.xyz
 .codex_tmp/
 
 # Large local datasets / installers

@@ -20,6 +20,8 @@ class TimeseriesRunCreateRequest(BaseModel):
     run_name: Optional[str] = Field(default=None, max_length=255)
     reference_date: Optional[str] = Field(default=None, pattern=r"^\d{8}$|^$")
     water_mask_mode: str = Field(default="synthetic_fallback", max_length=64)
+    processor_code: str = Field(default="isce2_stack_mintpy", max_length=64)
+    execution_mode: Optional[str] = Field(default=None, max_length=32)
     notes: Optional[str] = Field(default=None, max_length=1000)
 
     @field_validator("batch_id", mode="before")
@@ -58,6 +60,21 @@ class TimeseriesPreflightRequest(BaseModel):
         return text
 
 
+class SarscapeSbasPreflightRequest(BaseModel):
+    batch_id: str = Field(..., description="PS batch id")
+    reference_date: Optional[str] = Field(default=None, pattern=r"^\d{8}$|^$")
+    include_task_discovery: bool = True
+    discovery_timeout_seconds: int = Field(default=120, ge=10, le=600)
+
+    @field_validator("batch_id", mode="before")
+    @classmethod
+    def _validate_batch_id(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("batch_id is required")
+        return text
+
+
 class TimeseriesRetryStepRequest(BaseModel):
     step_id: str = Field(..., max_length=128)
 
@@ -82,6 +99,8 @@ async def create_timeseries_run(
             run_name=request.run_name,
             reference_date=request.reference_date,
             water_mask_mode=request.water_mask_mode,
+            processor_code=request.processor_code,
+            execution_mode=request.execution_mode,
             notes=request.notes,
             created_by=getattr(current_user, "username", None),
             db=db,
@@ -125,6 +144,25 @@ async def run_timeseries_preflight(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/sarscape-sbas/preflight")
+async def run_sarscape_sbas_preflight(
+    request: SarscapeSbasPreflightRequest,
+    current_user: AuthUserORM = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = current_user
+    try:
+        return await timeseries_service.get_sarscape_sbas_preflight_report(
+            batch_id=request.batch_id,
+            reference_date=request.reference_date,
+            include_task_discovery=request.include_task_discovery,
+            discovery_timeout_seconds=request.discovery_timeout_seconds,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/runs")
 async def list_timeseries_runs(
     limit: int = 50,
@@ -147,6 +185,19 @@ async def get_timeseries_run_detail(
     if detail is None:
         raise HTTPException(status_code=404, detail="Timeseries run not found")
     return detail
+
+
+@router.get("/runs/{run_id}/prepared-stack")
+async def get_timeseries_run_prepared_stack(
+    run_id: str,
+    current_user: AuthUserORM = Depends(_get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = current_user
+    summary = await timeseries_service.get_prepared_stack_summary(db, run_id=run_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Timeseries run not found")
+    return summary
 
 
 @router.post("/runs/{run_id}/retry-step", status_code=202)

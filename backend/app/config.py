@@ -301,8 +301,13 @@ class Settings(BaseSettings):
     TIMESERIES_MINTPY_SBAS_SCRIPT: str = ""
     TIMESERIES_EXPORT_PUBLISH_SCRIPT: str = ""
     TIMESERIES_STACK_WORKFLOW: str = "interferogram"
+    TIMESERIES_DEFAULT_PROCESSOR_CODE: str = "isce2_stack_mintpy"
     TIMESERIES_WSL_STEP_TIMEOUT_SECONDS: int = 7200
     TIMESERIES_ALLOW_SYNTHETIC_WATER_MASK: bool = True
+    SARSCAPE_SBAS_PARAMETER_TEMPLATE_PATH: str = ""
+    SARSCAPE_SBAS_ALLOW_EXECUTION: bool = False
+    SARSCAPE_SBAS_DISCOVERY_TIMEOUT_SECONDS: int = 120
+    SARSCAPE_SBAS_STEP_TIMEOUT_SECONDS: int = 21600
 
     @model_validator(mode="after")
     def _set_path_defaults(self) -> "Settings":
@@ -599,6 +604,16 @@ class Settings(BaseSettings):
                     self.TIMESERIES_EXPERIMENT_ROOT,
                     "scripts",
                     "export_mintpy_publish_products_unified_env_ubuntu2404.sh",
+                ),
+            )
+        if not self.SARSCAPE_SBAS_PARAMETER_TEMPLATE_PATH:
+            object.__setattr__(
+                self,
+                "SARSCAPE_SBAS_PARAMETER_TEMPLATE_PATH",
+                os.path.join(
+                    backend_dir,
+                    "templates",
+                    "sarscape_sbas_parameter_template.example.json",
                 ),
             )
         return self

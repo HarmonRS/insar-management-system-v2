@@ -25,9 +25,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--workflow",
-        required=True,
+        required=False,
         choices=["import", "dinsar", "dinsar_custom"],
     )
+    parser.add_argument("--inspect-sarscape-sbas", action="store_true")
+    parser.add_argument("--include-parameters", action="store_true")
+    parser.add_argument("--task-name", action="append", default=[])
     parser.add_argument("--root-dir", required=False)
     parser.add_argument("--task-dir", required=False)
     parser.add_argument("--output-dir", required=False)
@@ -44,7 +47,22 @@ def main() -> int:
     ensure_project_env_loaded()
     args = _parse_args()
     try:
-        from .envi_service import run_single_task_workflow, run_workflow
+        from .envi_service import (
+            inspect_sarscape_sbas_tasks,
+            run_single_task_workflow,
+            run_workflow,
+        )
+
+        if args.inspect_sarscape_sbas:
+            record = inspect_sarscape_sbas_tasks(
+                args.task_name or None,
+                include_parameters=bool(args.include_parameters),
+            )
+            print(json.dumps(record, ensure_ascii=False))
+            return 0 if record.get("ok") else 2
+
+        if not args.workflow:
+            raise ValueError("--workflow is required unless --inspect-sarscape-sbas is used.")
 
         if args.task_dir:
             if not args.output_dir:

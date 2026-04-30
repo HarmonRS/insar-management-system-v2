@@ -35,6 +35,7 @@ from ..models import (
     RadarDataORM,
     RadarPair,
     ResultProductORM,
+    TimeseriesStackPlanEdgeORM,
     TimeseriesStackPlanItemORM,
     TimeseriesStackPlanORM,
 )
@@ -404,6 +405,138 @@ class SpatialService:
             "stack_dates": stack_dates,
         }
 
+    async def _build_timeseries_network_edges(
+        self,
+        db: AsyncSession,
+        scenes: List[RadarDataORM],
+        params: PsRequest,
+        *,
+        aoi_wkt: Optional[str],
+        selection_mode: Optional[str],
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        scene_ids = [int(item.id) for item in scenes if item.id is not None]
+        if len(scene_ids) < 2:
+            return [], []
+
+        master_alias = aliased(RadarDataORM)
+        slave_alias = aliased(RadarDataORM)
+        stmt = (
+            select(PairingMetricCacheORM, master_alias, slave_alias)
+            .join(master_alias, master_alias.id == PairingMetricCacheORM.master_scene_ref_id)
+            .join(slave_alias, slave_alias.id == PairingMetricCacheORM.slave_scene_ref_id)
+            .where(
+                PairingMetricCacheORM.metric_version == pairing_state_service.metric_version,
+                PairingMetricCacheORM.status == "READY",
+                PairingMetricCacheORM.master_scene_ref_id.in_(scene_ids),
+                PairingMetricCacheORM.slave_scene_ref_id.in_(scene_ids),
+                PairingMetricCacheORM.time_baseline_days >= params.time_baseline_min,
+                PairingMetricCacheORM.time_baseline_days <= params.time_baseline_max,
+                PairingMetricCacheORM.spatial_baseline_meters <= params.spatial_baseline_max_meters,
+                PairingMetricCacheORM.scene_overlap_ratio >= params.network_overlap_threshold,
+            )
+            .order_by(
+                PairingMetricCacheORM.master_imaging_date.asc(),
+                PairingMetricCacheORM.slave_imaging_date.asc(),
+                PairingMetricCacheORM.time_baseline_days.asc(),
+                PairingMetricCacheORM.spatial_baseline_meters.asc(),
+                func.coalesce(PairingMetricCacheORM.scene_overlap_ratio, 0).desc(),
+                PairingMetricCacheORM.id.asc(),
+            )
+        )
+        result = await db.execute(stmt)
+
+        candidate_pool: List[dict] = []
+        for metric_row, master_row, slave_row in result.all():
+            candidate_pool.append(
+                {
+                    "metric_cache_ref_id": int(metric_row.id),
+                    "pair_uid": metric_row.pair_uid,
+                    "master_scene_uid": metric_row.master_scene_uid,
+                    "slave_scene_uid": metric_row.slave_scene_uid,
+                    "master": RadarData.model_validate(master_row),
+                    "slave": RadarData.model_validate(slave_row),
+                    "days": int(metric_row.time_baseline_days or 0),
+                    "dist": float(metric_row.spatial_baseline_meters or 0.0),
+                    "overlap_ratio": float(metric_row.scene_overlap_ratio or 0.0),
+                }
+            )
+
+        warnings: List[str] = []
+        if not candidate_pool:
+            warnings.append(
+                "No pairing_metric_cache edges matched the time-series SBAS network thresholds."
+            )
+            return [], warnings
+        candidate_scene_ids = {
+            int(candidate[role].id)
+            for candidate in candidate_pool
+            for role in ("master", "slave")
+            if candidate.get(role) is not None
+        }
+        missing_scene_count = len(set(scene_ids) - candidate_scene_ids)
+        if missing_scene_count > 0:
+            warnings.append(
+                f"{missing_scene_count} selected scenes have no metric-cache edge under the current SBAS thresholds."
+            )
+
+        pairing_params = PairingRequest(
+            time_baseline_min=params.time_baseline_min,
+            time_baseline_max=params.time_baseline_max,
+            overlap_threshold=params.network_overlap_threshold,
+            spatial_baseline_max_meters=params.spatial_baseline_max_meters,
+            coverage_diversity_penalty=0.3,
+            require_same_imaging_mode=True,
+            require_same_polarization=True,
+            strategy="sbas",
+            num_connections=params.num_connections,
+        )
+        selected_candidates, strategy_warnings = self._apply_sbas_strategy(
+            candidate_pool,
+            pairing_params,
+            aoi_wkt=aoi_wkt,
+        )
+        warnings.extend(strategy_warnings)
+
+        edges: List[Dict[str, Any]] = []
+        for edge_rank, candidate in enumerate(self._sorted_candidates(selected_candidates), start=1):
+            master = candidate["master"]
+            slave = candidate["slave"]
+            edges.append(
+                {
+                    "edge_rank": edge_rank,
+                    "metric_cache_ref_id": candidate.get("metric_cache_ref_id"),
+                    "master_scene_ref_id": int(master.id),
+                    "slave_scene_ref_id": int(slave.id),
+                    "master_imaging_date": master.imaging_date,
+                    "slave_imaging_date": slave.imaging_date,
+                    "temporal_baseline_days": int(candidate.get("days") or 0),
+                    "spatial_baseline_meters": float(candidate.get("dist") or 0.0),
+                    "scene_overlap_ratio": float(candidate.get("overlap_ratio") or 0.0),
+                    "selection_reason": candidate.get("selection_reason"),
+                    "selection_score": (
+                        float(candidate["selection_score"])
+                        if candidate.get("selection_score") is not None
+                        else None
+                    ),
+                    "selection_meta_json": {
+                        "source": "pairing_metric_cache",
+                        "selection_mode": selection_mode,
+                        "pair_uid": candidate.get("pair_uid"),
+                        "metric_version": pairing_state_service.metric_version,
+                        "time_baseline_min": params.time_baseline_min,
+                        "time_baseline_max": params.time_baseline_max,
+                        "spatial_baseline_max_meters": params.spatial_baseline_max_meters,
+                        "network_overlap_threshold": params.network_overlap_threshold,
+                        "num_connections": params.num_connections,
+                    },
+                    "enabled": True,
+                }
+            )
+
+        if not edges:
+            warnings.append("SBAS strategy did not select any network edges for this stack.")
+        return edges, warnings
+
     async def _persist_timeseries_stack_plan(
         self,
         db: AsyncSession,
@@ -416,6 +549,8 @@ class SpatialService:
         coverage_consistency_ratio: Optional[float] = None,
         threshold_satisfied: Optional[bool] = None,
         selection_mode: Optional[str] = None,
+        network_edges: Optional[List[Dict[str, Any]]] = None,
+        network_warnings: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         request_payload = params.model_dump(exclude_none=True)
         aoi_hash = self._stable_sha1(aoi_wkt) if aoi_wkt else None
@@ -447,6 +582,9 @@ class SpatialService:
 
         sorted_scenes = sorted(scenes, key=lambda item: str(item.imaging_date or ""))
         scene_payloads: List[RadarData] = []
+        plan_item_by_scene_id: Dict[int, TimeseriesStackPlanItemORM] = {}
+        safe_network_edges = list(network_edges or [])
+        safe_network_warnings = [str(item) for item in (network_warnings or []) if str(item).strip()]
         for rank, item in enumerate(sorted_scenes, start=1):
             plan_item = TimeseriesStackPlanItemORM(
                 plan_ref_id=plan.id,
@@ -469,6 +607,8 @@ class SpatialService:
                     "coverage_consistency_ratio": coverage_consistency_ratio,
                     "threshold_satisfied": threshold_satisfied,
                     "selection_mode": selection_mode,
+                    "network_edge_count": len(safe_network_edges),
+                    "network_warnings": safe_network_warnings,
                     "orbit_direction": item.orbit_direction,
                     "satellite_family": self._normalize_timeseries_satellite_family(item),
                     "bbox": [item.min_lon, item.min_lat, item.max_lon, item.max_lat],
@@ -477,6 +617,8 @@ class SpatialService:
             )
             db.add(plan_item)
             await db.flush()
+            if item.id is not None:
+                plan_item_by_scene_id[int(item.id)] = plan_item
             scene_payloads.append(
                 RadarData.model_validate(item).model_copy(
                     update={
@@ -490,14 +632,61 @@ class SpatialService:
                         "stack_coverage_consistency_ratio": coverage_consistency_ratio,
                         "stack_threshold_satisfied": threshold_satisfied,
                         "stack_selection_mode": selection_mode,
+                        "stack_network_edge_count": len(safe_network_edges),
+                        "stack_network_warnings": safe_network_warnings,
                     }
                 )
             )
+
+        for edge_payload in safe_network_edges:
+            master_scene_id = edge_payload.get("master_scene_ref_id")
+            slave_scene_id = edge_payload.get("slave_scene_ref_id")
+            master_plan_item = (
+                plan_item_by_scene_id.get(int(master_scene_id))
+                if master_scene_id is not None
+                else None
+            )
+            slave_plan_item = (
+                plan_item_by_scene_id.get(int(slave_scene_id))
+                if slave_scene_id is not None
+                else None
+            )
+            edge = TimeseriesStackPlanEdgeORM(
+                plan_ref_id=plan.id,
+                master_plan_item_ref_id=(
+                    int(master_plan_item.id)
+                    if master_plan_item is not None and master_plan_item.id is not None
+                    else None
+                ),
+                slave_plan_item_ref_id=(
+                    int(slave_plan_item.id)
+                    if slave_plan_item is not None and slave_plan_item.id is not None
+                    else None
+                ),
+                metric_cache_ref_id=edge_payload.get("metric_cache_ref_id"),
+                master_scene_ref_id=master_scene_id,
+                slave_scene_ref_id=slave_scene_id,
+                edge_rank=int(edge_payload.get("edge_rank") or 0),
+                master_imaging_date=edge_payload.get("master_imaging_date"),
+                slave_imaging_date=edge_payload.get("slave_imaging_date"),
+                temporal_baseline_days=edge_payload.get("temporal_baseline_days"),
+                spatial_baseline_meters=edge_payload.get("spatial_baseline_meters"),
+                perpendicular_baseline_meters=edge_payload.get("perpendicular_baseline_meters"),
+                scene_overlap_ratio=edge_payload.get("scene_overlap_ratio"),
+                pair_aoi_overlap_ratio=edge_payload.get("pair_aoi_overlap_ratio"),
+                selection_reason=edge_payload.get("selection_reason"),
+                selection_score=edge_payload.get("selection_score"),
+                selection_meta_json=edge_payload.get("selection_meta_json"),
+                enabled=bool(edge_payload.get("enabled", True)),
+            )
+            db.add(edge)
 
         return {
             "plan_id": plan.plan_id,
             "group_key": identity.get("group_key"),
             "stack_key": identity.get("stack_key"),
+            "edge_count": len(safe_network_edges),
+            "network_warnings": safe_network_warnings,
             "scenes": scene_payloads,
         }
 
@@ -1286,6 +1475,19 @@ class SpatialService:
                 if len(final_stack) >= 3:
                     final_stack.sort(key=lambda x: str(x.imaging_date or ""))
                     direction = group_key[0]
+                    network_edges, network_warnings = await self._build_timeseries_network_edges(
+                        db,
+                        final_stack,
+                        params,
+                        aoi_wkt=aoi_wkt,
+                        selection_mode=selection_mode,
+                    )
+                    logger.info(
+                        "timeseries stack planning: group=%s network_edges=%s network_warnings=%s",
+                        self._format_timeseries_group_label(group_key),
+                        len(network_edges),
+                        len(network_warnings),
+                    )
                     persisted_plan = await self._persist_timeseries_stack_plan(
                         db,
                         direction=direction,
@@ -1296,6 +1498,8 @@ class SpatialService:
                         coverage_consistency_ratio=consistency_ratio,
                         threshold_satisfied=threshold_satisfied,
                         selection_mode=selection_mode,
+                        network_edges=network_edges,
+                        network_warnings=network_warnings,
                     )
                     result_key = persisted_plan.get("group_key") or self._format_timeseries_group_label(group_key)
                     if result_key in final_results:

@@ -25,6 +25,7 @@ from ..models import (
     PsTaskItemORM,
     RadarData,
     RadarPair,
+    TimeseriesStackPlanEdgeORM,
     TimeseriesStackPlanItemORM,
     TimeseriesStackPlanORM,
 )
@@ -144,6 +145,7 @@ def _normalize_lookup_key(value: Optional[str]) -> str:
 def _build_plan_context(
     plan: TimeseriesStackPlanORM,
     plan_items: List[TimeseriesStackPlanItemORM],
+    plan_edges: Optional[List[TimeseriesStackPlanEdgeORM]] = None,
 ) -> Dict[str, Any]:
     request_params = plan.request_params_json if isinstance(plan.request_params_json, dict) else {}
     ordered_items = sorted(
@@ -164,6 +166,10 @@ def _build_plan_context(
         }
         for item in ordered_items
     ]
+    ordered_edges = sorted(
+        list(plan_edges or []),
+        key=lambda item: (int(item.edge_rank or 0), int(item.id or 0)),
+    )
     return {
         "source": "timeseries_stack_plan",
         "plan_id": plan.plan_id,
@@ -176,12 +182,41 @@ def _build_plan_context(
         "aoi_summary": plan.aoi_summary_json if isinstance(plan.aoi_summary_json, dict) else None,
         "initial_overlap_threshold": request_params.get("initial_overlap_threshold"),
         "final_overlap_threshold": request_params.get("final_overlap_threshold"),
+        "time_baseline_min": request_params.get("time_baseline_min"),
+        "time_baseline_max": request_params.get("time_baseline_max"),
+        "spatial_baseline_max_meters": request_params.get("spatial_baseline_max_meters"),
+        "network_overlap_threshold": request_params.get("network_overlap_threshold"),
+        "num_connections": request_params.get("num_connections"),
+        "network_edge_count": len(ordered_edges),
         "stack_dates": [
             str(item.imaging_date).strip()
             for item in ordered_items
             if str(item.imaging_date or "").strip()
         ],
         "scenes": scenes,
+        "network_edges": [
+            {
+                "edge_id": item.id,
+                "edge_rank": item.edge_rank,
+                "master_plan_item_ref_id": item.master_plan_item_ref_id,
+                "slave_plan_item_ref_id": item.slave_plan_item_ref_id,
+                "metric_cache_ref_id": item.metric_cache_ref_id,
+                "master_scene_ref_id": item.master_scene_ref_id,
+                "slave_scene_ref_id": item.slave_scene_ref_id,
+                "master_imaging_date": item.master_imaging_date,
+                "slave_imaging_date": item.slave_imaging_date,
+                "temporal_baseline_days": item.temporal_baseline_days,
+                "spatial_baseline_meters": item.spatial_baseline_meters,
+                "perpendicular_baseline_meters": item.perpendicular_baseline_meters,
+                "scene_overlap_ratio": item.scene_overlap_ratio,
+                "pair_aoi_overlap_ratio": item.pair_aoi_overlap_ratio,
+                "selection_reason": item.selection_reason,
+                "selection_score": item.selection_score,
+                "enabled": bool(item.enabled),
+                "selection_meta": item.selection_meta_json if isinstance(item.selection_meta_json, dict) else None,
+            }
+            for item in ordered_edges
+        ],
     }
 
 
@@ -383,6 +418,7 @@ async def create_ps_batch_endpoint(
     effective_plan_id = explicit_plan_id or (inferred_plan_ids[0] if inferred_plan_ids else None)
     plan: Optional[TimeseriesStackPlanORM] = None
     plan_items: List[TimeseriesStackPlanItemORM] = []
+    plan_edges: List[TimeseriesStackPlanEdgeORM] = []
     plan_item_by_id: Dict[int, TimeseriesStackPlanItemORM] = {}
     plan_item_by_scene_id: Dict[int, TimeseriesStackPlanItemORM] = {}
     plan_item_by_path: Dict[str, TimeseriesStackPlanItemORM] = {}
@@ -408,6 +444,12 @@ async def create_ps_batch_endpoint(
             .order_by(TimeseriesStackPlanItemORM.scene_rank.asc(), TimeseriesStackPlanItemORM.id.asc())
         )
         plan_items = items_result.scalars().all()
+        edges_result = await db.execute(
+            select(TimeseriesStackPlanEdgeORM)
+            .where(TimeseriesStackPlanEdgeORM.plan_ref_id == plan.id)
+            .order_by(TimeseriesStackPlanEdgeORM.edge_rank.asc(), TimeseriesStackPlanEdgeORM.id.asc())
+        )
+        plan_edges = edges_result.scalars().all()
         plan_item_by_id = {int(item.id): item for item in plan_items if item.id is not None}
         plan_item_by_scene_id = {
             int(item.radar_data_ref_id): item
@@ -419,15 +461,18 @@ async def create_ps_batch_endpoint(
             for item in plan_items
             if _normalize_lookup_key(item.file_path)
         }
+        plan_context = _build_plan_context(plan, plan_items, plan_edges)
         if not planning_context:
-            planning_context = _build_plan_context(plan, plan_items)
+            planning_context = plan_context
         else:
             merged_context = {
-                **_build_plan_context(plan, plan_items),
+                **plan_context,
                 **planning_context,
             }
             if "scenes" not in planning_context:
-                merged_context["scenes"] = _build_plan_context(plan, plan_items).get("scenes") or []
+                merged_context["scenes"] = plan_context.get("scenes") or []
+            if "network_edges" not in planning_context:
+                merged_context["network_edges"] = plan_context.get("network_edges") or []
             planning_context = merged_context
 
     batch_id = str(uuid.uuid4())
@@ -466,7 +511,7 @@ async def create_ps_batch_endpoint(
             planning_summary = {
                 key: value
                 for key, value in planning_context.items()
-                if key != "scenes"
+                if key not in {"scenes", "network_edges"}
             }
             remark_payload = {
                 **planning_summary,

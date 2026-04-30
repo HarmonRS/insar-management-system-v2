@@ -34,6 +34,7 @@ MIGRATION_FILES = [
     "005_pairing_task_trace.sql",
     "006_result_pairing_trace.sql",
     "007_timeseries_stack_plan_trace.sql",
+    "008_timeseries_stack_plan_edges.sql",
 ]
 
 

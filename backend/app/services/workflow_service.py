@@ -173,6 +173,7 @@ class WorkflowService:
                 step.outputs = outputs
 
             await self._advance_ready_steps(run_id, db)
+            await db.flush()
             await self.enqueue_ready_steps(run_id, db=db)
 
             if gen_db:

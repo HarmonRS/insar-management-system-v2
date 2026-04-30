@@ -43,6 +43,8 @@ from .timeseries_service import (
     JOB_TYPE_TIMESERIES_REGISTER_PRODUCT,
     JOB_TYPE_TIMESERIES_RUN_ISCE2_STACK,
     JOB_TYPE_TIMESERIES_RUN_MINTPY_SBAS,
+    JOB_TYPE_TIMESERIES_RUN_SARSCAPE_SBAS,
+    JOB_TYPE_TIMESERIES_SARSCAPE_PREFLIGHT,
     JOB_TYPE_TIMESERIES_STACK_PREP,
     JOB_TYPE_TIMESERIES_EXPORT_PUBLISH,
     timeseries_service,
@@ -3550,6 +3552,73 @@ async def _handle_timeseries_run_mintpy_sbas(job: SystemJobORM) -> None:
             raise
 
 
+async def _handle_timeseries_sarscape_preflight(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("TIMESERIES_SARSCAPE_PREFLIGHT requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("TIMESERIES_SARSCAPE_PREFLIGHT requires run_id payload.")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await task_service.update_task(
+                job.task_id,
+                progress=45,
+                message="Building SARscape SBAS processor manifest...",
+                db=db,
+            )
+            result = await timeseries_service.build_sarscape_processor_preflight(run_id, db=db)
+            ready_text = "ready" if result.get("ready_for_execution") else "planning_only"
+            is_preflight_only = str(result.get("execution_mode") or "").strip() == "preflight_only"
+            await task_service.update_task(
+                job.task_id,
+                status="COMPLETED" if is_preflight_only else None,
+                progress=100 if is_preflight_only else 55,
+                message=(
+                    f"SARscape SBAS preflight complete: state={ready_text} "
+                    f"manifest={result.get('processor_manifest_path')}"
+                ),
+                db=db,
+            )
+        except Exception as exc:
+            await timeseries_service.mark_run_failed(run_id, str(exc), db=db)
+            raise
+
+
+async def _handle_timeseries_run_sarscape_sbas(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("TIMESERIES_RUN_SARSCAPE_SBAS requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("TIMESERIES_RUN_SARSCAPE_SBAS requires run_id payload.")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await task_service.update_task(
+                job.task_id,
+                progress=90,
+                message="Running SARscape SBAS pipeline...",
+                db=db,
+            )
+            async with engine_lock_service.acquire("sarscape_sbas_timeseries"):
+                result = await timeseries_service.run_sarscape_sbas(run_id, db=db)
+            await task_service.update_task(
+                job.task_id,
+                status="COMPLETED",
+                progress=100,
+                message=(
+                    f"SARscape SBAS complete: tasks={result.get('task_count', 0)} "
+                    f"report={result.get('report_path')}"
+                ),
+                db=db,
+            )
+        except Exception as exc:
+            await timeseries_service.mark_run_failed(run_id, str(exc), db=db)
+            raise
+
+
 async def _handle_timeseries_export_publish(job: SystemJobORM) -> None:
     if not job.task_id:
         raise ValueError("TIMESERIES_EXPORT_PUBLISH requires task_id for progress tracking.")
@@ -3648,6 +3717,8 @@ _HANDLERS = {
     JOB_TYPE_TIMESERIES_MATERIALIZE: _handle_timeseries_materialize,
     JOB_TYPE_TIMESERIES_RUN_ISCE2_STACK: _handle_timeseries_run_isce2_stack,
     JOB_TYPE_TIMESERIES_RUN_MINTPY_SBAS: _handle_timeseries_run_mintpy_sbas,
+    JOB_TYPE_TIMESERIES_SARSCAPE_PREFLIGHT: _handle_timeseries_sarscape_preflight,
+    JOB_TYPE_TIMESERIES_RUN_SARSCAPE_SBAS: _handle_timeseries_run_sarscape_sbas,
     JOB_TYPE_TIMESERIES_EXPORT_PUBLISH: _handle_timeseries_export_publish,
     JOB_TYPE_TIMESERIES_REGISTER_PRODUCT: _handle_timeseries_register_product,
     JOB_TYPE_REBUILD_PSINSAR_CATALOG: _handle_rebuild_psinsar_catalog,

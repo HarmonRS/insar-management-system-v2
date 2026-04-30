@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re as _re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -53,6 +53,12 @@ class InspectRequest(BaseModel):
 class ExtractDispRequest(BaseModel):
     root_dir: str
     dest_dir: Optional[str] = None
+
+
+class SarscapeSbasInspectRequest(BaseModel):
+    task_names: Optional[List[str]] = None
+    include_parameters: bool = False
+    timeout_seconds: Optional[int] = Field(default=120, ge=10, le=600)
 
 
 def _normalize_existing_dir(path: Optional[str]) -> Optional[str]:
@@ -160,6 +166,22 @@ async def inspect_dinsar_endpoint(
     _ = admin_user
     _validate_root_dir(request.root_dir)
     return envi_service.inspect_dinsar(request.root_dir)
+
+
+@router.post("/idl/inspect/sarscape-sbas")
+async def inspect_sarscape_sbas_endpoint(
+    request: SarscapeSbasInspectRequest,
+    admin_user: AuthUserORM = Depends(_require_admin),
+):
+    _ = admin_user
+    try:
+        return envi_service.inspect_sarscape_sbas_tasks_subprocess(
+            request.task_names,
+            timeout_seconds=request.timeout_seconds or 120,
+            include_parameters=bool(request.include_parameters),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/idl/jobs/import")

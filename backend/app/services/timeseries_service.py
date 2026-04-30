@@ -23,6 +23,7 @@ from ..models import (
     PsTimeseriesRunORM,
     RadarDataORM,
     ResultProductORM,
+    TimeseriesStackPlanEdgeORM,
     TimeseriesStackPlanItemORM,
     TimeseriesStackPlanORM,
     WorkflowStepORM,
@@ -30,17 +31,26 @@ from ..models import (
 from .psinsar_catalog_service import psinsar_catalog_service
 from .product_packaging import upgrade_timeseries_package_manifest
 from .product_package_schema import normalize_package_manifest
+from .sarscape_sbas_service import execute_template_workflow as execute_sarscape_sbas_template_workflow
+from .sarscape_sbas_service import build_preflight_report as build_sarscape_sbas_preflight_report
+from .sarscape_sbas_service import build_processor_manifest as build_sarscape_sbas_processor_manifest
+from .sarscape_sbas_service import write_processor_manifest as write_sarscape_sbas_processor_manifest
 from .task_service import task_service
 from .workflow_service import workflow_service
 from .wsl_service import check_wsl_environment, run_wsl_command
 
 
 CATALOG_NAME_PSINSAR = "psinsar"
+PREPARED_STACK_SCHEMA = "insar.prepared-sbas-stack/v1"
+PREPARED_NETWORK_EDGES_SCHEMA = "insar.prepared-sbas-network-edges/v1"
+PREPARED_STACK_MANIFEST_ROLE = "prepared_sbas_stack"
 JOB_TYPE_TIMESERIES_PREPARE = "TIMESERIES_PREPARE"
 JOB_TYPE_TIMESERIES_STACK_PREP = "TIMESERIES_STACK_PREP"
 JOB_TYPE_TIMESERIES_MATERIALIZE = "TIMESERIES_MATERIALIZE"
 JOB_TYPE_TIMESERIES_RUN_ISCE2_STACK = "TIMESERIES_RUN_ISCE2_STACK"
 JOB_TYPE_TIMESERIES_RUN_MINTPY_SBAS = "TIMESERIES_RUN_MINTPY_SBAS"
+JOB_TYPE_TIMESERIES_SARSCAPE_PREFLIGHT = "TIMESERIES_SARSCAPE_PREFLIGHT"
+JOB_TYPE_TIMESERIES_RUN_SARSCAPE_SBAS = "TIMESERIES_RUN_SARSCAPE_SBAS"
 JOB_TYPE_TIMESERIES_EXPORT_PUBLISH = "TIMESERIES_EXPORT_PUBLISH"
 JOB_TYPE_TIMESERIES_REGISTER_PRODUCT = "TIMESERIES_REGISTER_PRODUCT"
 TASK_TYPE_TIMESERIES_RUN = "TIMESERIES_RUN"
@@ -84,6 +94,8 @@ TIMESERIES_STEP_STATUS_HINTS = {
     "stack_prep_refresh": STATUS_MATERIALIZED,
     "run_isce2_stack": STATUS_STACK_READY,
     "run_mintpy_sbas": STATUS_STACK_COMPLETED,
+    "sarscape_processor_preflight": STATUS_PREPARED,
+    "run_sarscape_sbas": STATUS_STACK_READY,
     "export_publish_bundle": STATUS_MINTPY_COMPLETED,
     "register_psinsar_product": STATUS_EXPORTED,
 }
@@ -94,6 +106,8 @@ TIMESERIES_STEP_PROGRESS_HINTS = {
     "stack_prep_refresh": 82,
     "run_isce2_stack": 88,
     "run_mintpy_sbas": 93,
+    "sarscape_processor_preflight": 45,
+    "run_sarscape_sbas": 90,
     "export_publish_bundle": 96,
     "register_psinsar_product": 99,
 }
@@ -145,6 +159,17 @@ def _normalize_lookup_key(path: Optional[str]) -> str:
 def _stable_digest(*parts: Any, length: int = 10) -> str:
     payload = "||".join(str(part or "") for part in parts)
     return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:length]
+
+
+def _sha256_json(payload: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8", errors="ignore")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _slug_fragment(value: Optional[str], *, default: str) -> str:
@@ -335,6 +360,71 @@ class TimeseriesService:
             return None
         return stack_dates[len(stack_dates) // 2]
 
+    def _normalize_processor_code(self, processor_code: Optional[str]) -> str:
+        normalized = str(
+            processor_code
+            or getattr(settings, "TIMESERIES_DEFAULT_PROCESSOR_CODE", "")
+            or "isce2_stack_mintpy"
+        ).strip().lower()
+        aliases = {
+            "isce2": "isce2_stack_mintpy",
+            "mintpy": "isce2_stack_mintpy",
+            "isce2_stack": "isce2_stack_mintpy",
+            "isce2_stack_mintpy": "isce2_stack_mintpy",
+            "sarscape": "sarscape_sbas",
+            "envi": "sarscape_sbas",
+            "sarscape_sbas": "sarscape_sbas",
+        }
+        if normalized not in aliases:
+            raise ValueError(f"Unsupported timeseries processor_code: {processor_code}")
+        return aliases[normalized]
+
+    def _normalize_execution_mode(self, execution_mode: Optional[str], processor_code: str) -> str:
+        normalized = str(execution_mode or "").strip().lower()
+        if not normalized:
+            return "preflight_only" if processor_code == "sarscape_sbas" else "full"
+        aliases = {
+            "full": "full",
+            "run": "full",
+            "execute": "full",
+            "preflight": "preflight_only",
+            "preflight_only": "preflight_only",
+            "plan": "preflight_only",
+            "planning": "preflight_only",
+        }
+        if normalized not in aliases:
+            raise ValueError(f"Unsupported timeseries execution_mode: {execution_mode}")
+        return aliases[normalized]
+
+    def _processor_runtime(self, processor_code: str) -> Dict[str, Optional[str]]:
+        if processor_code == "sarscape_sbas":
+            dem_path = str(settings.IDL_DINSAR_DEM_BASE_FILE or "").strip()
+            orbit_pool = str(settings.ORBIT_POOL_ENVI or "").strip()
+            return {
+                "engine_code": "sarscape",
+                "processor_code": "sarscape_sbas",
+                "runtime_id": "envi_sarscape",
+                "env_name": None,
+                "wsl_distro": None,
+                "workflow": "sarscape_sbas",
+                "dem_path_windows": dem_path or None,
+                "dem_path_wsl": None,
+                "orbit_pool_windows": orbit_pool or None,
+                "orbit_pool_wsl": None,
+            }
+        return {
+            "engine_code": "isce2",
+            "processor_code": "isce2_stack_mintpy",
+            "runtime_id": settings.ISCE2_RUNTIME_ID or None,
+            "env_name": settings.TIMESERIES_ENV_NAME or None,
+            "wsl_distro": settings.TIMESERIES_WSL_DISTRO or None,
+            "workflow": settings.TIMESERIES_STACK_WORKFLOW,
+            "dem_path_windows": str(settings.TIMESERIES_DEM_PATH or "").strip() or None,
+            "dem_path_wsl": _windows_path_to_wsl_mount(settings.TIMESERIES_DEM_PATH),
+            "orbit_pool_windows": str(settings.TIMESERIES_ORBIT_POOL_ISCE2 or "").strip() or None,
+            "orbit_pool_wsl": _windows_path_to_wsl_mount(settings.TIMESERIES_ORBIT_POOL_ISCE2),
+        }
+
     def _scene_payload(self, items: List[PsTaskItemORM]) -> List[Dict[str, Any]]:
         payload: List[Dict[str, Any]] = []
         for item in items:
@@ -405,11 +495,16 @@ class TimeseriesService:
         self,
         plan: TimeseriesStackPlanORM,
         plan_items: List[TimeseriesStackPlanItemORM],
+        plan_edges: Optional[List[TimeseriesStackPlanEdgeORM]] = None,
     ) -> Dict[str, Any]:
         request_params = plan.request_params_json if isinstance(plan.request_params_json, dict) else {}
         ordered_items = sorted(
             plan_items,
             key=lambda item: (int(item.scene_rank or 0), int(item.id or 0)),
+        )
+        ordered_edges = sorted(
+            list(plan_edges or []),
+            key=lambda item: (int(item.edge_rank or 0), int(item.id or 0)),
         )
         return {
             "source": "timeseries_stack_plan",
@@ -423,6 +518,12 @@ class TimeseriesService:
             "aoi_summary": plan.aoi_summary_json if isinstance(plan.aoi_summary_json, dict) else None,
             "initial_overlap_threshold": request_params.get("initial_overlap_threshold"),
             "final_overlap_threshold": request_params.get("final_overlap_threshold"),
+            "time_baseline_min": request_params.get("time_baseline_min"),
+            "time_baseline_max": request_params.get("time_baseline_max"),
+            "spatial_baseline_max_meters": request_params.get("spatial_baseline_max_meters"),
+            "network_overlap_threshold": request_params.get("network_overlap_threshold"),
+            "num_connections": request_params.get("num_connections"),
+            "network_edge_count": len(ordered_edges),
             "stack_dates": [
                 str(item.imaging_date).strip()
                 for item in ordered_items
@@ -441,6 +542,29 @@ class TimeseriesService:
                     "selection_meta": item.selection_meta_json if isinstance(item.selection_meta_json, dict) else None,
                 }
                 for item in ordered_items
+            ],
+            "network_edges": [
+                {
+                    "edge_id": item.id,
+                    "edge_rank": item.edge_rank,
+                    "master_plan_item_ref_id": item.master_plan_item_ref_id,
+                    "slave_plan_item_ref_id": item.slave_plan_item_ref_id,
+                    "metric_cache_ref_id": item.metric_cache_ref_id,
+                    "master_scene_ref_id": item.master_scene_ref_id,
+                    "slave_scene_ref_id": item.slave_scene_ref_id,
+                    "master_imaging_date": item.master_imaging_date,
+                    "slave_imaging_date": item.slave_imaging_date,
+                    "temporal_baseline_days": item.temporal_baseline_days,
+                    "spatial_baseline_meters": item.spatial_baseline_meters,
+                    "perpendicular_baseline_meters": item.perpendicular_baseline_meters,
+                    "scene_overlap_ratio": item.scene_overlap_ratio,
+                    "pair_aoi_overlap_ratio": item.pair_aoi_overlap_ratio,
+                    "selection_reason": item.selection_reason,
+                    "selection_score": item.selection_score,
+                    "enabled": bool(item.enabled),
+                    "selection_meta": item.selection_meta_json if isinstance(item.selection_meta_json, dict) else None,
+                }
+                for item in ordered_edges
             ],
         }
 
@@ -467,7 +591,16 @@ class TimeseriesService:
             .where(TimeseriesStackPlanItemORM.plan_ref_id == plan.id)
             .order_by(TimeseriesStackPlanItemORM.scene_rank.asc(), TimeseriesStackPlanItemORM.id.asc())
         )
-        return self._build_plan_context(plan, items_result.scalars().all())
+        edges_result = await db.execute(
+            select(TimeseriesStackPlanEdgeORM)
+            .where(TimeseriesStackPlanEdgeORM.plan_ref_id == plan.id)
+            .order_by(TimeseriesStackPlanEdgeORM.edge_rank.asc(), TimeseriesStackPlanEdgeORM.id.asc())
+        )
+        return self._build_plan_context(
+            plan,
+            items_result.scalars().all(),
+            edges_result.scalars().all(),
+        )
 
     async def _load_run(self, run_id: str, db: AsyncSession) -> PsTimeseriesRunORM:
         result = await db.execute(
@@ -554,6 +687,8 @@ class TimeseriesService:
             source_dirs.append(str(scene_dir))
             scene_payloads.append(
                 {
+                    "task_item_id": item.id,
+                    "plan_item_ref_id": item.plan_item_ref_id,
                     "folder_name": scene_dir.name,
                     "folder_path": str(scene_dir),
                     "folder_path_wsl": _windows_path_to_wsl_mount(str(scene_dir)),
@@ -652,6 +787,10 @@ class TimeseriesService:
         work_root = Path(run.work_root_windows or _normalize_path(os.path.join(settings.TIMESERIES_WORK_ROOT, run.run_id)))
         return work_root / "input" / "selected_stack_manifest.json"
 
+    def _selected_network_edges_path(self, run: PsTimeseriesRunORM) -> Path:
+        work_root = Path(run.work_root_windows or _normalize_path(os.path.join(settings.TIMESERIES_WORK_ROOT, run.run_id)))
+        return work_root / "input" / "selected_network_edges.json"
+
     def _generated_stack_manifest_path(self, run: PsTimeseriesRunORM) -> Path:
         work_root = Path(run.work_root_windows or _normalize_path(os.path.join(settings.TIMESERIES_WORK_ROOT, run.run_id)))
         return work_root / "stack_input_manifest.json"
@@ -677,6 +816,273 @@ class TimeseriesService:
         if not manifest_path.exists():
             raise FileNotFoundError(f"Selected stack manifest not found: {manifest_path}")
         return _read_json(manifest_path)
+
+    def _dem_validation_status(
+        self,
+        dem_path: Optional[str],
+        *,
+        processor_code: Optional[str],
+    ) -> Dict[str, Any]:
+        normalized = _normalize_path(dem_path) if str(dem_path or "").strip() else None
+        base_exists = bool(
+            normalized
+            and (Path(normalized).is_file() or Path(normalized).is_dir())
+        )
+        auxiliary_paths: List[str] = []
+        if normalized and str(processor_code or "").strip() == "sarscape_sbas":
+            base = Path(normalized)
+            suffix = base.suffix.lower()
+            if suffix == ".sml":
+                auxiliary_paths = [str(base), str(base.with_suffix(".hdr"))]
+            elif suffix == ".hdr":
+                auxiliary_paths = [str(base.with_suffix(".sml")), str(base)]
+            else:
+                auxiliary_paths = [normalized + ".sml", normalized + ".hdr"]
+        elif normalized:
+            auxiliary_paths = _dem_sidecar_candidates(normalized)
+
+        auxiliary = [
+            {
+                "path": path,
+                "exists": bool(Path(path).is_file() or Path(path).is_dir()),
+            }
+            for path in auxiliary_paths
+        ]
+        auxiliary_ok = bool(auxiliary) and all(bool(item.get("exists")) for item in auxiliary)
+        return {
+            "path": normalized,
+            "exists": base_exists,
+            "auxiliary": auxiliary,
+            "auxiliary_ok": auxiliary_ok,
+            "ok": bool(base_exists or auxiliary_ok),
+        }
+
+    def _build_prepared_stack_validation(
+        self,
+        stack_manifest: Dict[str, Any],
+        *,
+        manifest_path: Optional[Path] = None,
+        expected_run_id: Optional[str] = None,
+        expected_processor_code: Optional[str] = None,
+        require_network_edges: bool = False,
+        require_dem: bool = False,
+        dem_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        scenes = stack_manifest.get("scenes") if isinstance(stack_manifest.get("scenes"), list) else []
+        network_edges = (
+            stack_manifest.get("network_edges")
+            if isinstance(stack_manifest.get("network_edges"), list)
+            else []
+        )
+        artifacts = stack_manifest.get("artifacts") if isinstance(stack_manifest.get("artifacts"), dict) else {}
+        artifact_edges_path = str(
+            artifacts.get("selected_network_edges_path_windows")
+            or stack_manifest.get("selected_network_edges_path_windows")
+            or ""
+        ).strip()
+        artifact_edges_exists = bool(
+            artifact_edges_path
+            and Path(_normalize_path(artifact_edges_path)).is_file()
+        )
+        stack_dates = [
+            normalized
+            for normalized in (_normalize_date(item) for item in (stack_manifest.get("stack_dates") or []))
+            if normalized
+        ]
+        scene_dates = [
+            normalized
+            for normalized in (_normalize_date(scene.get("imaging_date")) for scene in scenes if isinstance(scene, dict))
+            if normalized
+        ]
+        duplicate_dates = sorted({date for date in scene_dates if scene_dates.count(date) > 1})
+
+        missing_scene_paths: List[Dict[str, Any]] = []
+        zero_size_files: List[Dict[str, Any]] = []
+        for index, scene in enumerate(scenes):
+            if not isinstance(scene, dict):
+                missing_scene_paths.append(
+                    {
+                        "scene_index": index,
+                        "role": "scene",
+                        "path": None,
+                        "reason": "scene payload is not an object",
+                    }
+                )
+                continue
+            for role, key, must_be_dir in (
+                ("folder", "folder_path", True),
+                ("tiff", "tiff_path", False),
+                ("meta", "meta_path", False),
+            ):
+                raw_path = str(scene.get(key) or "").strip()
+                if not raw_path:
+                    missing_scene_paths.append(
+                        {
+                            "scene_index": index,
+                            "imaging_date": scene.get("imaging_date"),
+                            "role": role,
+                            "path": None,
+                            "reason": f"missing {key}",
+                        }
+                    )
+                    continue
+                path = Path(_normalize_path(raw_path))
+                exists = path.is_dir() if must_be_dir else path.is_file()
+                if not exists:
+                    missing_scene_paths.append(
+                        {
+                            "scene_index": index,
+                            "imaging_date": scene.get("imaging_date"),
+                            "role": role,
+                            "path": str(path),
+                            "reason": "not found",
+                        }
+                    )
+                elif not must_be_dir:
+                    try:
+                        if path.stat().st_size <= 0:
+                            zero_size_files.append(
+                                {
+                                    "scene_index": index,
+                                    "imaging_date": scene.get("imaging_date"),
+                                    "role": role,
+                                    "path": str(path),
+                                }
+                            )
+                    except OSError:
+                        zero_size_files.append(
+                            {
+                                "scene_index": index,
+                                "imaging_date": scene.get("imaging_date"),
+                                "role": role,
+                                "path": str(path),
+                            }
+                        )
+
+        scene_date_set = set(scene_dates)
+        edge_date_issues: List[Dict[str, Any]] = []
+        for index, edge in enumerate(network_edges):
+            if not isinstance(edge, dict):
+                continue
+            master_date = _normalize_date(edge.get("master_imaging_date"))
+            slave_date = _normalize_date(edge.get("slave_imaging_date"))
+            missing_dates = [
+                date
+                for date in (master_date, slave_date)
+                if date and date not in scene_date_set
+            ]
+            if missing_dates:
+                edge_date_issues.append(
+                    {
+                        "edge_index": index,
+                        "edge_id": edge.get("edge_id"),
+                        "missing_dates": missing_dates,
+                    }
+                )
+
+        processor_code = str(stack_manifest.get("processor_code") or "").strip()
+        dem_status = self._dem_validation_status(
+            dem_path or stack_manifest.get("dem_path_windows"),
+            processor_code=expected_processor_code or processor_code,
+        )
+
+        blockers: List[str] = []
+        warnings: List[str] = []
+        if stack_manifest.get("prepared_stack_schema") != PREPARED_STACK_SCHEMA:
+            blockers.append(
+                f"Stack manifest is not a prepared SBAS stack ({PREPARED_STACK_SCHEMA})."
+            )
+        if stack_manifest.get("manifest_role") != PREPARED_STACK_MANIFEST_ROLE:
+            blockers.append("Stack manifest role is not prepared_sbas_stack.")
+        if expected_run_id and str(stack_manifest.get("run_id") or "").strip() != str(expected_run_id):
+            blockers.append("Prepared stack run_id does not match the requested run.")
+        if expected_processor_code and processor_code != str(expected_processor_code):
+            blockers.append(
+                f"Prepared stack processor_code mismatch: expected {expected_processor_code}, got {processor_code or '<empty>'}."
+            )
+        if len(scenes) < 3:
+            blockers.append("Prepared SBAS stack requires at least 3 scenes.")
+        if int(stack_manifest.get("scene_count") or 0) != len(scenes):
+            blockers.append("Prepared stack scene_count does not match scenes length.")
+        if len(scene_dates) != len(scenes):
+            blockers.append("Prepared stack scenes must all have valid YYYYMMDD imaging_date values.")
+        if stack_dates and stack_dates != scene_dates:
+            blockers.append("Prepared stack stack_dates do not match the resolved scene dates.")
+        if duplicate_dates:
+            blockers.append("Prepared stack has duplicate scene dates: " + ", ".join(duplicate_dates))
+        if missing_scene_paths:
+            blockers.append(f"Prepared stack has missing scene inputs: {len(missing_scene_paths)}.")
+        if zero_size_files:
+            blockers.append(f"Prepared stack has zero-size scene files: {len(zero_size_files)}.")
+        if int(stack_manifest.get("network_edge_count") or 0) != len(network_edges):
+            blockers.append("Prepared stack network_edge_count does not match network_edges length.")
+        if require_network_edges and not network_edges:
+            blockers.append("Prepared SARscape SBAS stack requires selected network_edges.")
+        if require_network_edges and not artifact_edges_exists:
+            blockers.append("Prepared selected_network_edges.json artifact is missing.")
+        if edge_date_issues:
+            blockers.append(
+                "Prepared stack network_edges reference dates outside the selected scene stack."
+            )
+        if require_dem and not dem_status.get("ok"):
+            blockers.append("Prepared stack DEM dependency is missing.")
+        if (not require_network_edges) and not network_edges:
+            warnings.append("Prepared stack has no network_edges; graph audit is unavailable.")
+
+        return {
+            "schema": "insar.prepared-sbas-stack-validation/v1",
+            "ok": not blockers,
+            "blockers": blockers,
+            "warnings": warnings,
+            "manifest_path_windows": str(manifest_path) if manifest_path else None,
+            "prepared_stack_id": stack_manifest.get("prepared_stack_id"),
+            "scene_count": len(scenes),
+            "stack_dates": scene_dates,
+            "network_edge_count": len(network_edges),
+            "require_network_edges": require_network_edges,
+            "require_dem": require_dem,
+            "missing_scene_paths": missing_scene_paths,
+            "zero_size_files": zero_size_files,
+            "duplicate_stack_dates": duplicate_dates,
+            "edge_date_issue_count": len(edge_date_issues),
+            "edge_date_issues": edge_date_issues[:20],
+            "artifact_status": {
+                "selected_network_edges_path_windows": artifact_edges_path or None,
+                "selected_network_edges_exists": artifact_edges_exists,
+            },
+            "dem_status": dem_status,
+            "input_policy": {
+                "production_input": "prepared_stack_manifest",
+                "catalog_scan_allowed_after_prepare": False,
+                "scene_selection_frozen": True,
+            },
+        }
+
+    def _require_prepared_stack_manifest(
+        self,
+        stack_manifest: Dict[str, Any],
+        *,
+        manifest_path: Path,
+        run: PsTimeseriesRunORM,
+        require_network_edges: bool = True,
+        require_dem: bool = True,
+    ) -> Dict[str, Any]:
+        validation = self._build_prepared_stack_validation(
+            stack_manifest,
+            manifest_path=manifest_path,
+            expected_run_id=run.run_id,
+            expected_processor_code=str(run.processor_code or "").strip() or None,
+            require_network_edges=require_network_edges,
+            require_dem=require_dem,
+            dem_path=run.dem_path_windows,
+        )
+        if not validation.get("ok"):
+            blockers = "; ".join(str(item) for item in (validation.get("blockers") or [])[:8])
+            raise ValueError(
+                "Prepared SBAS stack validation failed: "
+                + (blockers or "unknown validation blocker")
+            )
+        return validation
 
     def _generated_stack_manifest_payload(self, run: PsTimeseriesRunORM) -> Dict[str, Any]:
         manifest_path = self._generated_stack_manifest_path(run)
@@ -714,6 +1120,14 @@ class TimeseriesService:
             or _compose_publish_dir(run.run_id, run.stack_key)
         )
         return publish_dir / "manifest.json"
+
+    def _sarscape_processor_manifest_path(self, run: PsTimeseriesRunORM) -> Path:
+        work_root = Path(run.work_root_windows or _normalize_path(os.path.join(settings.TIMESERIES_WORK_ROOT, run.run_id)))
+        return work_root / "input" / "sarscape_sbas_processor_manifest.json"
+
+    def _sarscape_execution_report_path(self, run: PsTimeseriesRunORM) -> Path:
+        work_root = Path(run.work_root_windows or _normalize_path(os.path.join(settings.TIMESERIES_WORK_ROOT, run.run_id)))
+        return work_root / "sarscape_sbas" / "sarscape_sbas_execution_report.json"
 
     def _effective_env_name(self, run: PsTimeseriesRunORM) -> str:
         env_name = str(run.env_name or settings.TIMESERIES_ENV_NAME or "").strip()
@@ -1169,6 +1583,156 @@ class TimeseriesService:
                 payload["message"] = "Timeseries WSL runtime has issues: " + ", ".join(failed)
         return payload
 
+    async def get_sarscape_sbas_preflight_report(
+        self,
+        *,
+        batch_id: str,
+        reference_date: Optional[str] = None,
+        include_task_discovery: bool = True,
+        discovery_timeout_seconds: int = 120,
+        db: AsyncSession,
+    ) -> Dict[str, Any]:
+        """Build the SARscape SBAS stack/processor contract without executing SARscape."""
+        normalized_batch_id = str(batch_id or "").strip()
+        if not normalized_batch_id:
+            raise ValueError("batch_id is required.")
+
+        batch_result = await db.execute(
+            select(PsTaskBatchORM).where(PsTaskBatchORM.batch_id == normalized_batch_id)
+        )
+        batch = batch_result.scalar_one_or_none()
+        if batch is None:
+            raise ValueError(f"PS batch not found: {normalized_batch_id}")
+
+        items = await self._load_batch_items(normalized_batch_id, db)
+        remark_planning_context = self._extract_planning_context(items)
+        stack_plan_context = await self._load_stack_plan_context(db, batch.plan_id)
+        planning_context = remark_planning_context
+        if stack_plan_context:
+            planning_context = {
+                **stack_plan_context,
+                **(remark_planning_context or {}),
+            }
+            planning_context["source"] = stack_plan_context.get("source")
+            planning_context["plan_id"] = stack_plan_context.get("plan_id")
+            planning_context["strategy"] = (
+                stack_plan_context.get("strategy")
+                or planning_context.get("strategy")
+            )
+            planning_context["scene_count"] = (
+                stack_plan_context.get("scene_count")
+                or planning_context.get("scene_count")
+            )
+            planning_context["stack_key"] = (
+                stack_plan_context.get("stack_key")
+                or planning_context.get("stack_key")
+            )
+            planning_context["group_key"] = (
+                stack_plan_context.get("group_key")
+                or planning_context.get("group_key")
+            )
+            if not planning_context.get("scenes"):
+                planning_context["scenes"] = stack_plan_context.get("scenes") or []
+            if not planning_context.get("network_edges"):
+                planning_context["network_edges"] = stack_plan_context.get("network_edges") or []
+
+        stack_dates = [
+            normalized
+            for normalized in (_normalize_date(item.imaging_date) for item in items)
+            if normalized
+        ]
+        if len(stack_dates) != len(items):
+            raise ValueError("Every PS item must have a valid YYYYMMDD imaging_date.")
+
+        effective_reference_date = self._choose_reference_date(stack_dates, reference_date)
+        if not effective_reference_date:
+            raise ValueError("Unable to determine a reference date for this PS batch.")
+
+        preview_id = f"sarscape_sbas_preflight_{normalized_batch_id[:8]}"
+        preview_work_root = _normalize_path(os.path.join(settings.TIMESERIES_WORK_ROOT, "_sarscape_sbas_preflight"))
+        stack_preview = await self._resolve_stack_scene_records(
+            items=items,
+            batch_direction=batch.direction,
+            run_id=preview_id,
+            work_root_windows=preview_work_root,
+            db=db,
+        )
+        network_edges = (
+            planning_context.get("network_edges")
+            if isinstance((planning_context or {}).get("network_edges"), list)
+            else []
+        )
+        selection_params = {
+            key: planning_context.get(key)
+            for key in (
+                "initial_overlap_threshold",
+                "final_overlap_threshold",
+                "time_baseline_min",
+                "time_baseline_max",
+                "spatial_baseline_max_meters",
+                "network_overlap_threshold",
+                "num_connections",
+            )
+            if (planning_context or {}).get(key) is not None
+        }
+
+        stack_manifest = {
+            **stack_preview,
+            "schema": "insar.timeseries-stack/v1",
+            "preview_id": preview_id,
+            "batch_id": normalized_batch_id,
+            "plan_id": batch.plan_id or ((planning_context or {}).get("plan_id")),
+            "plan_strategy": batch.plan_strategy or ((planning_context or {}).get("strategy")),
+            "catalog_name": CATALOG_NAME_PSINSAR,
+            "mode": "sbas",
+            "engine_code": "sarscape",
+            "processor_code": "sarscape_sbas",
+            "reference_date": effective_reference_date,
+            "stack_dates": stack_dates,
+            "selection_params": selection_params,
+            "network_edges": network_edges,
+            "network_edge_count": len(network_edges),
+            "planning_context_summary": {
+                "source": (planning_context or {}).get("source"),
+                "plan_id": (planning_context or {}).get("plan_id"),
+                "strategy": (planning_context or {}).get("strategy"),
+                "scene_count": (planning_context or {}).get("scene_count"),
+                "stack_key": (planning_context or {}).get("stack_key"),
+                "group_key": (planning_context or {}).get("group_key"),
+                "network_edge_count": (planning_context or {}).get("network_edge_count", len(network_edges)),
+            } if planning_context else None,
+            "processing_workflow": "sarscape_sbas",
+        }
+
+        preflight = await asyncio.to_thread(
+            build_sarscape_sbas_preflight_report,
+            stack_manifest,
+            include_task_discovery=include_task_discovery,
+            discovery_timeout_seconds=max(10, int(discovery_timeout_seconds or 120)),
+        )
+        processor_manifest = build_sarscape_sbas_processor_manifest(
+            stack_manifest,
+            discovery_report=preflight.get("task_discovery") if isinstance(preflight, dict) else None,
+        )
+
+        return {
+            "schema": "insar.sarscape-sbas-preview/v1",
+            "batch_id": normalized_batch_id,
+            "batch_name": batch.name,
+            "plan_id": stack_manifest.get("plan_id"),
+            "plan_strategy": stack_manifest.get("plan_strategy"),
+            "reference_date": effective_reference_date,
+            "scene_count": len(stack_dates),
+            "network_edge_count": len(network_edges),
+            "ready_for_pipeline_design": bool(preflight.get("ready_for_pipeline_design")),
+            "ready_for_execution": bool(preflight.get("ready_for_execution")),
+            "blockers": preflight.get("blockers") or [],
+            "environment": preflight.get("environment"),
+            "task_discovery": preflight.get("task_discovery"),
+            "stack_manifest": stack_manifest,
+            "processor_manifest": processor_manifest,
+        }
+
     async def _run_wsl_step(
         self,
         run: PsTimeseriesRunORM,
@@ -1431,7 +1995,56 @@ class TimeseriesService:
             "issues": issues,
         }
 
-    def _workflow_steps(self, *, run_id: str, task_id: str) -> List[Dict[str, Any]]:
+    def _workflow_steps(
+        self,
+        *,
+        run_id: str,
+        task_id: str,
+        processor_code: str = "isce2_stack_mintpy",
+        execution_mode: str = "full",
+    ) -> List[Dict[str, Any]]:
+        if processor_code == "sarscape_sbas":
+            steps: List[Dict[str, Any]] = [
+                {
+                    "step_id": "prepare",
+                    "step_name": "Prepare stack selection manifest",
+                    "job_type": JOB_TYPE_TIMESERIES_PREPARE,
+                    "payload": {"run_id": run_id},
+                    "task_id": task_id,
+                },
+                {
+                    "step_id": "sarscape_processor_preflight",
+                    "step_name": "Build SARscape SBAS processor manifest",
+                    "job_type": JOB_TYPE_TIMESERIES_SARSCAPE_PREFLIGHT,
+                    "payload": {"run_id": run_id},
+                    "task_id": task_id,
+                    "depends_on": ["prepare"],
+                },
+            ]
+            if execution_mode == "full":
+                steps.append(
+                    {
+                        "step_id": "run_sarscape_sbas",
+                        "step_name": "Run SARscape SBAS pipeline",
+                        "job_type": JOB_TYPE_TIMESERIES_RUN_SARSCAPE_SBAS,
+                        "payload": {"run_id": run_id},
+                        "task_id": task_id,
+                        "depends_on": ["sarscape_processor_preflight"],
+                    }
+                )
+            return steps
+
+        if execution_mode == "preflight_only":
+            return [
+                {
+                    "step_id": "prepare",
+                    "step_name": "Prepare stack selection manifest",
+                    "job_type": JOB_TYPE_TIMESERIES_PREPARE,
+                    "payload": {"run_id": run_id},
+                    "task_id": task_id,
+                },
+            ]
+
         return [
             {
                 "step_id": "prepare",
@@ -1599,6 +2212,8 @@ class TimeseriesService:
         run_name: Optional[str] = None,
         reference_date: Optional[str] = None,
         water_mask_mode: str = "synthetic_fallback",
+        processor_code: Optional[str] = None,
+        execution_mode: Optional[str] = None,
         notes: Optional[str] = None,
         created_by: Optional[str] = None,
         db: AsyncSession,
@@ -1617,15 +2232,36 @@ class TimeseriesService:
         if batch is None:
             raise ValueError(f"PS batch not found: {normalized_batch_id}")
 
-        preflight = await self.get_preflight_report(
-            batch_id=normalized_batch_id,
-            reference_date=reference_date,
-            water_mask_mode=water_mask_mode,
-            db=db,
+        normalized_processor_code = self._normalize_processor_code(processor_code)
+        normalized_execution_mode = self._normalize_execution_mode(
+            execution_mode,
+            normalized_processor_code,
         )
-        if not preflight.get("overall_ok"):
-            problem_text = "; ".join(str(item) for item in (preflight.get("errors") or [])[:8]) or "unknown preflight failure"
-            raise ValueError("Timeseries preflight failed: " + problem_text)
+
+        if normalized_processor_code == "sarscape_sbas":
+            preflight = await self.get_sarscape_sbas_preflight_report(
+                batch_id=normalized_batch_id,
+                reference_date=reference_date,
+                include_task_discovery=True,
+                discovery_timeout_seconds=int(settings.SARSCAPE_SBAS_DISCOVERY_TIMEOUT_SECONDS or 120),
+                db=db,
+            )
+            if not preflight.get("ready_for_pipeline_design"):
+                problem_text = "; ".join(str(item) for item in (preflight.get("blockers") or [])[:8]) or "unknown SARscape preflight failure"
+                raise ValueError("SARscape SBAS preflight failed: " + problem_text)
+            if normalized_execution_mode == "full" and not preflight.get("ready_for_execution"):
+                problem_text = "; ".join(str(item) for item in (preflight.get("blockers") or [])[:8]) or "SARscape execution is not ready"
+                raise ValueError("SARscape SBAS execution is not ready: " + problem_text)
+        else:
+            preflight = await self.get_preflight_report(
+                batch_id=normalized_batch_id,
+                reference_date=reference_date,
+                water_mask_mode=water_mask_mode,
+                db=db,
+            )
+            if not preflight.get("overall_ok"):
+                problem_text = "; ".join(str(item) for item in (preflight.get("errors") or [])[:8]) or "unknown preflight failure"
+                raise ValueError("Timeseries preflight failed: " + problem_text)
 
         items = await self._load_batch_items(normalized_batch_id, db)
         remark_planning_context = self._extract_planning_context(items)
@@ -1656,6 +2292,8 @@ class TimeseriesService:
             )
             if not planning_context.get("scenes"):
                 planning_context["scenes"] = stack_plan_context.get("scenes") or []
+            if not planning_context.get("network_edges"):
+                planning_context["network_edges"] = stack_plan_context.get("network_edges") or []
         resolved_plan_id = str(
             batch.plan_id
             or ((planning_context or {}).get("plan_id"))
@@ -1700,9 +2338,23 @@ class TimeseriesService:
         stack_key = str(stack_preview.get("stack_key") or "").strip() or _build_stack_key(
             stack_preview.get("group_key")
         )
+        runtime = self._processor_runtime(normalized_processor_code)
         paths = self._derive_paths(run_id, stack_key=stack_key)
         selected_manifest_path = Path(paths["work_root_windows"]) / "input" / "selected_stack_manifest.json"
-        task_name = f"SBAS timeseries run {run_name_text}"
+        task_name = f"SBAS timeseries run {run_name_text} [{normalized_processor_code}]"
+        if normalized_processor_code == "sarscape_sbas":
+            queued_preflight_summary = {
+                "ready_for_pipeline_design": bool(preflight.get("ready_for_pipeline_design")),
+                "ready_for_execution": bool(preflight.get("ready_for_execution")),
+                "blocker_count": len(preflight.get("blockers") or []),
+                "effective_reference_date": effective_reference_date,
+            }
+        else:
+            queued_preflight_summary = {
+                "overall_ok": bool(preflight.get("overall_ok")),
+                "warning_count": len(preflight.get("warnings") or []),
+                "effective_reference_date": preflight.get("reference_date_effective"),
+            }
         task_id: Optional[str] = None
 
         try:
@@ -1714,6 +2366,8 @@ class TimeseriesService:
                     "batch_id": normalized_batch_id,
                     "plan_id": resolved_plan_id,
                     "reference_date": effective_reference_date,
+                    "processor_code": normalized_processor_code,
+                    "execution_mode": normalized_execution_mode,
                 },
                 db=db,
             )
@@ -1728,21 +2382,21 @@ class TimeseriesService:
                 catalog_name=CATALOG_NAME_PSINSAR,
                 stack_key=stack_key,
                 mode="sbas",
-                engine_code="isce2",
-                processor_code="isce2_stack_mintpy",
-                runtime_id=settings.ISCE2_RUNTIME_ID or None,
-                env_name=settings.TIMESERIES_ENV_NAME or None,
-                wsl_distro=settings.TIMESERIES_WSL_DISTRO or None,
+                engine_code=str(runtime["engine_code"] or ""),
+                processor_code=str(runtime["processor_code"] or ""),
+                runtime_id=runtime["runtime_id"],
+                env_name=runtime["env_name"],
+                wsl_distro=runtime["wsl_distro"],
                 status=STATUS_PENDING,
                 task_id=task_id,
                 direction=str(batch.direction or "").strip().upper() or None,
                 stack_size=len(items),
                 reference_date=effective_reference_date,
                 water_mask_mode=normalized_water_mask_mode,
-                dem_path_windows=str(settings.TIMESERIES_DEM_PATH or "").strip() or None,
-                dem_path_wsl=_windows_path_to_wsl_mount(settings.TIMESERIES_DEM_PATH),
-                orbit_pool_windows=str(settings.TIMESERIES_ORBIT_POOL_ISCE2 or "").strip() or None,
-                orbit_pool_wsl=_windows_path_to_wsl_mount(settings.TIMESERIES_ORBIT_POOL_ISCE2),
+                dem_path_windows=runtime["dem_path_windows"],
+                dem_path_wsl=runtime["dem_path_wsl"],
+                orbit_pool_windows=runtime["orbit_pool_windows"],
+                orbit_pool_wsl=runtime["orbit_pool_wsl"],
                 work_root_windows=paths["work_root_windows"],
                 work_root_wsl=paths["work_root_wsl"],
                 publish_dir_windows=paths["publish_dir_windows"],
@@ -1756,8 +2410,10 @@ class TimeseriesService:
                     "requested_reference_date": _normalize_date(reference_date),
                     "effective_reference_date": effective_reference_date,
                     "water_mask_mode": normalized_water_mask_mode,
+                    "processor_code": normalized_processor_code,
+                    "execution_mode": normalized_execution_mode,
                     "notes": str(notes or "").strip() or None,
-                    "stack_workflow": settings.TIMESERIES_STACK_WORKFLOW,
+                    "stack_workflow": runtime["workflow"],
                     "group_key": stack_preview.get("group_key"),
                     "stack_key": stack_key,
                     "planning_context": planning_context,
@@ -1765,7 +2421,9 @@ class TimeseriesService:
                 },
                 summary_json={
                     "phase": "queued",
-                    "workflow": settings.TIMESERIES_STACK_WORKFLOW,
+                    "workflow": runtime["workflow"],
+                    "processor_code": normalized_processor_code,
+                    "execution_mode": normalized_execution_mode,
                     "plan_id": resolved_plan_id,
                     "plan_strategy": resolved_plan_strategy,
                     "group_key": stack_preview.get("group_key"),
@@ -1778,11 +2436,7 @@ class TimeseriesService:
                         "strategy": (planning_context or {}).get("strategy"),
                         "scene_count": (planning_context or {}).get("scene_count"),
                     } if planning_context else None,
-                    "preflight": {
-                        "overall_ok": bool(preflight.get("overall_ok")),
-                        "warning_count": len(preflight.get("warnings") or []),
-                        "effective_reference_date": preflight.get("reference_date_effective"),
-                    },
+                    "preflight": queued_preflight_summary,
                 },
                 input_snapshot_json={
                     "batch_id": normalized_batch_id,
@@ -1796,17 +2450,21 @@ class TimeseriesService:
                     "stack_dates": stack_dates,
                     "source_root_windows": stack_preview.get("source_root_windows"),
                     "planning_context": planning_context,
+                    "processor_code": normalized_processor_code,
+                    "execution_mode": normalized_execution_mode,
                     "items": self._scene_payload(items),
                 },
                 orbit_summary_json={
                     "stage": "queued",
                     "scene_count": len(items),
                     "item_has_orbit_data_count": sum(1 for item in items if item.has_orbit_data),
-                    "orbit_pool_windows": str(settings.TIMESERIES_ORBIT_POOL_ISCE2 or "").strip() or None,
+                    "orbit_pool_windows": runtime["orbit_pool_windows"],
                 },
                 quality_summary_json={
                     "plan_id": resolved_plan_id,
                     "plan_strategy": resolved_plan_strategy,
+                    "processor_code": normalized_processor_code,
+                    "execution_mode": normalized_execution_mode,
                     "water_mask_mode": normalized_water_mask_mode,
                     "synthetic_water_mask_allowed": bool(settings.TIMESERIES_ALLOW_SYNTHETIC_WATER_MASK),
                     "notes": str(notes or "").strip() or None,
@@ -1818,20 +2476,34 @@ class TimeseriesService:
             db.add(run)
             await db.flush()
 
+            workflow_name = (
+                "psinsar_sarscape_sbas_chain"
+                if normalized_processor_code == "sarscape_sbas"
+                else "psinsar_sbas_full_chain"
+            )
             workflow_run_id = await workflow_service.create_run(
-                workflow_name="psinsar_sbas_full_chain",
-                steps=self._workflow_steps(run_id=run_id, task_id=task_id),
+                workflow_name=workflow_name,
+                steps=self._workflow_steps(
+                    run_id=run_id,
+                    task_id=task_id,
+                    processor_code=normalized_processor_code,
+                    execution_mode=normalized_execution_mode,
+                ),
                 params={
                     "run_id": run_id,
                     "batch_id": normalized_batch_id,
                     "plan_id": resolved_plan_id,
                     "reference_date": effective_reference_date,
-                    "workflow": settings.TIMESERIES_STACK_WORKFLOW,
+                    "workflow": runtime["workflow"],
+                    "processor_code": normalized_processor_code,
+                    "execution_mode": normalized_execution_mode,
                 },
                 tags={
                     "catalog_name": CATALOG_NAME_PSINSAR,
                     "product_family": "timeseries",
-                    "processor_code": "isce2_stack_mintpy",
+                    "processor_code": normalized_processor_code,
+                    "engine_code": runtime["engine_code"],
+                    "execution_mode": normalized_execution_mode,
                     "batch_id": normalized_batch_id,
                     "plan_id": resolved_plan_id,
                     "stack_key": stack_key,
@@ -1851,6 +2523,8 @@ class TimeseriesService:
                 "plan_id": run.plan_id,
                 "reference_date": run.reference_date,
                 "stack_size": run.stack_size,
+                "processor_code": run.processor_code,
+                "execution_mode": normalized_execution_mode,
             }
         except Exception as exc:
             await db.rollback()
@@ -1897,10 +2571,87 @@ class TimeseriesService:
         if not effective_reference_date:
             raise ValueError("Unable to determine reference date during prepare.")
 
-        selected_manifest = {
-            **stack_payload,
+        run_params = run.params_json if isinstance(run.params_json, dict) else {}
+        planning_context = run_params.get("planning_context") if isinstance(run_params.get("planning_context"), dict) else {}
+        network_edges = (
+            planning_context.get("network_edges")
+            if isinstance(planning_context.get("network_edges"), list)
+            else []
+        )
+        selection_params = {
+            key: planning_context.get(key)
+            for key in (
+                "initial_overlap_threshold",
+                "final_overlap_threshold",
+                "time_baseline_min",
+                "time_baseline_max",
+                "spatial_baseline_max_meters",
+                "network_overlap_threshold",
+                "num_connections",
+            )
+            if planning_context.get(key) is not None
+        }
+
+        selected_manifest_path = self._selected_manifest_path(run)
+        selected_network_edges_path = self._selected_network_edges_path(run)
+        prepared_at_utc = _utcnow().replace(microsecond=0).isoformat() + "Z"
+        prepared_stack_id = "pss_" + _stable_digest(
+            run.run_id,
+            run.batch_id,
+            run.plan_id,
+            ",".join(stack_dates),
+            len(network_edges),
+            length=16,
+        )
+        candidate_pool_source = {
+            "source": planning_context.get("source") or "ps_task_batch",
+            "plan_id": run.plan_id or planning_context.get("plan_id"),
+            "batch_id": run.batch_id,
+            "strategy": run.plan_strategy or planning_context.get("strategy"),
+            "candidate_scene_count": planning_context.get("scene_count", len(items)),
+            "selected_scene_count": len(stack_dates),
+            "candidate_network_edge_count": planning_context.get("network_edge_count", len(network_edges)),
+            "selected_network_edge_count": len(network_edges),
+            "stack_key": planning_context.get("stack_key") or stack_payload.get("stack_key"),
+            "group_key": planning_context.get("group_key") or stack_payload.get("group_key"),
+        }
+        artifact_paths = {
+            "selected_stack_manifest_path_windows": str(selected_manifest_path),
+            "selected_stack_manifest_path_wsl": _windows_path_to_wsl_mount(str(selected_manifest_path)),
+            "selected_network_edges_path_windows": str(selected_network_edges_path),
+            "selected_network_edges_path_wsl": _windows_path_to_wsl_mount(str(selected_network_edges_path)),
+        }
+        selected_network_edges_doc = {
+            "schema": PREPARED_NETWORK_EDGES_SCHEMA,
+            "prepared_stack_id": prepared_stack_id,
             "run_id": run.run_id,
             "batch_id": run.batch_id,
+            "plan_id": run.plan_id,
+            "graph_role": "system_selected_planning_audit_graph",
+            "graph_policy": (
+                "For SARscape wf_sbas, these edges define the system planning/audit graph. "
+                "SARscape may rebuild the executable graph internally."
+            ),
+            "network_edge_count": len(network_edges),
+            "network_edges": network_edges,
+            "created_at_utc": prepared_at_utc,
+        }
+        _write_json(selected_network_edges_path, selected_network_edges_doc)
+
+        selected_manifest = {
+            **stack_payload,
+            "schema": "insar.timeseries-stack/v1",
+            "prepared_stack_schema": PREPARED_STACK_SCHEMA,
+            "manifest_role": PREPARED_STACK_MANIFEST_ROLE,
+            "prepared_stack_id": prepared_stack_id,
+            "prepared_at_utc": prepared_at_utc,
+            "source_plan_id": run.plan_id,
+            "source_batch_id": run.batch_id,
+            "candidate_pool_source": candidate_pool_source,
+            "run_id": run.run_id,
+            "batch_id": run.batch_id,
+            "plan_id": run.plan_id,
+            "plan_strategy": run.plan_strategy,
             "run_name": run.run_name,
             "task_id": run.task_id,
             "catalog_name": run.catalog_name,
@@ -1910,16 +2661,58 @@ class TimeseriesService:
             "reference_date": effective_reference_date,
             "stack_dates": stack_dates,
             "water_mask_mode": run.water_mask_mode,
-            "notes": ((run.params_json or {}).get("notes") if isinstance(run.params_json, dict) else None),
-            "requested_reference_date": (
-                (run.params_json or {}).get("requested_reference_date")
-                if isinstance(run.params_json, dict)
-                else None
-            ),
-            "processing_workflow": settings.TIMESERIES_STACK_WORKFLOW,
+            "selection_params": selection_params,
+            "network_edges": network_edges,
+            "network_edge_count": len(network_edges),
+            "artifacts": artifact_paths,
+            "production_contract": {
+                "input_policy": "prepared_stack_only",
+                "catalog_scan_allowed_after_prepare": False,
+                "scene_selection_frozen": True,
+                "network_edges_role": "planning_audit_graph",
+                "sarscape_wf_sbas_graph_policy": (
+                    "wf_sbas accepts the prepared scene stack; system network_edges "
+                    "are retained for audit/comparison until explicit graph injection is verified."
+                ),
+            },
+            "planning_context_summary": {
+                "source": planning_context.get("source"),
+                "plan_id": planning_context.get("plan_id"),
+                "strategy": planning_context.get("strategy"),
+                "scene_count": planning_context.get("scene_count"),
+                "stack_key": planning_context.get("stack_key"),
+                "group_key": planning_context.get("group_key"),
+                "network_edge_count": planning_context.get("network_edge_count", len(network_edges)),
+            } if planning_context else None,
+            "notes": run_params.get("notes"),
+            "requested_reference_date": run_params.get("requested_reference_date"),
+            "processing_workflow": run_params.get("stack_workflow") or settings.TIMESERIES_STACK_WORKFLOW,
         }
 
-        selected_manifest_path = self._selected_manifest_path(run)
+        require_sarscape_inputs = str(run.processor_code or "").strip() == "sarscape_sbas"
+        validation = self._build_prepared_stack_validation(
+            selected_manifest,
+            manifest_path=selected_manifest_path,
+            expected_run_id=run.run_id,
+            expected_processor_code=str(run.processor_code or "").strip() or None,
+            require_network_edges=require_sarscape_inputs,
+            require_dem=require_sarscape_inputs,
+            dem_path=run.dem_path_windows,
+        )
+        if require_sarscape_inputs and not validation.get("ok"):
+            blockers = "; ".join(str(item) for item in (validation.get("blockers") or [])[:8])
+            raise ValueError(
+                "Prepared SARscape SBAS stack validation failed: "
+                + (blockers or "unknown validation blocker")
+            )
+        selected_manifest["prepared_stack_validation"] = validation
+        selected_manifest["manifest_checksum"] = _sha256_json(
+            {
+                key: value
+                for key, value in selected_manifest.items()
+                if key not in {"manifest_checksum"}
+            }
+        )
         _write_json(selected_manifest_path, selected_manifest)
 
         run.status = STATUS_PREPARED
@@ -1942,6 +2735,12 @@ class TimeseriesService:
             "tile_key": selected_manifest.get("tile_key"),
             "source_root_windows": selected_manifest.get("source_root_windows"),
             "selected_manifest_path_windows": str(selected_manifest_path),
+            "selected_network_edges_path_windows": str(selected_network_edges_path),
+            "prepared_stack_schema": PREPARED_STACK_SCHEMA,
+            "prepared_stack_id": prepared_stack_id,
+            "prepared_stack_validation": validation,
+            "network_edge_count": len(network_edges),
+            "network_edges": network_edges,
             "items": selected_manifest.get("scenes") or [],
         }
         run.orbit_summary_json = {
@@ -1959,15 +2758,25 @@ class TimeseriesService:
         run.summary_json = {
             **(run.summary_json or {}),
             "phase": "prepared",
-            "workflow": settings.TIMESERIES_STACK_WORKFLOW,
+            "workflow": selected_manifest.get("processing_workflow") or settings.TIMESERIES_STACK_WORKFLOW,
             "group_key": selected_manifest.get("group_key"),
             "stack_key": selected_manifest.get("stack_key"),
             "tile_key": selected_manifest.get("tile_key"),
             "reference_date": effective_reference_date,
             "stack_dates": stack_dates,
             "scene_count": len(stack_dates),
+            "prepared_stack_schema": PREPARED_STACK_SCHEMA,
+            "prepared_stack_id": prepared_stack_id,
+            "prepared_stack_validation": {
+                "ok": bool(validation.get("ok")),
+                "blockers": validation.get("blockers") or [],
+                "warnings": validation.get("warnings") or [],
+                "network_edge_count": validation.get("network_edge_count"),
+            },
             "selected_manifest_path_windows": str(selected_manifest_path),
             "selected_manifest_path_wsl": _windows_path_to_wsl_mount(str(selected_manifest_path)),
+            "selected_network_edges_path_windows": str(selected_network_edges_path),
+            "selected_network_edges_path_wsl": _windows_path_to_wsl_mount(str(selected_network_edges_path)),
         }
         await db.commit()
         await db.refresh(run)
@@ -1977,6 +2786,9 @@ class TimeseriesService:
             "scene_count": len(stack_dates),
             "reference_date": effective_reference_date,
             "manifest_path": str(selected_manifest_path),
+            "selected_network_edges_path": str(selected_network_edges_path),
+            "prepared_stack_id": prepared_stack_id,
+            "prepared_stack_validation_ok": bool(validation.get("ok")),
             "group_key": selected_manifest.get("group_key"),
             "tile_key": selected_manifest.get("tile_key"),
             "stack_dates": stack_dates,
@@ -2131,6 +2943,172 @@ class TimeseriesService:
             "manifest_path": str(generated_manifest_path),
             "stack_dates": stack_dates,
             "scene_count": int(report.get("scene_count") or len(stack_dates)),
+        }
+
+    async def build_sarscape_processor_preflight(
+        self,
+        run_id: str,
+        *,
+        db: AsyncSession,
+    ) -> Dict[str, Any]:
+        run = await self._load_run(run_id, db)
+        self._prepare_workdirs(run)
+        if str(run.processor_code or "").strip() != "sarscape_sbas":
+            raise ValueError(f"Run is not a SARscape SBAS run: {run.processor_code}")
+
+        selected_manifest_path = self._selected_manifest_path(run)
+        if not selected_manifest_path.exists():
+            raise FileNotFoundError(f"Selected stack manifest not found: {selected_manifest_path}")
+
+        stack_manifest = _read_json(selected_manifest_path)
+        prepared_validation = self._require_prepared_stack_manifest(
+            stack_manifest,
+            manifest_path=selected_manifest_path,
+            run=run,
+            require_network_edges=True,
+            require_dem=True,
+        )
+        discovery_timeout = int(settings.SARSCAPE_SBAS_DISCOVERY_TIMEOUT_SECONDS or 120)
+        preflight = await asyncio.to_thread(
+            build_sarscape_sbas_preflight_report,
+            stack_manifest,
+            include_task_discovery=True,
+            discovery_timeout_seconds=max(10, discovery_timeout),
+        )
+        processor_manifest = preflight.get("processor_manifest") or build_sarscape_sbas_processor_manifest(
+            stack_manifest,
+            discovery_report=preflight.get("task_discovery") if isinstance(preflight, dict) else None,
+        )
+        processor_manifest_path = self._sarscape_processor_manifest_path(run)
+        write_sarscape_sbas_processor_manifest(processor_manifest_path, processor_manifest)
+        run_params = run.params_json if isinstance(run.params_json, dict) else {}
+        execution_mode = str(run_params.get("execution_mode") or "").strip()
+
+        run.status = STATUS_STACK_READY if preflight.get("ready_for_execution") else STATUS_PREPARED
+        if execution_mode == "preflight_only":
+            run.ended_at = _utcnow()
+        run.error_message = None
+        run.summary_json = {
+            **(run.summary_json or {}),
+            "phase": "sarscape_preflight_complete",
+            "workflow": "sarscape_sbas",
+            "sarscape_sbas": {
+                "ready_for_pipeline_design": bool(preflight.get("ready_for_pipeline_design")),
+                "ready_for_execution": bool(preflight.get("ready_for_execution")),
+                "blockers": preflight.get("blockers") or [],
+                "processor_manifest_path_windows": str(processor_manifest_path),
+                "task_count": len((processor_manifest or {}).get("task_sequence") or []),
+                "prepared_stack_id": stack_manifest.get("prepared_stack_id"),
+                "prepared_stack_validation": {
+                    "ok": bool(prepared_validation.get("ok")),
+                    "warnings": prepared_validation.get("warnings") or [],
+                    "network_edge_count": prepared_validation.get("network_edge_count"),
+                },
+            },
+        }
+        run.quality_summary_json = {
+            **(run.quality_summary_json or {}),
+            "phase": "sarscape_preflight_complete",
+            "sarscape_sbas": {
+                "ready_for_pipeline_design": bool(preflight.get("ready_for_pipeline_design")),
+                "ready_for_execution": bool(preflight.get("ready_for_execution")),
+                "blockers": preflight.get("blockers") or [],
+                "parameter_template": (processor_manifest or {}).get("parameter_template"),
+                "network_summary": (processor_manifest or {}).get("network_summary"),
+                "prepared_stack_validation": prepared_validation,
+            },
+        }
+        await db.commit()
+        await db.refresh(run)
+
+        return {
+            "run_id": run.run_id,
+            "status": run.status,
+            "execution_mode": execution_mode,
+            "ready_for_pipeline_design": bool(preflight.get("ready_for_pipeline_design")),
+            "ready_for_execution": bool(preflight.get("ready_for_execution")),
+            "blockers": preflight.get("blockers") or [],
+            "processor_manifest_path": str(processor_manifest_path),
+            "prepared_stack_id": stack_manifest.get("prepared_stack_id"),
+            "prepared_stack_validation_ok": bool(prepared_validation.get("ok")),
+            "task_count": len((processor_manifest or {}).get("task_sequence") or []),
+        }
+
+    async def run_sarscape_sbas(
+        self,
+        run_id: str,
+        *,
+        db: AsyncSession,
+    ) -> Dict[str, Any]:
+        run = await self._load_run(run_id, db)
+        self._prepare_workdirs(run)
+        if str(run.processor_code or "").strip() != "sarscape_sbas":
+            raise ValueError(f"Run is not a SARscape SBAS run: {run.processor_code}")
+
+        selected_manifest_path = self._selected_manifest_path(run)
+        if not selected_manifest_path.exists():
+            raise FileNotFoundError(f"Selected stack manifest not found: {selected_manifest_path}")
+
+        stack_manifest = _read_json(selected_manifest_path)
+        prepared_validation = self._require_prepared_stack_manifest(
+            stack_manifest,
+            manifest_path=selected_manifest_path,
+            run=run,
+            require_network_edges=True,
+            require_dem=True,
+        )
+        run.status = STATUS_STACK_RUNNING
+        run.error_message = None
+        await db.commit()
+        await db.refresh(run)
+
+        timeout_seconds = int(settings.SARSCAPE_SBAS_STEP_TIMEOUT_SECONDS or settings.ENVI_PER_TASK_TIMEOUT or 21600)
+        execution_report = await asyncio.to_thread(
+            execute_sarscape_sbas_template_workflow,
+            stack_manifest,
+            work_root=str(run.work_root_windows or ""),
+            selected_manifest_path=str(selected_manifest_path),
+            timeout_seconds=timeout_seconds,
+        )
+        report_path = self._sarscape_execution_report_path(run)
+        _write_json(report_path, execution_report)
+
+        run.status = STATUS_STACK_COMPLETED
+        run.ended_at = _utcnow()
+        run.summary_json = {
+            **(run.summary_json or {}),
+            "phase": "sarscape_sbas_completed",
+            "workflow": "sarscape_sbas",
+            "sarscape_sbas": {
+                **((run.summary_json or {}).get("sarscape_sbas") or {}),
+                "execution_report_path_windows": str(report_path),
+                "output_root_windows": execution_report.get("output_root"),
+                "prepared_stack_id": stack_manifest.get("prepared_stack_id"),
+                "selected_network_edges_path_windows": execution_report.get("selected_network_edges_path"),
+                "task_count": execution_report.get("task_count"),
+                "executed_tasks": execution_report.get("executed_tasks") or [],
+            },
+        }
+        run.quality_summary_json = {
+            **(run.quality_summary_json or {}),
+            "phase": "sarscape_sbas_complete",
+            "sarscape_sbas": {
+                **((run.quality_summary_json or {}).get("sarscape_sbas") or {}),
+                "execution_report_path_windows": str(report_path),
+                "prepared_stack_validation": prepared_validation,
+                "task_count": execution_report.get("task_count"),
+            },
+        }
+        await db.commit()
+        await db.refresh(run)
+
+        return {
+            "run_id": run.run_id,
+            "status": run.status,
+            "output_root": execution_report.get("output_root"),
+            "report_path": str(report_path),
+            "prepared_stack_id": stack_manifest.get("prepared_stack_id"),
+            "task_count": execution_report.get("task_count"),
         }
 
     async def materialize_run(
@@ -2784,6 +3762,148 @@ class TimeseriesService:
             "workflow": workflow_payload,
             "product": product_payload,
         }
+
+    async def get_prepared_stack_summary(
+        self,
+        db: AsyncSession,
+        *,
+        run_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        result = await db.execute(
+            select(PsTimeseriesRunORM).where(PsTimeseriesRunORM.run_id == run_id)
+        )
+        run = result.scalar_one_or_none()
+        if run is None:
+            return None
+
+        selected_manifest_path = self._selected_manifest_path(run)
+        selected_edges_path = self._selected_network_edges_path(run)
+        processor_manifest_path = self._sarscape_processor_manifest_path(run)
+        summary_json = run.summary_json if isinstance(run.summary_json, dict) else {}
+        quality_json = run.quality_summary_json if isinstance(run.quality_summary_json, dict) else {}
+        sarscape_summary = summary_json.get("sarscape_sbas") if isinstance(summary_json.get("sarscape_sbas"), dict) else {}
+        sarscape_quality = quality_json.get("sarscape_sbas") if isinstance(quality_json.get("sarscape_sbas"), dict) else {}
+
+        payload: Dict[str, Any] = {
+            "schema": "insar.prepared-sbas-stack-summary/v1",
+            "run_id": run.run_id,
+            "status": run.status,
+            "processor_code": run.processor_code,
+            "engine_code": run.engine_code,
+            "manifest_path_windows": str(selected_manifest_path),
+            "manifest_path_wsl": _windows_path_to_wsl_mount(str(selected_manifest_path)),
+            "manifest_exists": selected_manifest_path.is_file(),
+            "selected_network_edges_path_windows": str(selected_edges_path),
+            "selected_network_edges_path_wsl": _windows_path_to_wsl_mount(str(selected_edges_path)),
+            "selected_network_edges_exists": selected_edges_path.is_file(),
+            "processor_manifest_path_windows": str(processor_manifest_path),
+            "processor_manifest_path_wsl": _windows_path_to_wsl_mount(str(processor_manifest_path)),
+            "processor_manifest_exists": processor_manifest_path.is_file(),
+            "prepared": False,
+            "ready_for_execution": False,
+            "blockers": [],
+            "warnings": [],
+            "state": "not_prepared",
+        }
+
+        stack_manifest: Dict[str, Any] = {}
+        if selected_manifest_path.is_file():
+            try:
+                stack_manifest = _read_json(selected_manifest_path)
+            except Exception as exc:
+                payload.update(
+                    {
+                        "state": "manifest_unreadable",
+                        "blockers": [f"Prepared stack manifest cannot be read: {exc}"],
+                    }
+                )
+                return payload
+
+            validation = self._build_prepared_stack_validation(
+                stack_manifest,
+                manifest_path=selected_manifest_path,
+                expected_run_id=run.run_id,
+                expected_processor_code=str(run.processor_code or "").strip() or None,
+                require_network_edges=str(run.processor_code or "").strip() == "sarscape_sbas",
+                require_dem=str(run.processor_code or "").strip() == "sarscape_sbas",
+                dem_path=run.dem_path_windows,
+            )
+            artifacts = stack_manifest.get("artifacts") if isinstance(stack_manifest.get("artifacts"), dict) else {}
+            production_contract = (
+                stack_manifest.get("production_contract")
+                if isinstance(stack_manifest.get("production_contract"), dict)
+                else {}
+            )
+            candidate_pool_source = (
+                stack_manifest.get("candidate_pool_source")
+                if isinstance(stack_manifest.get("candidate_pool_source"), dict)
+                else {}
+            )
+            payload.update(
+                {
+                    "prepared": validation.get("ok"),
+                    "state": "prepared" if validation.get("ok") else "prepared_invalid",
+                    "prepared_stack_schema": stack_manifest.get("prepared_stack_schema"),
+                    "manifest_role": stack_manifest.get("manifest_role"),
+                    "prepared_stack_id": stack_manifest.get("prepared_stack_id"),
+                    "prepared_at_utc": stack_manifest.get("prepared_at_utc"),
+                    "manifest_checksum": stack_manifest.get("manifest_checksum"),
+                    "source_plan_id": stack_manifest.get("source_plan_id") or stack_manifest.get("plan_id"),
+                    "source_batch_id": stack_manifest.get("source_batch_id") or stack_manifest.get("batch_id"),
+                    "plan_strategy": stack_manifest.get("plan_strategy"),
+                    "reference_date": stack_manifest.get("reference_date"),
+                    "scene_count": len(stack_manifest.get("scenes") or []),
+                    "stack_dates": stack_manifest.get("stack_dates") or [],
+                    "network_edge_count": len(stack_manifest.get("network_edges") or []),
+                    "selection_params": stack_manifest.get("selection_params") or {},
+                    "candidate_pool_source": candidate_pool_source,
+                    "production_contract": production_contract,
+                    "artifacts": artifacts,
+                    "validation": validation,
+                    "blockers": validation.get("blockers") or [],
+                    "warnings": validation.get("warnings") or [],
+                }
+            )
+
+        processor_manifest: Dict[str, Any] = {}
+        if processor_manifest_path.is_file():
+            try:
+                processor_manifest = _read_json(processor_manifest_path)
+            except Exception as exc:
+                payload["processor_manifest_error"] = str(exc)
+            else:
+                payload["processor_manifest"] = {
+                    "schema": processor_manifest.get("schema"),
+                    "created_at_utc": processor_manifest.get("created_at_utc"),
+                    "execution_enabled": processor_manifest.get("execution_enabled"),
+                    "ready_for_pipeline_design": processor_manifest.get("ready_for_pipeline_design"),
+                    "ready_for_execution": processor_manifest.get("ready_for_execution"),
+                    "execution_strategy": processor_manifest.get("execution_strategy"),
+                    "blockers": processor_manifest.get("blockers") or [],
+                    "network_summary": processor_manifest.get("network_summary") or {},
+                    "parameter_template": processor_manifest.get("parameter_template") or {},
+                    "task_count": len(processor_manifest.get("task_sequence") or []),
+                }
+                payload["ready_for_execution"] = bool(processor_manifest.get("ready_for_execution"))
+                if payload.get("prepared"):
+                    payload["state"] = (
+                        "ready_for_execution"
+                        if processor_manifest.get("ready_for_execution")
+                        else "processor_blocked"
+                    )
+                payload["blockers"] = processor_manifest.get("blockers") or payload.get("blockers") or []
+
+        if sarscape_summary or sarscape_quality:
+            payload["sarscape_status"] = {
+                "ready_for_pipeline_design": sarscape_summary.get("ready_for_pipeline_design"),
+                "ready_for_execution": sarscape_summary.get("ready_for_execution"),
+                "blockers": sarscape_summary.get("blockers") or sarscape_quality.get("blockers") or [],
+                "processor_manifest_path_windows": sarscape_summary.get("processor_manifest_path_windows"),
+                "execution_report_path_windows": sarscape_summary.get("execution_report_path_windows"),
+                "task_count": sarscape_summary.get("task_count"),
+            }
+
+        return payload
 
 
 timeseries_service = TimeseriesService()
