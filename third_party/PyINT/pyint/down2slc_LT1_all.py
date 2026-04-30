@@ -136,7 +136,7 @@ def main(argv):
     for k0 in date_list:
         print(k0)
     
-    err_txt = scratchDir + '/' + projectName + '/down2slc_sen_all.err'
+    err_txt = scratchDir + '/' + projectName + '/down2slc_LT1_all.err'
     if os.path.isfile(err_txt): os.remove(err_txt)
     
     data_para = []

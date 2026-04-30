@@ -9,8 +9,28 @@ import numpy as np
 import os
 import sys  
 import argparse
+import re
 
 from pyint import _utils as ut
+
+
+def _resolve_existing_master_date(slc_dir, requested_date):
+    if not os.path.isdir(slc_dir):
+        return requested_date
+    existing_dates = sorted(
+        item for item in os.listdir(slc_dir)
+        if re.match(r'^\d{8}$', item) and os.path.isdir(os.path.join(slc_dir, item))
+    )
+    if not existing_dates:
+        return requested_date
+    if requested_date in existing_dates:
+        return requested_date
+    if not requested_date or not re.match(r'^\d{8}$', str(requested_date)):
+        resolved = existing_dates[0]
+    else:
+        resolved = min(existing_dates, key=lambda item: abs(int(item) - int(requested_date)))
+    print('masterDate %s not found; using existing SLC date: %s' % (requested_date, resolved))
+    return resolved
 
 def cmdLineParse():
     parser = argparse.ArgumentParser(description='Generate radar-coordinates based DEM.',\
@@ -46,12 +66,13 @@ def main(argv):
     templateFile = templateDir + "/" + projectName + ".template"
     templateDict=ut.update_template(templateFile)
 
-    Mdate =  templateDict['masterDate']
+    Mdate = templateDict['masterDate']
 
     DEMDir = os.getenv('DEMDIR')
     
     processDir = scratchDir + '/' + projectName + "/ifgrams"
-    slcDir     = scratchDir + '/' + projectName + "/SLC" 
+    slcDir     = scratchDir + '/' + projectName + "/SLC"
+    Mdate = _resolve_existing_master_date(slcDir, Mdate)
     
     rlks = templateDict['range_looks']
     azlks = templateDict['azimuth_looks']

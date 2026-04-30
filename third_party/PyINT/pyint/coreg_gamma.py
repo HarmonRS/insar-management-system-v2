@@ -9,8 +9,28 @@ import numpy as np
 import os
 import sys  
 import argparse
+import re
 
 from pyint import _utils as ut
+
+
+def _resolve_existing_master_date(slc_dir, requested_date):
+    if not os.path.isdir(slc_dir):
+        return requested_date
+    existing_dates = sorted(
+        item for item in os.listdir(slc_dir)
+        if re.match(r'^\d{8}$', item) and os.path.isdir(os.path.join(slc_dir, item))
+    )
+    if not existing_dates:
+        return requested_date
+    if requested_date in existing_dates:
+        return requested_date
+    if not requested_date or not re.match(r'^\d{8}$', str(requested_date)):
+        resolved = existing_dates[0]
+    else:
+        resolved = min(existing_dates, key=lambda item: abs(int(item) - int(requested_date)))
+    print('masterDate %s not found; using existing SLC date: %s' % (requested_date, resolved))
+    return resolved
 
 
 def _run_or_raise(call_str, stage):
@@ -75,7 +95,7 @@ def main(argv):
     templateDict=ut.update_template(templateFile)
     rlks = templateDict['range_looks']
     azlks = templateDict['azimuth_looks']
-    Mdate = templateDict['masterDate']
+    Mdate = _resolve_existing_master_date(slcDir, templateDict['masterDate'])
     IFGPair = Mdate + '-' + Sdate
     
     demDir = scratchDir + '/' + projectName + '/DEM' 
@@ -96,6 +116,16 @@ def main(argv):
     
     Srslc0    = SrslcDir + "/" + Sdate + ".rslc0"
     SrslcPar0 = SrslcDir + "/" + Sdate + ".rslc0.par"
+
+    if Mdate == Sdate:
+        Mslc0 = slcDir + '/' + Mdate + '/' + Mdate + '.slc'
+        MslcPar0 = slcDir + '/' + Mdate + '/' + Mdate + '.slc.par'
+        ut.copy_file(Mslc0, Srslc)
+        ut.copy_file(MslcPar0, SrslcPar)
+        call_str = 'multi_look ' + Srslc + ' ' + SrslcPar + ' ' + Sramp + ' ' + SrampPar + ' ' + rlks + ' ' + azlks
+        _run_or_raise(call_str, 'master_multi_look_rslc')
+        print('Master date: copy SLC to RSLC done.')
+        sys.exit(0)
 
 #####################################################
 ## copy all of the master files into slave folder for parallel processing
@@ -230,7 +260,7 @@ def main(argv):
     for path in (
         lt0, lt1, mli0, diff0, offs0, snr0, offsets0, coffs0, coffsets0,
         off, offs, snr, offsets, coffs, coffsets, Srslc0, SrslcPar0,
-        Mslc, Mamp, HGTSIM,
+        Mslc, MslcPar, Mamp, MampPar, HGTSIM,
     ):
         _safe_remove(path)
 

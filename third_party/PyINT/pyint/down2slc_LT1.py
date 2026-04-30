@@ -23,8 +23,10 @@ from pyint import _utils as ut
 
 def get_LT1_date(raw_file):
     file0 = os.path.basename(raw_file)
-    date = file0[41:48]
-    return date
+    match = re.search(r'(20\d{6})', file0)
+    if match:
+        return match.group(1)
+    return ''
 
 def get_satellite(raw_file):
     if 'LT1A_MONO_' in raw_file:
@@ -68,6 +70,48 @@ def _run_checked(command, cwd=None):
             )
         )
     return result
+
+
+def _format_state_vector_line(line):
+    stripped = line.strip()
+    parts = stripped.split()
+    if not parts:
+        return ''
+    label = parts[0]
+    if label.startswith('state_vector_position_') and len(parts) >= 4:
+        return '%s %14.4f %14.4f %14.4f   m   m   m' % (
+            label,
+            float(parts[1]),
+            float(parts[2]),
+            float(parts[3]),
+        )
+    if label.startswith('state_vector_velocity_') and len(parts) >= 4:
+        return '%s %13.5f %13.5f %13.5f   m/s m/s m/s' % (
+            label,
+            float(parts[1]),
+            float(parts[2]),
+            float(parts[3]),
+        )
+    return stripped
+
+
+def _replace_state_vectors_from_update(slc_par_path, update_par_path):
+    if not os.path.isfile(update_par_path):
+        return
+    with open(slc_par_path, 'r', encoding='utf-8', errors='ignore') as fp:
+        base_lines = fp.read().splitlines()
+    with open(update_par_path, 'r', encoding='utf-8', errors='ignore') as fp:
+        update_state_lines = [
+            _format_state_vector_line(line)
+            for line in fp.read().splitlines()
+            if 'state_vector' in line
+        ]
+    if not update_state_lines:
+        return
+    merged = [line for line in base_lines if 'state_vector' not in line]
+    merged.extend(update_state_lines)
+    with open(slc_par_path, 'w', encoding='utf-8') as fp:
+        fp.write('\n'.join(merged) + '\n')
 
 
 def _cleanup_paths(paths):
@@ -184,15 +228,32 @@ def main(argv):
         input_tiff, input_xml, cleanup_paths = _resolve_lt1_input_scene(zipfile_ref, work_dir)
         slc_path = work_dir + '/' + date + '.slc'
         slc_par_path = work_dir + '/' + date + '.slc.par'
+        update_path = work_dir + '/' + date + '.slc.update'
+        update_par_path = work_dir + '/' + date + '.slc.update.par'
         _run_checked(
             ['par_LT1_SLC', input_tiff, input_xml, slc_par_path, slc_path],
             cwd=work_dir,
         )
         if not os.path.isfile(slc_path) or not os.path.isfile(slc_par_path):
             raise RuntimeError('LT-1 import produced no SLC outputs for date: ' + date)
+
+        bridge_targets = [slc_par_path]
+        ysli_command = shutil.which('par_LT1_SLC_YSLi')
+        if ysli_command:
+            _run_checked(
+                [ysli_command, input_tiff, input_xml, update_path, update_par_path, '0'],
+                cwd=work_dir,
+            )
+            if not os.path.isfile(update_path) or not os.path.isfile(update_par_path):
+                raise RuntimeError('LT-1 import produced no update SLC outputs for date: ' + date)
+            _replace_state_vectors_from_update(slc_par_path, update_par_path)
+            bridge_targets.append(update_par_path)
+        else:
+            print('WARNING: par_LT1_SLC_YSLi is not available; using par_LT1_SLC outputs only.')
+
         bridge_result = orbit_bridge.apply_precise_orbit(
             date,
-            [slc_par_path],
+            bridge_targets,
             work_dir=work_dir,
             operation_tag='lt1_import',
         )
@@ -215,10 +276,9 @@ def main(argv):
     if os.path.isfile(SLC_Tab):
         os.remove(SLC_Tab)    
    
-    for kk in range(len(SLC_list)):
-        call_str = 'echo ' + SLC_list[kk] + ' ' + SLC_par_list[kk]  + ' >> ' + SLC_Tab
-        if os.system(call_str) != 0:
-            raise RuntimeError('Failed to write SLC tab for date: ' + date)
+    with open(SLC_Tab, 'w') as fp:
+        for kk in range(len(SLC_list)):
+            fp.write(SLC_list[kk] + ' ' + SLC_par_list[kk] + '\n')
     with open(work_dir + '/down2slc.dat', 'w') as f:
         f.write('ok\n')
     print("Down to SLC for %s is done! " % date)
