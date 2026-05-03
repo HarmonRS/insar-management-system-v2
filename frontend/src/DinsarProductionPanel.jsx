@@ -2,7 +2,7 @@
 
 import { listEngines, listRuns, previewPyintInputAssets, submitRun } from './api/dinsarProduction';
 import { getJobLog } from './api/idl';
-import { clearTaskLogs, deleteTaskLog, getActiveTasks, getTaskLogs } from './api/tasks';
+import { clearTaskLogs, deleteTaskLog, getActiveTasks, getRecentTasks, getTaskLogs } from './api/tasks';
 
 const card = {
   background: '#fff',
@@ -40,7 +40,7 @@ const ENGINE_LABEL = {
 
 const TASK_TYPE_LABEL = {
   ISCE2_RUN: 'ISCE2生产',
-  PYINT_RUN: 'PyINT生产',
+  PYINT_RUN: 'PyINT/Gamma生产',
   IDL_RUN_DINSAR: 'ENVI生产',
 };
 
@@ -102,6 +102,96 @@ function formatTaskType(taskType) {
 
 function formatStatus(status) {
   return STATUS_LABEL[status] || status || '-';
+}
+
+function taskTypeToEngine(taskType) {
+  if (taskType === 'ISCE2_RUN') return 'isce2';
+  if (taskType === 'PYINT_RUN') return 'pyint';
+  if (taskType === 'IDL_RUN_DINSAR') return 'sarscape';
+  return '';
+}
+
+function taskStatusToRunStatus(status) {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'COMPLETED') return 'success';
+  if (normalized === 'FAILED') return 'failed';
+  if (normalized === 'CANCELLED' || normalized === 'CANCELED') return 'cancelled';
+  if (normalized === 'RUNNING') return 'running';
+  return 'pending';
+}
+
+function epochSeconds(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number') return value;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000);
+}
+
+function taskToRunRow(task) {
+  const taskId = task?.task_id || '';
+  return {
+    run_id: taskId,
+    record_type: 'task',
+    log_source: 'task',
+    product_family: 'dinsar',
+    engine: taskTypeToEngine(task?.task_type),
+    profile_code: '',
+    status: taskStatusToRunStatus(task?.status),
+    raw_status: task?.status,
+    started_at: epochSeconds(task?.started_at || task?.created_at),
+    ended_at: epochSeconds(task?.ended_at),
+    task_id: taskId,
+    task_type: task?.task_type,
+    workflow_run_id: '',
+    root_dir: '',
+    publish_root_dir: '',
+    message: task?.message || task?.task_name || '',
+    total_items: null,
+    completed_items: null,
+    failed_items: null,
+    skipped_items: null,
+  };
+}
+
+function mergeRunRows(productionRuns, recentTasks, limit = 20) {
+  const rows = (productionRuns || []).map(run => ({
+    ...run,
+    record_type: run?.record_type || 'run',
+    log_source: run?.log_source || 'run',
+  }));
+  const representedTaskIds = new Set(
+    rows
+      .map(run => String(run?.task_id || '').trim())
+      .filter(Boolean),
+  );
+
+  (recentTasks || []).forEach(task => {
+    if (!['ISCE2_RUN', 'PYINT_RUN', 'IDL_RUN_DINSAR'].includes(task?.task_type)) {
+      return;
+    }
+    const taskId = String(task?.task_id || '').trim();
+    if (!taskId || representedTaskIds.has(taskId)) {
+      return;
+    }
+    rows.push(taskToRunRow(task));
+    representedTaskIds.add(taskId);
+  });
+
+  return rows
+    .sort((a, b) => Number(b?.started_at || 0) - Number(a?.started_at || 0))
+    .slice(0, limit);
+}
+
+function formatTaskLogContent(taskId, logs) {
+  if (!Array.isArray(logs) || logs.length === 0) {
+    return '暂无任务日志。';
+  }
+  const body = logs.map(log => {
+    const timestamp = String(log.timestamp || '').replace('T', ' ').replace('Z', '');
+    const level = log.level || 'INFO';
+    return `${timestamp} [${level}] ${log.message || ''}`;
+  }).join('\n');
+  return `task_id=${taskId}\n${body}`;
 }
 
 function formatPyintDemMode(mode) {
@@ -390,6 +480,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
 
   const [logModal, setLogModal] = useState({ open: false, runId: '', content: '', loading: false });
   const [activeTask, setActiveTask] = useState(null);
+  const [recentTask, setRecentTask] = useState(null);
   const [taskLogs, setTaskLogs] = useState([]);
   const [taskLogsLoading, setTaskLogsLoading] = useState(false);
   const [taskLogActionLoading, setTaskLogActionLoading] = useState(false);
@@ -402,13 +493,13 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const currentParamSections = buildParamSections(currentParamSchema);
   const currentDefaultTimeoutSec = Number(currentEngineObj?.default_timeout_seconds || 0) || 0;
   const currentParamHelpText = selectedEngine === 'pyint'
-    ? '这些参数影响 PyINT 的多视、并行度以及是否执行解缠/地理编码。建议先直接使用默认值，优先确认当前任务目录里的 LT-1 原始压缩包是否能被正常识别。'
+    ? 'PyINT/Gamma 默认按目标网格尺寸自动换算多视，逻辑与 ENVI/SARscape 自定义流程一致；通常只需要设置目标网格、并行度和是否执行解缠/地理编码。'
     : selectedEngine === 'isce2'
       ? '这些参数现在按执行、交付、增强分组展示。结果异常时，优先尝试关闭增强项，再回看基础几何和配对质量。'
       : '这些参数影响当前引擎的生产模板。建议先使用默认值，只有在结果边界、噪声或几何表现异常时再逐项调整。';
   const pyintPreviewBlocksSubmit = selectedEngine === 'pyint' && pyintPreview && pyintPreview.allow_submit === false;
   const latestRunWithTask = runs.find(run => run?.task_id) || null;
-  const monitoredTask = activeTask || (
+  const monitoredTask = activeTask || recentTask || (
     latestRunWithTask
       ? {
         task_id: latestRunWithTask.task_id,
@@ -439,18 +530,23 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   }, []);
 
-  const loadRuns = useCallback(async () => {
-    setRunsLoading(true);
+  const loadRuns = useCallback(async (options = {}) => {
+    const silent = !!options.silent;
+    if (!silent) setRunsLoading(true);
     try {
-      const data = await listRuns(20);
-      const nextRuns = data.runs || [];
+      const [runData, taskData] = await Promise.all([
+        listRuns(20),
+        getRecentTasks(['ISCE2_RUN', 'PYINT_RUN', 'IDL_RUN_DINSAR'], [], 20, 0),
+      ]);
+      const recentTasks = Array.isArray(taskData) ? taskData : (taskData?.tasks || []);
+      const nextRuns = mergeRunRows(runData.runs || [], recentTasks, 20);
       setRuns(nextRuns);
       return nextRuns;
     } catch {
       setRuns([]);
       return [];
     } finally {
-      setRunsLoading(false);
+      if (!silent) setRunsLoading(false);
     }
   }, []);
 
@@ -467,19 +563,33 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   }, []);
 
-  const loadTaskLogs = useCallback(async taskId => {
+  const loadRecentTask = useCallback(async () => {
+    try {
+      const data = await getRecentTasks(['ISCE2_RUN', 'PYINT_RUN', 'IDL_RUN_DINSAR'], [], 1, 0);
+      const tasks = Array.isArray(data) ? data : (data?.tasks || []);
+      const relevantTask = tasks[0] || null;
+      setRecentTask(relevantTask);
+      return relevantTask;
+    } catch {
+      setRecentTask(null);
+      return null;
+    }
+  }, []);
+
+  const loadTaskLogs = useCallback(async (taskId, options = {}) => {
+    const silent = !!options.silent;
     if (!taskId) {
       setTaskLogs([]);
       return;
     }
-    setTaskLogsLoading(true);
+    if (!silent) setTaskLogsLoading(true);
     try {
-      const data = await getTaskLogs(taskId, 50, 0);
+      const data = await getTaskLogs(taskId, 120, 0);
       setTaskLogs(data?.logs || []);
     } catch {
       setTaskLogs([]);
     } finally {
-      setTaskLogsLoading(false);
+      if (!silent) setTaskLogsLoading(false);
     }
   }, []);
 
@@ -519,19 +629,33 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   }, [logTaskId, loadTaskLogs, taskLogActionLoading, taskLogs.length]);
 
-  const refreshMonitor = useCallback(async () => {
-    const [nextRuns, nextActiveTask] = await Promise.all([
-      loadRuns(),
+  const refreshMonitor = useCallback(async (options = {}) => {
+    const silent = !!options.silent;
+    const [nextRuns, nextActiveTask, nextRecentTask] = await Promise.all([
+      loadRuns({ silent }),
       loadActiveTask(),
+      loadRecentTask(),
     ]);
-    const fallbackTaskId = nextActiveTask?.task_id || nextRuns.find(run => run?.task_id)?.task_id || '';
-    await loadTaskLogs(fallbackTaskId);
-  }, [loadActiveTask, loadRuns, loadTaskLogs]);
+    const fallbackTaskId =
+      nextActiveTask?.task_id
+      || nextRecentTask?.task_id
+      || nextRuns.find(run => run?.task_id)?.task_id
+      || '';
+    await loadTaskLogs(fallbackTaskId, { silent });
+  }, [loadActiveTask, loadRecentTask, loadRuns, loadTaskLogs]);
 
   useEffect(() => {
     loadEngines();
     refreshMonitor();
   }, [loadEngines, refreshMonitor]);
+
+  useEffect(() => {
+    const intervalMs = activeTask ? 5000 : 15000;
+    const timer = window.setInterval(() => {
+      refreshMonitor({ silent: true });
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [activeTask, refreshMonitor]);
 
   useEffect(() => {
     if (currentProfiles.length > 0) {
@@ -647,9 +771,20 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   };
 
-  const handleViewLog = async runId => {
+  const handleViewLog = async run => {
+    const runId = typeof run === 'string' ? run : (run?.run_id || run?.task_id || '');
     setLogModal({ open: true, runId, content: '', loading: true });
     try {
+      if (typeof run !== 'string' && run?.log_source === 'task' && run?.task_id) {
+        const data = await getTaskLogs(run.task_id, 200, 0);
+        setLogModal({
+          open: true,
+          runId,
+          content: formatTaskLogContent(run.task_id, data?.logs || []),
+          loading: false,
+        });
+        return;
+      }
       const data = await getJobLog(runId);
       setLogModal({ open: true, runId, content: data.content || '', loading: false });
     } catch {
@@ -1389,7 +1524,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             </thead>
             <tbody>
               {runs.map(run => (
-                <tr key={run.run_id} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                <tr key={`${run.record_type || 'run'}-${run.run_id}`} style={{ borderBottom: '1px solid #f1f5f9' }}>
                   <td style={{ padding: '4px 8px', fontFamily: 'monospace', fontSize: 11 }}>{run.run_id}</td>
                   <td style={{ padding: '4px 8px' }}>{formatEngineLabel(run.engine)}</td>
                   <td
@@ -1405,7 +1540,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                   </td>
                   <td style={{ padding: '4px 8px' }}>
                     <button
-                      onClick={() => handleViewLog(run.run_id)}
+                      onClick={() => handleViewLog(run)}
                       style={{
                         fontSize: 11,
                         padding: '2px 8px',
