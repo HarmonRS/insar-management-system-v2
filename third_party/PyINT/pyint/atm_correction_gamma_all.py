@@ -92,7 +92,7 @@ def main(argv):
     else:
         ifgList=ifgList0[:,0]   
     
-    err_txt = scratchDir + '/' + projectName + '/unwrap_gamma_all.err'
+    err_txt = scratchDir + '/' + projectName + '/atm_correction_gamma_all.err'
     if os.path.isfile(err_txt): os.remove(err_txt)
     
     data_para = []
@@ -114,7 +114,7 @@ def main(argv):
     print("Correct atmospheric phase for project %s is done! " % projectName)
     ut.print_process_time(start_time, time.time())
     
-    sys.exit(1)
+    sys.exit(0)
     
 if __name__ == '__main__':
     main(sys.argv[:])    

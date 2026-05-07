@@ -108,7 +108,6 @@ def main(argv):
     CORMASK = workDir + '/' + Pair + '_' +rlks + 'rlks.diff_filt.cor'
     WRAPlks = workDir + '/' + Pair + '_' +rlks + 'rlks.diff_filt'
     UNWlks = workDir + '/' + Pair + '_' +rlks + 'rlks.diff_filt.unw'
-    
     CORMASKbmp = CORMASK.replace('.diff_filt.cor','.diff_filt.cor_mask.bmp')
     
     if os.path.isfile(CORMASKbmp):

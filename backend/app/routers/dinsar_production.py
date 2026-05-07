@@ -268,6 +268,7 @@ async def submit_run(
         else:
             job_type = JOB_TYPE_PYINT_RUN
             max_attempts = PYINT_PRODUCTION_JOB_MAX_ATTEMPTS
+            create_managed_run = True
         if validation_summary is not None:
             validated_task_count = validation_summary.get("task_count", 0)
             payload["extra"].update(

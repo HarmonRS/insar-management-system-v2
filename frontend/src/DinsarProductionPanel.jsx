@@ -129,6 +129,7 @@ function epochSeconds(value) {
 
 function taskToRunRow(task) {
   const taskId = task?.task_id || '';
+  const message = task?.message || task?.task_name || '';
   return {
     run_id: taskId,
     record_type: 'task',
@@ -145,11 +146,23 @@ function taskToRunRow(task) {
     workflow_run_id: '',
     root_dir: '',
     publish_root_dir: '',
-    message: task?.message || task?.task_name || '',
+    message,
+    inferred_paths: inferTaskPaths(task),
     total_items: null,
     completed_items: null,
     failed_items: null,
     skipped_items: null,
+  };
+}
+
+function inferTaskPaths(task) {
+  const message = String(task?.message || '').trim();
+  const workMatch = message.match(/work_dir=([^)\s]+)/);
+  const workDir = workMatch ? workMatch[1] : '';
+  if (!workDir) return {};
+  return {
+    work_dir: workDir,
+    ifgrams_dir: workDir ? `${workDir}\\<project>\\ifgrams` : '',
   };
 }
 
@@ -204,6 +217,49 @@ function formatPyintOrbitPolicy(policy) {
 
 function formatPyintPreciseOrbitMode(mode) {
   return PYINT_PRECISE_ORBIT_MODE_LABEL[mode] || mode || '-';
+}
+
+function getSchemaOptions(schema) {
+  if (Array.isArray(schema?.enum) && schema.enum.length > 0) return schema.enum;
+  if (Array.isArray(schema?.choices) && schema.choices.length > 0) return schema.choices;
+  return [];
+}
+
+function formatPathValue(value) {
+  const text = String(value || '').trim();
+  return text || '-';
+}
+
+function RunPathBlock({ run }) {
+  const items = Array.isArray(run?.items) ? run.items : [];
+  const item = items.find(entry => entry?.status === 'RUNNING') || items[0] || null;
+  const paths = item?.paths || run?.inferred_paths || {};
+  if (!item && Object.keys(paths).length === 0) return null;
+  const rows = [
+    ['任务', item?.task_alias || item?.task_name || run?.message || '-'],
+    ['运行目录', paths.run_dir],
+    ['native', paths.native_dir],
+    ['assets', paths.assets_dir],
+  ];
+  if (run?.engine === 'pyint') {
+    rows.push(['work', paths.work_dir]);
+    rows.push(['project', paths.project_dir]);
+    rows.push(['ifgrams', paths.ifgrams_dir]);
+    rows.push(['重去平日志', paths.reflatten_dir]);
+  }
+
+  return (
+    <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
+      {rows.filter(([, value]) => String(value || '').trim()).map(([label, value]) => (
+        <div key={label} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+          <span style={{ minWidth: 58, color: '#94a3b8' }}>{label}</span>
+          <span style={{ fontFamily: 'monospace', color: '#334155', wordBreak: 'break-all' }}>
+            {formatPathValue(value)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function PreviewIssueList({ title, items, tone = 'warning' }) {
@@ -387,7 +443,8 @@ function ParamField({ name, schema, value, disabled, onChange }) {
     );
   }
 
-  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+  const options = getSchemaOptions(schema);
+  if (options.length > 0) {
     return (
       <div style={{ minWidth: 180, flex: '0 1 220px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
@@ -407,12 +464,12 @@ function ParamField({ name, schema, value, disabled, onChange }) {
           )}
         </div>
         <select
-          value={value ?? schema.default ?? schema.enum[0]}
+          value={value ?? schema.default ?? options[0]}
           disabled={disabled || isReadonly}
           onChange={event => onChange(name, event.target.value)}
           style={inputStyle}
         >
-          {schema.enum.map(option => (
+          {options.map(option => (
             <option key={option} value={option}>{option}</option>
           ))}
         </select>
@@ -493,7 +550,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const currentParamSections = buildParamSections(currentParamSchema);
   const currentDefaultTimeoutSec = Number(currentEngineObj?.default_timeout_seconds || 0) || 0;
   const currentParamHelpText = selectedEngine === 'pyint'
-    ? 'PyINT/Gamma 默认按目标网格尺寸自动换算多视，逻辑与 ENVI/SARscape 自定义流程一致；通常只需要设置目标网格、并行度和是否执行解缠/地理编码。'
+    ? 'PyINT/Gamma 会按目标网格尺寸自动换算多视；新增 Gamma 残余重去平在解缠后执行 rascc_mask/quad_fit/quad_sub，再导出 native 和标准 GeoTIFF。'
     : selectedEngine === 'isce2'
       ? '这些参数现在按执行、交付、增强分组展示。结果异常时，优先尝试关闭增强项，再回看基础几何和配对质量。'
       : '这些参数影响当前引擎的生产模板。建议先使用默认值，只有在结果边界、噪声或几何表现异常时再逐项调整。';
@@ -1090,7 +1147,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             )}
             {selectedEngine === 'pyint' && currentDefaultTimeoutSec > 0 && (
               <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
-                PyINT 默认按单对任务使用 {currentDefaultTimeoutSec} 秒；当前会逐对串行创建工作区并运行外部 PyINT / Gamma 流程。
+                PyINT 默认按单对任务使用 {currentDefaultTimeoutSec} 秒；当前会逐对串行创建工作区并运行外部 PyINT / Gamma 流程，native 会在主流程和重去平后统一写入。
               </div>
             )}
           </div>
@@ -1512,7 +1569,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ background: '#f8fafc' }}>
-                {['运行ID', '引擎', '状态', '时间', '操作'].map(header => (
+                {['运行ID', '引擎', '状态', '时间', '路径', '操作'].map(header => (
                   <th
                     key={header}
                     style={{ padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid #e2e8f0', color: '#64748b' }}
@@ -1537,6 +1594,9 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                   </td>
                   <td style={{ padding: '4px 8px', color: '#94a3b8' }}>
                     {run.started_at ? new Date(run.started_at * 1000).toLocaleString() : '-'}
+                  </td>
+                  <td style={{ padding: '4px 8px', maxWidth: 520, fontSize: 11 }}>
+                    <RunPathBlock run={run} />
                   </td>
                   <td style={{ padding: '4px 8px' }}>
                     <button

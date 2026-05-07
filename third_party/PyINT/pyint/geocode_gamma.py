@@ -8,22 +8,17 @@
 import os
 import sys  
 import argparse
-import numpy as np
 
 from pyint import _utils as ut
 
 
-def sanitize_gamma_float(filepath, valid_max=1e6):
-    """清理 GAMMA 浮点数据文件中的无效值 (NaN/Inf/极端值 → 0.0)"""
-    data = np.fromfile(filepath, dtype=np.float32)
-    bad_mask = ~np.isfinite(data) | (np.abs(data) > valid_max)
-    n_bad = int(np.sum(bad_mask))
-    if n_bad > 0:
-        data[bad_mask] = 0.0
-        data.tofile(filepath)
-        print(f'  [sanitize] {os.path.basename(filepath)}: '
-              f'清理 {n_bad} 个无效像素')
-        
+def _run_or_raise(call_str, stage):
+    rc = os.system(call_str)
+    if rc != 0:
+        raise RuntimeError('%s failed with rc=%s: %s' % (stage, rc, call_str))
+    return rc
+
+
 def geocode(inFile, outFile, UTMTORDC, nWidth, nWidthUTMDEM, nLineUTMDEM, geo_interp='0'):
     
     if '.unw' in os.path.basename(inFile):
@@ -37,7 +32,7 @@ def geocode(inFile, outFile, UTMTORDC, nWidth, nWidthUTMDEM, nLineUTMDEM, geo_in
     else:
         call_str = 'geocode_back ' + inFile + ' ' + nWidth + ' ' + UTMTORDC + ' ' + outFile + ' ' + nWidthUTMDEM + ' ' + nLineUTMDEM+ ' ' + geo_interp + ' 1'
 
-    os.system(call_str)
+    _run_or_raise(call_str, 'geocode_back_' + os.path.basename(outFile))
     
     return
     
@@ -160,13 +155,10 @@ def geocode_pot(projectName, Pair, templateDict):
 
     if not os.path.isfile(geo_real):
         os.system(f'cpx_to_real {geo_disp} {geo_real} {eqa_width} 0')
-        sanitize_gamma_float(geo_real, disp_max_m)
     if not os.path.isfile(geo_imag):
         os.system(f'cpx_to_real {geo_disp} {geo_imag} {eqa_width} 1')
-        sanitize_gamma_float(geo_imag, disp_max_m)
     if not os.path.isfile(geo_mag):
         os.system(f'cpx_to_real {geo_disp} {geo_mag} {eqa_width} 3')
-        sanitize_gamma_float(geo_mag, disp_max_m)
 
     # ===== Step D: 地理编码 MLI 背景 =====
     geo_mli = workDir + '/geo_' + masterDate + '.mli'
@@ -288,10 +280,13 @@ def main(argv):
 
         # --- 基础产品地理编码 (hyp3/licsbas 均需) ---
         geo_interp = templateDict['geo_interp']
+        atmcor_use_for_disp = str(templateDict.get('atmcor_use_for_disp', '0')).strip() == '1'
         geocode(Mamp,    GeoMamp, UTMTORDC, nWidth, nWidthUTMDEM, nLineUTMDEM, geo_interp=geo_interp)
         geocode(CORIFG,  GeoCOR,  UTMTORDC, nWidth, nWidthUTMDEM, nLineUTMDEM, geo_interp=geo_interp)
         geocode(DIFFIFG, GeoDIFF, UTMTORDC, nWidth, nWidthUTMDEM, nLineUTMDEM, geo_interp=geo_interp)
         geocode(UNWIFG,  GeoUNW,  UTMTORDC, nWidth, nWidthUTMDEM, nLineUTMDEM, geo_interp=geo_interp)
+        if os.path.isfile(ATMCOR_UNW):
+            geocode(ATMCOR_UNW, GeoATMCOR_UNW, UTMTORDC, nWidth, nWidthUTMDEM, nLineUTMDEM, geo_interp=geo_interp)
         geocode(diffifg, geodiff, UTMTORDC, nWidth, nWidthUTMDEM, nLineUTMDEM, geo_interp=geo_interp)
         geocode(rdcdem,  Geodem,  UTMTORDC, nWidth, nWidthUTMDEM, nLineUTMDEM, geo_interp=geo_interp)
 
@@ -303,29 +298,31 @@ def main(argv):
         # --- hyp3 专属: dispmap (LOS/vert 位移场) ---
         if need_hyp3:
             print('  [hyp3] dispmap + geocode 位移场')
-            los_disp_rdc  = workDir + '/' + Pair + '_' + rlks + 'rlks.los_disp'
-            vert_disp_rdc = workDir + '/' + Pair + '_' + rlks + 'rlks.vert_disp'
+            disp_unw_source = ATMCOR_UNW if atmcor_use_for_disp and os.path.isfile(ATMCOR_UNW) else UNWIFG
+            disp_tag = '.atmcor' if disp_unw_source == ATMCOR_UNW else ''
+            los_disp_rdc  = workDir + '/' + Pair + '_' + rlks + 'rlks' + disp_tag + '.los_disp'
+            vert_disp_rdc = workDir + '/' + Pair + '_' + rlks + 'rlks' + disp_tag + '.vert_disp'
 
-            if os.path.isfile(UNWIFG) and os.path.isfile(SLCpar) and os.path.isfile(OFFpar):
+            if os.path.isfile(disp_unw_source) and os.path.isfile(SLCpar) and os.path.isfile(OFFpar):
                 hgt_arg = rdcdem if os.path.isfile(rdcdem) else '-'
                 if not os.path.isfile(los_disp_rdc):
-                    os.system(f'dispmap {UNWIFG} {hgt_arg} {SLCpar} {OFFpar} {los_disp_rdc} 0')
+                    _run_or_raise(f'dispmap {disp_unw_source} {hgt_arg} {SLCpar} {OFFpar} {los_disp_rdc} 0', 'dispmap_los')
                 if not os.path.isfile(vert_disp_rdc):
-                    os.system(f'dispmap {UNWIFG} {hgt_arg} {SLCpar} {OFFpar} {vert_disp_rdc} 1')
+                    _run_or_raise(f'dispmap {disp_unw_source} {hgt_arg} {SLCpar} {OFFpar} {vert_disp_rdc} 1', 'dispmap_vertical')
 
-            geo_los  = workDir + '/geo_' + Pair + '_' + rlks + 'rlks.los_disp'
-            geo_vert = workDir + '/geo_' + Pair + '_' + rlks + 'rlks.vert_disp'
+            geo_los  = workDir + '/geo_' + Pair + '_' + rlks + 'rlks' + disp_tag + '.los_disp'
+            geo_vert = workDir + '/geo_' + Pair + '_' + rlks + 'rlks' + disp_tag + '.vert_disp'
             if os.path.isfile(los_disp_rdc) and not os.path.isfile(geo_los):
-                os.system(f'geocode_back {los_disp_rdc} {nWidth} {UTMTORDC} {geo_los} {nWidthUTMDEM} {nLineUTMDEM} 1 0')
+                _run_or_raise(f'geocode_back {los_disp_rdc} {nWidth} {UTMTORDC} {geo_los} {nWidthUTMDEM} {nLineUTMDEM} {geo_interp} 0', 'geocode_back_los_disp')
             if os.path.isfile(vert_disp_rdc) and not os.path.isfile(geo_vert):
-                os.system(f'geocode_back {vert_disp_rdc} {nWidth} {UTMTORDC} {geo_vert} {nWidthUTMDEM} {nLineUTMDEM} 1 0')
+                _run_or_raise(f'geocode_back {vert_disp_rdc} {nWidth} {UTMTORDC} {geo_vert} {nWidthUTMDEM} {nLineUTMDEM} {geo_interp} 0', 'geocode_back_vert_disp')
 
         # --- hyp3 专属: 缠绕相位 ---
         if need_hyp3:
             print('  [hyp3] 提取缠绕相位')
             geo_wrapped_pha = workDir + '/geo_' + Pair + '_' + rlks + 'rlks.diff_filt.pha'
             if os.path.isfile(GeoDIFF) and not os.path.isfile(geo_wrapped_pha):
-                os.system(f'cpx_to_real {GeoDIFF} {geo_wrapped_pha} {nWidthUTMDEM} 4')
+                _run_or_raise(f'cpx_to_real {GeoDIFF} {geo_wrapped_pha} {nWidthUTMDEM} 4', 'cpx_to_real_wrapped_phase')
 
         # --- hyp3/licsbas 共需: look_vector ---
         if need_hyp3 or need_licsbas:
@@ -334,7 +331,7 @@ def main(argv):
             lv_phi   = workDir + '/lv_phi'
             if not os.path.isfile(lv_theta) or not os.path.isfile(lv_phi):
                 if os.path.isfile(SLCpar) and os.path.isfile(OFFpar) and os.path.isfile(UTMDEMpar0) and os.path.isfile(UTMDEM):
-                    os.system(f'look_vector {SLCpar} {OFFpar} {UTMDEMpar0} {UTMDEM} {lv_theta} {lv_phi}')
+                    _run_or_raise(f'look_vector {SLCpar} {OFFpar} {UTMDEMpar0} {UTMDEM} {lv_theta} {lv_phi}', 'look_vector')
 
         # --- BMP 可视化 ---
         os.system('rasmph_pwr ' + GeoDIFF + ' ' + GeoMamp + ' ' + nWidthUTMDEM + ' - - - - ')

@@ -11,8 +11,10 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +103,79 @@ def _run_windows_command(
     )
 
 
+def _run_windows_command_stream(
+    args: List[str],
+    timeout: int = 30,
+    env: Optional[Dict[str, str]] = None,
+    stdout_callback: Optional[Callable[[str], None]] = None,
+    stderr_callback: Optional[Callable[[str], None]] = None,
+) -> Tuple[int, str, str]:
+    proc_env = os.environ.copy()
+    if env:
+        proc_env.update(env)
+
+    stdout_parts: List[str] = []
+    stderr_parts: List[str] = []
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            env=proc_env,
+        )
+    except FileNotFoundError:
+        return -2, "", "wsl.exe not found"
+    except Exception as exc:
+        return -3, "", str(exc)
+
+    def _drain(stream: Any, parts: List[str], callback: Optional[Callable[[str], None]]) -> None:
+        for raw_line in iter(stream.readline, b""):
+            text = _decode_subprocess_output(raw_line)
+            if not text:
+                continue
+            parts.append(text)
+            if callback:
+                try:
+                    callback(text)
+                except Exception:
+                    pass
+
+    threads = [
+        threading.Thread(target=_drain, args=(proc.stdout, stdout_parts, stdout_callback), daemon=True),
+        threading.Thread(target=_drain, args=(proc.stderr, stderr_parts, stderr_callback), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+
+    timed_out = False
+    deadline = time.monotonic() + max(1, int(timeout or 30))
+    while proc.poll() is None:
+        if time.monotonic() >= deadline:
+            timed_out = True
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            break
+        time.sleep(0.2)
+
+    try:
+        returncode = proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        returncode = -1
+    for thread in threads:
+        thread.join(timeout=5)
+
+    stdout = "\n".join(stdout_parts)
+    stderr = "\n".join(stderr_parts)
+    if timed_out:
+        timeout_text = f"command timed out ({timeout}s)"
+        stderr = f"{stderr}\n{timeout_text}".strip()
+        return -1, stdout, stderr
+    return returncode, stdout, stderr
+
+
 def run_wsl_command(
     cmd: str,
     distro: Optional[str] = None,
@@ -125,6 +200,33 @@ def run_wsl_command(
         return -2, "", "wsl.exe 未找到"
     except Exception as exc:
         return -3, "", str(exc)
+
+
+def run_wsl_command_stream(
+    cmd: str,
+    distro: Optional[str] = None,
+    timeout: int = 30,
+    env: Optional[Dict[str, str]] = None,
+    stdout_callback: Optional[Callable[[str], None]] = None,
+    stderr_callback: Optional[Callable[[str], None]] = None,
+) -> Tuple[int, str, str]:
+    """Run a WSL bash command and stream decoded stdout/stderr lines to callbacks."""
+    wsl_exe = _find_wsl_executable()
+    if not wsl_exe:
+        return -2, "", "wsl.exe not found"
+
+    wsl_args = [wsl_exe]
+    if distro:
+        wsl_args += ["-d", distro]
+    wsl_args += ["bash", "-lc", cmd]
+
+    return _run_windows_command_stream(
+        wsl_args,
+        timeout=timeout,
+        env=env,
+        stdout_callback=stdout_callback,
+        stderr_callback=stderr_callback,
+    )
 
 
 def run_wsl_exec(

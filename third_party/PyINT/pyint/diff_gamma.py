@@ -23,6 +23,39 @@ def _run_or_raise(call_str, stage):
     return rc
 
 
+def _is_binary_all_zero(path, chunk_size=1024 * 1024):
+    if not os.path.isfile(path):
+        return False
+    with open(path, 'rb') as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                return True
+            if any(chunk):
+                return False
+
+
+def _run_slc_diff_intf(
+    Mrslc,
+    Srslc,
+    MrslcPar,
+    SrslcPar,
+    OFF,
+    SIM_UNW,
+    DIFF_IFG,
+    rlks,
+    azlks,
+    spsflg,
+    azfflg,
+):
+    call_str = (
+        'SLC_diff_intf ' + Mrslc + ' ' + Srslc + ' ' + MrslcPar + ' ' + SrslcPar
+        + ' ' + OFF + ' ' + SIM_UNW + ' ' + DIFF_IFG + ' ' + rlks + ' ' + azlks
+        + ' ' + spsflg + ' ' + azfflg + ' - 1 1'
+    )
+    _run_or_raise(call_str, 'SLC_diff_intf')
+
+
 INTRODUCTION = '''
 -------------------------------------------------------------------  
        Generate differential interferogram image from SLC using GAMMA.
@@ -138,8 +171,44 @@ def main(argv):
     _run_or_raise(call_str, 'phase_sim_orb')
     
     DIFF_IFG = workDir + '/' +  Pair + '_' + rlks + 'rlks.diff'
-    call_str = 'SLC_diff_intf ' + Mrslc + ' ' + Srslc + ' ' + MrslcPar + ' ' + SrslcPar + ' ' + OFF + ' ' + SIM_UNW + ' ' + DIFF_IFG + ' ' + rlks + ' ' + azlks + ' ' + templateDict['Igram_Spsflg'] + ' ' + templateDict['Igram_Azfflg'] + ' - 1 1'
-    _run_or_raise(call_str, 'SLC_diff_intf')
+    _run_slc_diff_intf(
+        Mrslc,
+        Srslc,
+        MrslcPar,
+        SrslcPar,
+        OFF,
+        SIM_UNW,
+        DIFF_IFG,
+        rlks,
+        azlks,
+        templateDict['Igram_Spsflg'],
+        templateDict['Igram_Azfflg'],
+    )
+    if _is_binary_all_zero(DIFF_IFG):
+        if templateDict['Igram_Azfflg'] == '1':
+            print(
+                'SLC_diff_intf produced an all-zero interferogram with azimuth common-band '
+                'filtering enabled; retrying once with Igram_Azfflg=0.'
+            )
+            os.remove(DIFF_IFG)
+            _run_slc_diff_intf(
+                Mrslc,
+                Srslc,
+                MrslcPar,
+                SrslcPar,
+                OFF,
+                SIM_UNW,
+                DIFF_IFG,
+                rlks,
+                azlks,
+                templateDict['Igram_Spsflg'],
+                '0',
+            )
+        if _is_binary_all_zero(DIFF_IFG):
+            raise RuntimeError(
+                'SLC_diff_intf produced an invalid all-zero interferogram after one bounded '
+                'azimuth-filter fallback; no further automatic retries will be attempted: %s' % DIFF_IFG
+            )
     
     ##### filtering process & coherence estimation ###########
     DIFFFILT = workDir + '/' +  Pair + '_' + rlks + 'rlks.diff_filt'

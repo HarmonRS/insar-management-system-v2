@@ -27,6 +27,7 @@ from .workflow_service import workflow_service
 
 TASK_TYPE_DINSAR_PRODUCTION = "IDL_RUN_DINSAR"
 TASK_TYPE_ISCE2_DINSAR_PRODUCTION = "ISCE2_RUN"
+TASK_TYPE_PYINT_DINSAR_PRODUCTION = "PYINT_RUN"
 RUN_STATUS_PENDING = "PENDING"
 RUN_STATUS_RUNNING = "RUNNING"
 RUN_STATUS_COMPLETED = "COMPLETED"
@@ -75,6 +76,8 @@ def _task_type_for_engine(engine_code: str) -> str:
         return TASK_TYPE_DINSAR_PRODUCTION
     if normalized == "isce2":
         return TASK_TYPE_ISCE2_DINSAR_PRODUCTION
+    if normalized in {"pyint", "gamma"}:
+        return TASK_TYPE_PYINT_DINSAR_PRODUCTION
     raise ValueError(f"Unsupported engine for D-InSAR production run: {engine_code}")
 
 
@@ -84,6 +87,8 @@ def _workflow_name_for_engine(engine_code: str) -> str:
         return "dinsar_sarscape_production"
     if normalized == "isce2":
         return "dinsar_isce2_production"
+    if normalized in {"pyint", "gamma"}:
+        return "dinsar_pyint_gamma_production"
     raise ValueError(f"Unsupported engine for D-InSAR production run: {engine_code}")
 
 
@@ -93,6 +98,8 @@ def _workflow_step_name_for_engine(engine_code: str) -> str:
         return RUNS_STEP_NAME
     if normalized == "isce2":
         return "Execute ISCE2 D-InSAR items"
+    if normalized in {"pyint", "gamma"}:
+        return "Execute PyINT/Gamma D-InSAR items"
     raise ValueError(f"Unsupported engine for D-InSAR production run: {engine_code}")
 
 
@@ -327,6 +334,82 @@ def _kill_process_tree_sync(pid: int) -> None:
 
 def _execution_dir(item: DinsarProductionRunItemORM, run_key: str) -> str:
     return os.path.join(item.results_root_dir, "runs", run_key)
+
+
+def _first_text(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _read_json_if_exists(path: str) -> Dict[str, Any]:
+    text = str(path or "").strip()
+    if not text or not os.path.isfile(text):
+        return {}
+    try:
+        with open(text, "r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _maybe_join(base: str, *parts: str) -> str:
+    text = str(base or "").strip()
+    if not text:
+        return ""
+    return os.path.normpath(os.path.join(text, *parts))
+
+
+def _build_output_paths(
+    *,
+    engine_code: str,
+    item: DinsarProductionRunItemORM,
+    run_key: str,
+    output_dir: str,
+    manifest_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    run_dir = os.path.normpath(str(output_dir or _execution_dir(item, run_key)))
+    native_dir = _maybe_join(run_dir, "native")
+    paths: Dict[str, Any] = {
+        "run_dir": run_dir,
+        "native_dir": native_dir,
+        "assets_dir": _maybe_join(run_dir, "assets"),
+        "quality_dir": _maybe_join(run_dir, "quality"),
+        "manifest_path": str(manifest_path or "").strip(),
+    }
+
+    if str(engine_code or "").strip().lower() in {"pyint", "gamma"}:
+        pair_key = _first_text(item.pair_key, os.path.basename(os.path.dirname(os.path.dirname(run_dir))))
+        project_name = f"{pair_key}_{run_key}" if pair_key and run_key else ""
+        work_root = _maybe_join(settings.PYINT_WORK_ROOT, pair_key, run_key)
+        project_dir = _maybe_join(work_root, project_name) if project_name else ""
+
+        summary_payload = _read_json_if_exists(_maybe_join(native_dir, "pyint_run_summary.json"))
+        summary_project_dir = _first_text(summary_payload.get("project_dir"))
+        project_dir = summary_project_dir or project_dir
+
+        master_date = _first_text(summary_payload.get("master_date"))
+        slave_date = _first_text(summary_payload.get("slave_date"))
+        pair_name = f"{master_date}-{slave_date}" if master_date and slave_date else ""
+        ifgrams_dir = _maybe_join(project_dir, "ifgrams", pair_name) if pair_name else _maybe_join(project_dir, "ifgrams")
+
+        paths.update(
+            {
+                "work_dir": work_root,
+                "project_dir": project_dir,
+                "ifgrams_dir": ifgrams_dir,
+                "reflatten_dir": _maybe_join(run_dir, "gamma_reflatten"),
+                "native_reflatten_dir": _maybe_join(native_dir, "reflatten"),
+                "pyint_summary_path": _maybe_join(native_dir, "pyint_run_summary.json"),
+                "stdout_log": _maybe_join(work_root, "pyint.stdout.log"),
+                "stderr_log": _maybe_join(work_root, "pyint.stderr.log"),
+            }
+        )
+
+    return paths
 
 
 def _sanitize_pointer_fragment(value: str, default: str) -> str:
@@ -616,6 +699,7 @@ class DinsarProductionService:
         )
         result = await db.execute(stmt)
         runs = result.scalars().all()
+        run_ids = [run.run_id for run in runs if run.run_id]
         pending_reconcile = [
             run
             for run in runs
@@ -636,6 +720,15 @@ class DinsarProductionService:
                 ) or changed
             if changed:
                 await db.commit()
+        items_by_run_id: Dict[str, List[DinsarProductionRunItemORM]] = {}
+        if run_ids:
+            items_result = await db.execute(
+                select(DinsarProductionRunItemORM)
+                .where(DinsarProductionRunItemORM.run_id.in_(run_ids))
+                .order_by(DinsarProductionRunItemORM.order_index.asc(), DinsarProductionRunItemORM.id.asc())
+            )
+            for item in items_result.scalars().all():
+                items_by_run_id.setdefault(item.run_id, []).append(item)
         return {
             "runs": [
                 {
@@ -656,6 +749,29 @@ class DinsarProductionService:
                     "completed_items": run.completed_items,
                     "failed_items": run.failed_items,
                     "skipped_items": run.skipped_items,
+                    "items": [
+                        {
+                            "task_name": item.task_name,
+                            "task_alias": item.task_alias,
+                            "pair_key": item.pair_key,
+                            "status": item.status,
+                            "current_step": item.current_step,
+                            "latest_run_key": item.latest_run_key,
+                            "latest_output_dir": item.latest_output_dir,
+                            "latest_manifest_path": item.latest_manifest_path,
+                            "last_error": item.last_error,
+                            "paths": _build_output_paths(
+                                engine_code=run.engine_code,
+                                item=item,
+                                run_key=str(item.latest_run_key or ""),
+                                output_dir=str(item.latest_output_dir or _execution_dir(item, str(item.latest_run_key or ""))),
+                                manifest_path=item.latest_manifest_path,
+                            )
+                            if item.latest_run_key
+                            else {},
+                        }
+                        for item in items_by_run_id.get(run.run_id, [])[:5]
+                    ],
                 }
                 for run in runs
             ],

@@ -32,6 +32,26 @@ def _resolve_existing_master_date(slc_dir, requested_date):
     print('masterDate %s not found; using existing SLC date: %s' % (requested_date, resolved))
     return resolved
 
+
+def _run_or_raise(call_str, stage):
+    rc = os.system(call_str)
+    if rc != 0:
+        raise RuntimeError('%s failed with rc=%s: %s' % (stage, rc, call_str))
+    return rc
+
+
+def _run_or_warn(call_str, stage):
+    rc = os.system(call_str)
+    if rc != 0:
+        print('WARNING: %s returned rc=%s; continuing with subsequent GAMMA refinement: %s' % (stage, rc, call_str))
+    return rc
+
+
+def _remove_files(paths):
+    for path in paths:
+        if os.path.isfile(path):
+            os.remove(path)
+
 def cmdLineParse():
     parser = argparse.ArgumentParser(description='Generate radar-coordinates based DEM.',\
                                      formatter_class=argparse.RawTextHelpFormatter,\
@@ -78,38 +98,32 @@ def main(argv):
     azlks = templateDict['azimuth_looks']
 
     if not os.path.isdir(processDir):
-        call_str = 'mkdir ' + processDir
-        os.system(call_str)
+        os.makedirs(processDir)
         
     simDir = scratchDir + '/' + projectName + "/DEM" 
-    if not os.path.isdir(simDir):
-        call_str='mkdir ' + simDir  
-  
-       
     workDir = simDir
     
     if 'DEM' in templateDict: 
         dem = templateDict['DEM'] 
         if not os.path.isfile(dem):
             dem = DEMDir + '/' + projectName + '/' + projectName + '.dem' 
-            call_str = 'echo DEM= ' + dem + ' >> ' + templateFile
-            os.system(call_str)
+            with open(templateFile, 'a') as stream:
+                stream.write('DEM= ' + dem + '\n')
             templateDict['DEM'] = dem
     else: 
         dem = DEMDir + '/' + projectName + '/' + projectName + '.dem'
-        call_str = 'echo DEM = ' + dem + ' >> ' + templateFile
-        os.system(call_str)
+        with open(templateFile, 'a') as stream:
+            stream.write('DEM = ' + dem + '\n')
     
     demPar = dem + ".par"
     
     if not os.path.isfile(dem):
         call_str = 'makedem_pyint.py ' + projectName
-        os.system(call_str)
+        _run_or_raise(call_str, 'makedem_pyint')
     
 # Parameter setting for simPhase
     latovrSimphase = templateDict['dem_lat_ovr']
     lonovrSimphase = templateDict['dem_lon_ovr']
-    
     rposSimphase = templateDict['Simphase_rpos']   
     azposSimphase = templateDict['Simphase_azpos']  
     rwinSimphase = templateDict['Simphase_rwin'] 
@@ -154,12 +168,7 @@ def main(argv):
 
 ### remove DEM look up table if it existed for considering gamma overlapping
 
-    if os.path.isfile(UTMDEM):   
-        os.remove(UTMDEM)
-    if os.path.isfile(UTMDEMpar):   
-        os.remove(UTMDEMpar)
-    if os.path.isfile(UTM2RDC):   
-        os.remove(UTM2RDC)
+    _remove_files([UTMDEM, UTMDEMpar, UTM2RDC, SIMSARUTM, PIX, LSMAP])
 
     nWidthUTMDEM0 = ut.read_gamma_par(demPar, 'read', 'width')
     DateFormat = ut.read_gamma_par(demPar, 'read', 'data_format:')
@@ -174,42 +183,46 @@ def main(argv):
     
     if not os.path.isfile(tmp_dem):
         call_str = 'replace_values ' + dem + ' -32767 0 ' + tmp_dem + ' ' + nWidthUTMDEM0 + ' 2 ' + DF_type
-        os.system(call_str)
+        _run_or_raise(call_str, 'replace_values_dem_voids')
         call_str = 'cp ' + tmp_dem + ' ' + dem
-        os.system(call_str)
+        _run_or_raise(call_str, 'copy_dem_without_voids')
 
     call_str = "multi_look " + MslcImg + " " + MslcPar + " " + MamprlksImg + " " + MamprlksPar + " " + rlks + " " + azlks
-    os.system(call_str)
-        
-    call_str = 'gc_map1 ' + MamprlksPar + ' ' + '-' + ' ' + demPar + ' ' + dem + ' ' + UTMDEMpar + ' ' + UTMDEM + ' ' + UTM2RDC + ' ' + latovrSimphase + ' ' + lonovrSimphase + ' ' + SIMSARUTM + ' - - - - ' + PIX + ' ' + LSMAP + ' - 3 128' 
-    #call_str = 'gc_map2 ' + MamprlksPar + ' ' + demPar + ' ' + dem + ' ' + UTMDEMpar + ' ' + UTMDEM + ' ' + UTM2RDC + ' ' + latovrSimphase + ' ' + lonovrSimphase + ' ' + ' ' + LSMAP + ' - - - -  ' + SIMSARUTM + ' - - - ' + PIX   
-    os.system(call_str)
+    _run_or_raise(call_str, 'multi_look_master_for_dem')
+
+    def run_gc_map1(stage, lat_ovr, lon_ovr):
+        call = 'gc_map1 ' + MamprlksPar + ' ' + '-' + ' ' + demPar + ' ' + dem + ' ' + UTMDEMpar + ' ' + UTMDEM + ' ' + UTM2RDC + ' ' + lat_ovr + ' ' + lon_ovr + ' ' + SIMSARUTM + ' - - - - ' + PIX + ' ' + LSMAP + ' - 3 128'
+        _run_or_raise(call, stage)
+
+    run_gc_map1('gc_map1_initial_dem_segment', latovrSimphase, lonovrSimphase)
 
     nWidthUTMDEM = ut.read_gamma_par(UTMDEMpar, 'read', 'width')
     nLinePWR1 = ut.read_gamma_par(MamprlksPar, 'read', 'azimuth_lines')
     nWidth = ut.read_gamma_par(MamprlksPar, 'read', 'range_samples')
    
-    call_str = 'geocode ' + UTM2RDC + ' ' + SIMSARUTM + ' ' + nWidthUTMDEM + ' ' + SIMSARRDC + ' ' + nWidth + ' ' + nLinePWR1 + ' 0 0'
-    os.system(call_str)
+    # 30 m DEM grids can be much sparser than LT-1 multi-look radar pixels.
+    # Keep this in GAMMA by widening geocode's search radius for RDC filling.
+    call_str = 'geocode ' + UTM2RDC + ' ' + SIMSARUTM + ' ' + nWidthUTMDEM + ' ' + SIMSARRDC + ' ' + nWidth + ' ' + nLinePWR1 + ' 0 0 - - 2 64 1'
+    _run_or_raise(call_str, 'geocode_sim_sar_to_rdc')
 
     call_str = 'create_diff_par ' + MamprlksPar + ' ' + MamprlksPar + ' ' + SIMDIFFpar + ' 1 < ' + BLANK
-    os.system(call_str)
+    _run_or_raise(call_str, 'create_diff_par_sim')
 
     call_str = 'init_offsetm ' + SIMSARRDC + ' ' + MamprlksImg + ' ' + SIMDIFFpar + ' 2 2 ' + rposSimphase + ' ' + azposSimphase #+ ' - - - 512'
-    os.system(call_str)
+    _run_or_warn(call_str, 'init_offsetm_sim')
 
     call_str = 'offset_pwrm ' + SIMSARRDC + ' ' + MamprlksImg + ' ' + SIMDIFFpar + ' ' + SIMOFFS + ' ' + SIMSNR + ' ' + rwinSimphase + ' ' + azwinSimphase + ' ' + SIMOFFSET #+ ' - 128 128 ' + threshSimphase 
-    os.system(call_str)
+    _run_or_raise(call_str, 'offset_pwrm_sim')
 
     call_str = 'offset_fitm ' + SIMOFFS + ' ' + SIMSNR + ' ' + SIMDIFFpar + ' ' + SIMCOFF + ' ' + SIMCOFFSETS + ' - > ' + OFFSTD
-    os.system(call_str)
+    _run_or_raise(call_str, 'offset_fitm_sim')
 
     call_str = 'gc_map_fine ' + UTM2RDC + ' ' + nWidthUTMDEM + ' ' + SIMDIFFpar + ' ' + UTMTORDC + ' 1'
     #print(call_str)
-    os.system(call_str)
+    _run_or_raise(call_str, 'gc_map_fine')
 
-    call_str = 'geocode ' + UTMTORDC + ' ' + UTMDEM + ' ' + nWidthUTMDEM + ' ' + HGTSIM + ' ' + nWidth + ' ' + nLinePWR1 + ' 0 0 - - 1 1 1'
-    os.system(call_str)
+    call_str = 'geocode ' + UTMTORDC + ' ' + UTMDEM + ' ' + nWidthUTMDEM + ' ' + HGTSIM + ' ' + nWidth + ' ' + nLinePWR1 + ' 0 0 - - 2 64 1'
+    _run_or_raise(call_str, 'geocode_dem_to_rdc')
 
 
     required_outputs = [UTMDEMpar, UTMDEM, UTMTORDC, HGTSIM]

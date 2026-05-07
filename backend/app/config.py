@@ -265,9 +265,26 @@ class Settings(BaseSettings):
     PYINT_DEM_MODE: str = "local_fabdem"
     PYINT_FABDEM_ROOT: str = ""
     PYINT_PREPARED_DEM_PATH: str = ""
+    PYINT_DEM_RESOLUTION_M: float = 30.0
     PYINT_OPENTOPO_DEM_TYPE: str = "SRTMGL1"
     PYINT_OPENTOPO_API_KEY: str = ""
     PYINT_DEM_STRICT: bool = True
+    PYINT_UNWRAP_COH_THRESHOLD: float = 0.05
+    PYINT_PRODUCT_COH_THRESHOLD: float = 0.20
+    PYINT_REFERENCE_MODE: str = "none"
+    PYINT_REFERENCE_COH_THRESHOLD: float = 0.30
+    PYINT_DERAMP_MODE: str = "none"
+    PYINT_DERAMP_COH_THRESHOLD: float = 0.30
+    PYINT_GAMMA_NODATA_VALUE: float = -9999.0
+    PYINT_GEO_INTERP: str = "1"
+    PYINT_ATMCOR_ENABLED: bool = False
+    PYINT_ATMCOR_USE_FOR_DISP: bool = False
+    PYINT_REFLATTEN_ENABLED: bool = True
+    PYINT_REFLATTEN_MODEL: str = "plane"
+    PYINT_REFLATTEN_COH_THRESHOLD: float = 0.70
+    PYINT_REFLATTEN_FALLBACK_COH_THRESHOLD: float = 0.20
+    PYINT_REFLATTEN_RANGE_STEP: int = 32
+    PYINT_REFLATTEN_AZIMUTH_STEP: int = 32
     PYINT_ORBIT_POLICY: str = "require_txt"
     PYINT_ORBIT_POOL_TXT: str = ""
     PYINT_RECORD_INPUT_ASSETS: bool = True
@@ -491,6 +508,70 @@ class Settings(BaseSettings):
         if pyint_dem_mode not in {"local_fabdem", "opentopo", "prepared_file"}:
             pyint_dem_mode = "local_fabdem"
         object.__setattr__(self, "PYINT_DEM_MODE", pyint_dem_mode)
+        object.__setattr__(self, "PYINT_DEM_RESOLUTION_M", max(0.1, float(self.PYINT_DEM_RESOLUTION_M or 30.0)))
+        object.__setattr__(
+            self,
+            "PYINT_UNWRAP_COH_THRESHOLD",
+            min(1.0, max(0.0, float(self.PYINT_UNWRAP_COH_THRESHOLD or 0.05))),
+        )
+        object.__setattr__(
+            self,
+            "PYINT_PRODUCT_COH_THRESHOLD",
+            min(1.0, max(0.0, float(self.PYINT_PRODUCT_COH_THRESHOLD or 0.20))),
+        )
+        pyint_reference_mode = str(self.PYINT_REFERENCE_MODE or "none").strip().lower() or "none"
+        if pyint_reference_mode not in {"none", "coh_median"}:
+            pyint_reference_mode = "none"
+        object.__setattr__(self, "PYINT_REFERENCE_MODE", pyint_reference_mode)
+        object.__setattr__(
+            self,
+            "PYINT_REFERENCE_COH_THRESHOLD",
+            min(1.0, max(0.0, float(self.PYINT_REFERENCE_COH_THRESHOLD or 0.30))),
+        )
+        pyint_deramp_mode = str(self.PYINT_DERAMP_MODE or "none").strip().lower() or "none"
+        if pyint_deramp_mode not in {"none", "plane"}:
+            pyint_deramp_mode = "none"
+        object.__setattr__(self, "PYINT_DERAMP_MODE", pyint_deramp_mode)
+        object.__setattr__(
+            self,
+            "PYINT_DERAMP_COH_THRESHOLD",
+            min(1.0, max(0.0, float(self.PYINT_DERAMP_COH_THRESHOLD or 0.30))),
+        )
+        object.__setattr__(
+            self,
+            "PYINT_GAMMA_NODATA_VALUE",
+            float(self.PYINT_GAMMA_NODATA_VALUE if self.PYINT_GAMMA_NODATA_VALUE is not None else -9999.0),
+        )
+        pyint_geo_interp = str(self.PYINT_GEO_INTERP or "0").strip()
+        if pyint_geo_interp not in {"0", "1"}:
+            pyint_geo_interp = "1"
+        object.__setattr__(self, "PYINT_GEO_INTERP", pyint_geo_interp)
+        pyint_reflatten_model = str(self.PYINT_REFLATTEN_MODEL or "plane").strip().lower() or "plane"
+        if pyint_reflatten_model in {"linear"}:
+            pyint_reflatten_model = "plane"
+        if pyint_reflatten_model not in {"plane", "quadratic"}:
+            pyint_reflatten_model = "plane"
+        object.__setattr__(self, "PYINT_REFLATTEN_MODEL", pyint_reflatten_model)
+        object.__setattr__(
+            self,
+            "PYINT_REFLATTEN_COH_THRESHOLD",
+            min(1.0, max(0.0, float(self.PYINT_REFLATTEN_COH_THRESHOLD or 0.70))),
+        )
+        object.__setattr__(
+            self,
+            "PYINT_REFLATTEN_FALLBACK_COH_THRESHOLD",
+            min(1.0, max(0.0, float(self.PYINT_REFLATTEN_FALLBACK_COH_THRESHOLD or 0.20))),
+        )
+        object.__setattr__(
+            self,
+            "PYINT_REFLATTEN_RANGE_STEP",
+            max(1, int(self.PYINT_REFLATTEN_RANGE_STEP or 32)),
+        )
+        object.__setattr__(
+            self,
+            "PYINT_REFLATTEN_AZIMUTH_STEP",
+            max(1, int(self.PYINT_REFLATTEN_AZIMUTH_STEP or 32)),
+        )
         if not self.PYINT_OPENTOPO_DEM_TYPE:
             object.__setattr__(self, "PYINT_OPENTOPO_DEM_TYPE", "SRTMGL1")
         pyint_orbit_policy = str(self.PYINT_ORBIT_POLICY or "require_txt").strip().lower() or "require_txt"

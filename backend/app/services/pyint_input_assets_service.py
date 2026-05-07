@@ -316,6 +316,7 @@ def get_pyint_dem_summary() -> Dict[str, Any]:
             "hdr_exists": bool(prepared_dem_info.get("hdr_exists")),
             "vrt_exists": bool(prepared_dem_info.get("vrt_exists")),
         },
+        "configured_resolution_m": float(getattr(settings, "PYINT_DEM_RESOLUTION_M", 30.0) or 30.0),
         "opentopo_dem_type": opentopo_dem_type,
         "opentopo_api_key_configured": bool(opentopo_api_key),
         "status": status,

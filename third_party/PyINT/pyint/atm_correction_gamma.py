@@ -16,6 +16,13 @@ import argparse
 from pyint import _utils as ut
 
 
+def _run_or_raise(call_str, stage):
+    rc = os.system(call_str)
+    if rc != 0:
+        raise RuntimeError('%s failed with rc=%s: %s' % (stage, rc, call_str))
+    return rc
+
+
 INTRODUCTION = '''
 -------------------------------------------------------------------  
        Unwrap differential interferogram using GAMMA.
@@ -74,10 +81,22 @@ def main(argv):
     
     ################ prepare file for parallel processing ###############
     HGTSIM      = demDir + '/' + masterDate + '_' + rlks + 'rlks.rdc.dem'   
+    Mamp0   = rslcDir + '/' + Mdate + '/' + Mdate + '_' + rlks + 'rlks.amp'
+    Samp0   = rslcDir + '/' + Sdate + '/' + Sdate + '_' + rlks + 'rlks.amp'
+    MampPar0 = rslcDir + '/' + Mdate + '/' + Mdate + '_' + rlks + 'rlks.amp.par'
+    SampPar0 = rslcDir + '/' + Sdate + '/' + Sdate + '_' + rlks + 'rlks.amp.par'
     Mamp    = workDir + '/' + Mdate + '_' + rlks + 'rlks.amp'
     MampPar = workDir + '/' + Mdate + '_' + rlks + 'rlks.amp.par'
     Samp    = workDir + '/' + Sdate + '_' + rlks + 'rlks.amp'
     SampPar = workDir + '/' + Sdate + '_' + rlks + 'rlks.amp.par'
+    if not os.path.isfile(Mamp):
+        ut.copy_file(Mamp0, Mamp)
+    if not os.path.isfile(Samp):
+        ut.copy_file(Samp0, Samp)
+    if not os.path.isfile(MampPar):
+        ut.copy_file(MampPar0, MampPar)
+    if not os.path.isfile(SampPar):
+        ut.copy_file(SampPar0, SampPar)
     diff_par = workDir + '/' + Mdate + '_' + Sdate + '_diff_par'
     UNWlks = workDir + '/' + Pair + '_' +rlks + 'rlks.diff_filt.unw'
     CORMASK = workDir + '/' + Pair + '_' +rlks + 'rlks.diff_filt.cor'
@@ -88,18 +107,18 @@ def main(argv):
     nLine =  ut.read_gamma_par(MampPar, 'read', 'azimuth_lines')
    ###############################################################  
     call_str = "create_diff_par " + MampPar + " " + SampPar + " " + diff_par + " 1 0 "
-    os.system(call_str)
+    _run_or_raise(call_str, 'create_diff_par_atmcor')
     call_str = "atm_mod_2d " + UNWlks + " " + HGTSIM + " " + CORMASK + " " + diff_par + " " + " - 0 a0 a1 sigma sigma_h s1"
-    os.system(call_str)
+    _run_or_raise(call_str, 'atm_mod_2d')
     call_str = "atm_sim_2d " + diff_par + " " +  HGTSIM + " a0 a1  " + ATM_PHASE
-    os.system(call_str)
+    _run_or_raise(call_str, 'atm_sim_2d')
     call_str = "sub_phase " + UNWlks + " " + ATM_PHASE + " " + diff_par + " " + ATMCOR_UNW + " 0 0 0 " 
-    os.system(call_str)
+    _run_or_raise(call_str, 'sub_phase_atmcor')
     call_str = 'rasrmg ' + ATMCOR_UNW + ' ' + Mamp + ' ' + nWidth + ' - - - - - - - - - - ' 
-    os.system(call_str)
+    _run_or_raise(call_str, 'rasrmg_atmcor_unw')
     
     print("Correct atmospheric phase is done!")
-    sys.exit(1)
+    sys.exit(0)
 
 if __name__ == '__main__':
     main(sys.argv[:])

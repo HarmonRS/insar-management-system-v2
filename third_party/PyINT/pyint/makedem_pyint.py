@@ -114,7 +114,6 @@ def _build_dem_from_existing_source(
 
     print(f"Using prepared DEM source: {source_dem}")
     print(f"Clipping prepared DEM window: west={west}, south={south}, east={east}, north={north}")
-
     _run_checked(
         [
             "gdal_translate",
@@ -130,6 +129,7 @@ def _build_dem_from_existing_source(
         ],
         cwd=str(work_dir),
     )
+
     _run_checked(
         [
             "makedem.py",

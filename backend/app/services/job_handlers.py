@@ -2058,6 +2058,25 @@ async def _handle_queued_engine_run(
             pair_index = max(0, int(event.get("pair_index") or 0))
             task_label = str(event.get("task_alias") or event.get("task_name") or "").strip()
 
+            if event_type == "log":
+                level = str(event.get("level") or "INFO").strip().upper()
+                if level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
+                    level = "INFO"
+                source = str(event.get("source") or "").strip()
+                message = str(event.get("message") or "").strip()
+                if not message:
+                    continue
+                label = task_label or str(progress_state.get("pair_label") or "").strip() or "pair"
+                prefix = f"{engine_title} {pair_index}/{pair_total} {label}"
+                if source:
+                    prefix = f"{prefix} {source}"
+                await task_service.add_log(
+                    job.task_id,
+                    level,
+                    f"{prefix}: {message}",
+                )
+                continue
+
             if event_type == "pair_started":
                 progress = min(
                     90,
@@ -2496,7 +2515,22 @@ async def _run_wsl_dinsar_production_controller(
                         if event is None:
                             return
                         event_type = str(event.get("event") or "").strip().lower()
-                        if event_type == "pair_started":
+                        if event_type == "log":
+                            level = str(event.get("level") or "INFO").strip().upper()
+                            if level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
+                                level = "INFO"
+                            source = str(event.get("source") or "").strip()
+                            message = str(event.get("message") or "").strip()
+                            if message:
+                                prefix = f"[{item_index}/{total_items}] {engine_title} {item_label}"
+                                if source:
+                                    prefix = f"{prefix} {source}"
+                                await task_service.add_log(
+                                    job.task_id,
+                                    level,
+                                    f"{prefix}: {message}",
+                                )
+                        elif event_type == "pair_started":
                             progress_state["message"] = (
                                 f"[{engine_code}/{run.profile_code}] Running "
                                 f"{item_index}/{total_items}: {item_label}"
@@ -2892,6 +2926,52 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
 
 
 async def _handle_pyint_run(job: SystemJobORM) -> None:
+    production_run_id = str((job.payload or {}).get("production_run_id") or "").strip()
+    if production_run_id:
+        try:
+            await _run_wsl_dinsar_production_controller(
+                job,
+                engine_code="pyint",
+                engine_title="PyINT/Gamma",
+                fallback_timeout_seconds=settings.PYINT_DEFAULT_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            latest_message = f"PyINT/Gamma D-InSAR production controller failed: {exc}"
+            try:
+                async with AsyncSessionLocal() as db:
+                    run = await dinsar_production_service.get_run(production_run_id, db)
+                    if run is not None and str(run.status or "").strip().upper() not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                        summary_payload = dict(run.summary_json or {})
+                        summary_payload["controller_error"] = str(exc)
+                        await dinsar_production_service.finalize_run(
+                            run,
+                            db=db,
+                            status="FAILED",
+                            summary_payload=summary_payload,
+                            latest_message=latest_message,
+                        )
+                        dinsar_production_service.append_run_log(
+                            run.run_id,
+                            f"[controller-failed] {exc}",
+                        )
+            except Exception:
+                pass
+
+            try:
+                current_task = await task_service.get_task(job.task_id)
+                if current_task and current_task.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                    await task_service.add_log(job.task_id, "ERROR", latest_message)
+                    await task_service.update_task(
+                        job.task_id,
+                        status="FAILED",
+                        progress=100,
+                        message=latest_message,
+                    )
+            except Exception:
+                pass
+            raise
+        return
+
     await _handle_queued_engine_run(
         job,
         engine_title="PyINT",

@@ -135,6 +135,7 @@ def update_template(template_file):
     
     templateDict['atmcor_all'] = '0'                 # if 1, run atmospheric correction
     templateDict['atmcor_all_parallel'] = '1'        # multi-processor number used
+    templateDict['atmcor_use_for_disp'] = '0'        # if 1, use atmcor unw as dispmap input
     
     templateDict['geocode_all'] = '0'            
     templateDict['geocode_all_parallel'] = '1'         # multi-processor number used

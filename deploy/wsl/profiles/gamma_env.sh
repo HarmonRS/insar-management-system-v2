@@ -60,7 +60,7 @@ for _gamma_dir in \
   _gamma_profile_prepend_path "${_gamma_dir}"
 done
 
-_gamma_profile_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+_gamma_profile_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 _gamma_profile_pyint_dir="${_gamma_profile_repo_root}/third_party/PyINT/pyint"
 _gamma_profile_prepend_path "${_gamma_profile_pyint_dir}"
 

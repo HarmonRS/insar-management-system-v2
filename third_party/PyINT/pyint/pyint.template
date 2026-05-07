@@ -193,6 +193,10 @@ diff_all_parallel    =     4     # Number of parallel processors
 unwrap_all           =     1     # Unwrap interferograms [0: skip; 1: process]
 unwrap_all_parallel  =     4     # Number of parallel processors
 
+atmcor_all           =     0     # Gamma atmospheric phase correction [0: skip; 1: process]
+atmcor_all_parallel  =     1     # Number of parallel processors
+atmcor_use_for_disp  =     0     # Use atmcor unwrapped phase for dispmap [0: no; 1: yes]
+
 geocode_all          =     1     # Geocode products [0: skip; 1: process]
 geocode_all_parallel =     4     # Number of parallel processors
 

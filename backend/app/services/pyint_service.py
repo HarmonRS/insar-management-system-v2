@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import math
+import defusedxml.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -11,12 +13,83 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from ..config import get_env_text, read_bool_env, settings
 from .dinsar_naming import PAIR_META_FILENAME, build_fallback_pair_key, find_json_sidecar
-from .wsl_service import run_wsl_command
+from .wsl_service import run_wsl_exec
 
 
 LT1_INPUT_GLOBS = ("LT1*.tar.gz", "LT1*.tiff")
 DEFAULT_RANGE_LOOKS = 2
 DEFAULT_AZIMUTH_LOOKS = 2
+DEFAULT_DEM_RESOLUTION_M = 30.0
+DEFAULT_UNWRAP_COH_THRESHOLD = 0.05
+DEFAULT_PRODUCT_COH_THRESHOLD = 0.20
+DEFAULT_REFERENCE_MODE = "none"
+DEFAULT_REFERENCE_COH_THRESHOLD = 0.30
+DEFAULT_DERAMP_MODE = "none"
+DEFAULT_DERAMP_COH_THRESHOLD = 0.30
+DEFAULT_GEO_INTERP = "1"
+DEFAULT_ATMCOR_ENABLED = False
+DEFAULT_ATMCOR_USE_FOR_DISP = False
+DEFAULT_REFLATTEN_ENABLED = True
+DEFAULT_REFLATTEN_MODEL = "plane"
+DEFAULT_REFLATTEN_COH_THRESHOLD = 0.70
+DEFAULT_REFLATTEN_FALLBACK_COH_THRESHOLD = 0.20
+DEFAULT_REFLATTEN_RANGE_STEP = 32
+DEFAULT_REFLATTEN_AZIMUTH_STEP = 32
+DEM_OVERSAMPLING_MIN = 0.25
+DEM_OVERSAMPLING_MAX = 16.0
+REFERENCE_MODE_CHOICES = {"none", "coh_median"}
+DERAMP_MODE_CHOICES = {"none", "plane"}
+REFLATTEN_MODEL_CHOICES = {"plane", "linear", "quadratic"}
+
+
+def _read_default_target_grid_size_m() -> int:
+    for name in ("PYINT_DEFAULT_TARGET_GRID_SIZE_M",):
+        text = str(get_env_text(name, "") or "").strip()
+        if not text:
+            continue
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return int(value)
+    return 0
+
+
+def _read_float_env(names: Iterable[str], default: float) -> float:
+    for name in names:
+        text = str(get_env_text(name, "") or "").strip()
+        if not text:
+            continue
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            return value
+    return float(default)
+
+
+DEFAULT_TARGET_GRID_SIZE_M = _read_default_target_grid_size_m()
+TARGET_GRID_SIZE_MIN_M = 0
+TARGET_GRID_SIZE_MAX_M = 100
+DEFAULT_DEM_RESOLUTION_M = _read_float_env(("PYINT_DEM_RESOLUTION_M",), DEFAULT_DEM_RESOLUTION_M)
+DEFAULT_UNWRAP_COH_THRESHOLD = _read_float_env(
+    ("PYINT_UNWRAP_COH_THRESHOLD",),
+    DEFAULT_UNWRAP_COH_THRESHOLD,
+)
+DEFAULT_PRODUCT_COH_THRESHOLD = _read_float_env(
+    ("PYINT_PRODUCT_COH_THRESHOLD", "PYINT_COHERENCE_MASK_THRESHOLD"),
+    DEFAULT_PRODUCT_COH_THRESHOLD,
+)
+DEFAULT_REFERENCE_COH_THRESHOLD = _read_float_env(
+    ("PYINT_REFERENCE_COH_THRESHOLD",),
+    DEFAULT_REFERENCE_COH_THRESHOLD,
+)
+DEFAULT_DERAMP_COH_THRESHOLD = _read_float_env(
+    ("PYINT_DERAMP_COH_THRESHOLD",),
+    DEFAULT_DERAMP_COH_THRESHOLD,
+)
 DEFAULT_PARALLEL_WORKERS = 1
 MAX_LOOKS = 32
 MAX_PARALLEL_WORKERS = 16
@@ -74,6 +147,180 @@ def normalize_date_text(value: Any) -> str:
     if match:
         return match.group(1)
     return ""
+
+
+def _local_xml_tag_name(tag: Any) -> str:
+    text = str(tag or "")
+    return text.split("}")[-1] if "}" in text else text
+
+
+def _read_xml_first_parameter(xml_file: str, names: Iterable[str]) -> Optional[str]:
+    path = os.path.normpath(str(xml_file or "").strip())
+    if not path or not os.path.isfile(path):
+        return None
+    wanted = {str(name or "").strip().lower() for name in names if str(name or "").strip()}
+    if not wanted:
+        return None
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception:
+        return None
+    for elem in root.iter():
+        local_name = _local_xml_tag_name(elem.tag).lower()
+        if local_name in wanted and elem.text and str(elem.text).strip():
+            return str(elem.text).strip()
+    return None
+
+
+def _read_scene_geometry_metadata(metadata_path: str) -> Dict[str, Any]:
+    source = os.path.normpath(str(metadata_path or "").strip())
+    range_spacing = _read_xml_first_parameter(
+        source,
+        ("PixelSpacingRg", "columnSpacing", "slantRange", "range_pixel_spacing"),
+    )
+    azimuth_spacing = _read_xml_first_parameter(
+        source,
+        ("PixelSpacingAz", "rowSpacing", "projectedSpacingAzimuth", "azimuth_pixel_spacing"),
+    )
+    incidence_angle = _read_xml_first_parameter(
+        source,
+        ("IncidenceAngle", "incidence_angle"),
+    )
+    if not all((range_spacing, azimuth_spacing, incidence_angle)):
+        raise ValueError(f"Cannot read range/azimuth spacing and incidence angle from: {source}")
+    return {
+        "source": source,
+        "range_pixel_spacing_m": float(range_spacing),
+        "azimuth_pixel_spacing_m": float(azimuth_spacing),
+        "incidence_angle_deg": float(incidence_angle),
+    }
+
+
+def _scene_geometry_metadata_candidates(directory: str, patterns: Iterable[str]) -> List[str]:
+    root = os.path.normpath(str(directory or "").strip())
+    if not root or not os.path.isdir(root):
+        return []
+    candidates: List[str] = []
+    for pattern in patterns:
+        candidates.extend(str(path) for path in Path(root).glob(pattern) if path.is_file())
+    return [
+        os.path.normpath(path)
+        for path in sorted(
+            set(candidates),
+            key=lambda item: (0 if item.lower().endswith(".sml") else 1, item.lower()),
+        )
+    ]
+
+
+def resolve_scene_geometry_metadata_files(scene_dir: str) -> List[str]:
+    return _scene_geometry_metadata_candidates(
+        scene_dir,
+        (
+            "*.sml",
+            "*.SML",
+            "*.meta.xml",
+            "*.META.XML",
+        ),
+    )
+
+
+def resolve_scene_geometry_metadata_file(scene_dir: str) -> str:
+    candidates = resolve_scene_geometry_metadata_files(scene_dir)
+    return candidates[0] if candidates else ""
+
+
+def calculate_looks_from_scene_metadata(
+    *,
+    master_metadata: str,
+    slave_metadata: str,
+    target_resolution_m: float,
+) -> Dict[str, Any]:
+    target_resolution = float(target_resolution_m)
+    if target_resolution <= 0:
+        raise ValueError("target_resolution_m must be greater than 0")
+
+    master = _read_scene_geometry_metadata(master_metadata)
+    slave = _read_scene_geometry_metadata(slave_metadata)
+
+    avg_azimuth = (
+        float(master["azimuth_pixel_spacing_m"]) + float(slave["azimuth_pixel_spacing_m"])
+    ) / 2.0
+    master_ground_range = float(master["range_pixel_spacing_m"]) / math.sin(
+        math.radians(float(master["incidence_angle_deg"]))
+    )
+    slave_ground_range = float(slave["range_pixel_spacing_m"]) / math.sin(
+        math.radians(float(slave["incidence_angle_deg"]))
+    )
+    avg_ground_range = (master_ground_range + slave_ground_range) / 2.0
+
+    range_ratio = target_resolution / avg_ground_range
+    azimuth_ratio = target_resolution / avg_azimuth
+    range_looks = max(1, int(math.floor(range_ratio + 0.5)))
+    azimuth_looks = max(1, int(math.floor(azimuth_ratio + 0.5)))
+
+    return {
+        "mode": "target_grid_size",
+        "target_resolution_m": target_resolution,
+        "range_looks": range_looks,
+        "azimuth_looks": azimuth_looks,
+        "avg_ground_range_spacing_m": avg_ground_range,
+        "avg_azimuth_spacing_m": avg_azimuth,
+        "range_look_ratio": range_ratio,
+        "azimuth_look_ratio": azimuth_ratio,
+        "resolved_ground_range_spacing_m": avg_ground_range * range_looks,
+        "resolved_azimuth_spacing_m": avg_azimuth * azimuth_looks,
+        "master": master,
+        "slave": slave,
+    }
+
+
+def calculate_looks_from_task_dir(task_dir: str, target_resolution_m: float) -> Dict[str, Any]:
+    task_root = os.path.normpath(str(task_dir or "").strip())
+    master_candidates = resolve_scene_geometry_metadata_files(os.path.join(task_root, "master"))
+    slave_candidates = resolve_scene_geometry_metadata_files(os.path.join(task_root, "slave"))
+    if not master_candidates or not slave_candidates:
+        raise ValueError(f"Cannot find SML/meta XML metadata under task: {task_root}")
+    errors: List[str] = []
+    for master_metadata in master_candidates:
+        for slave_metadata in slave_candidates:
+            try:
+                return calculate_looks_from_scene_metadata(
+                    master_metadata=master_metadata,
+                    slave_metadata=slave_metadata,
+                    target_resolution_m=target_resolution_m,
+                )
+            except Exception as exc:
+                errors.append(f"{os.path.basename(master_metadata)} + {os.path.basename(slave_metadata)}: {exc}")
+    detail = "; ".join(errors[:3]) if errors else "unknown metadata parsing error"
+    raise ValueError(f"Cannot calculate looks from task metadata under {task_root}: {detail}")
+
+
+def calculate_dem_oversampling(
+    *,
+    dem_resolution_m: float,
+    target_grid_size_m: float,
+) -> Dict[str, Any]:
+    dem_resolution = float(dem_resolution_m or 0.0)
+    target_grid = float(target_grid_size_m or 0.0)
+    if not math.isfinite(dem_resolution) or dem_resolution <= 0:
+        dem_resolution = DEFAULT_DEM_RESOLUTION_M
+
+    raw_factor = dem_resolution / target_grid if math.isfinite(target_grid) and target_grid > 0 else None
+    oversampling = 1.0
+    actual_grid = dem_resolution / oversampling if oversampling > 0 else dem_resolution
+    mismatch_ratio = abs(actual_grid - target_grid) / target_grid if target_grid > 0 else None
+    return {
+        "mode": "gamma_dem_oversampling",
+        "dem_resolution_m": dem_resolution,
+        "target_grid_size_m": target_grid,
+        "raw_oversampling": raw_factor,
+        "oversampling": oversampling,
+        "actual_grid_size_m": actual_grid,
+        "mismatch_ratio": mismatch_ratio,
+        "min_oversampling": DEM_OVERSAMPLING_MIN,
+        "max_oversampling": DEM_OVERSAMPLING_MAX,
+    }
 
 
 def slugify_text(value: Any, *, default: str = "item", max_len: int = 96) -> str:
@@ -278,7 +525,14 @@ def _gamma_prefix(gamma_env_script_wsl: str) -> str:
     script = str(gamma_env_script_wsl or "").strip()
     if not script:
         return ""
-    return f". {quote_shell(script)} >/dev/null 2>&1 && "
+    return f". {quote_shell(script)} >/dev/null 2>&1 || exit 1; "
+
+
+def _pyint_path_prefix(pyint_home_wsl: str) -> str:
+    home = str(pyint_home_wsl or "").strip().rstrip("/")
+    if not home:
+        return ""
+    return f"export PATH={quote_shell(home + '/pyint')}:\"$PATH\" && "
 
 
 def check_pyint_environment(
@@ -320,7 +574,10 @@ def check_pyint_environment(
     def add(name: str, ok: bool, detail: str = "", skipped: bool = False) -> None:
         checks.append(PyintCheck(name=name, ok=ok, detail=detail, skipped=skipped))
 
-    rc, out, err = run_wsl_command("echo pyint_alive", distro=distro_value, timeout=15)
+    def run_check(command: str, timeout: int = 30):
+        return run_wsl_exec(["bash", "-lc", command], distro=distro_value, timeout=timeout)
+
+    rc, out, err = run_check("echo pyint_alive", timeout=15)
     wsl_ok = rc == 0 and "pyint_alive" in out
     add("WSL distro", wsl_ok, out or err or distro_value)
 
@@ -331,17 +588,15 @@ def check_pyint_environment(
             message=f"WSL distro is unavailable: {distro_value}",
         )
 
-    rc, out, err = run_wsl_command(
+    rc, out, err = run_check(
         f"{quote_shell(python_value)} --version",
-        distro=distro_value,
         timeout=15,
     )
     add("WSL Python", rc == 0, out or err or python_value)
 
     if pyint_home_wsl:
-        rc, out, err = run_wsl_command(
+        rc, out, err = run_check(
             f"test -d {quote_shell(pyint_home_wsl)} && echo ok",
-            distro=distro_value,
             timeout=10,
         )
         add("PYINT_HOME", rc == 0 and "ok" in out, pyint_home_wsl or err)
@@ -349,9 +604,8 @@ def check_pyint_environment(
         add("PYINT_HOME", False, "PYINT_HOME is empty")
 
     if pyint_app_wsl:
-        rc, out, err = run_wsl_command(
+        rc, out, err = run_check(
             f"test -f {quote_shell(pyint_app_wsl)} && echo ok",
-            distro=distro_value,
             timeout=10,
         )
         add("pyintApp.py", rc == 0 and "ok" in out, pyint_app_wsl or err)
@@ -367,17 +621,15 @@ def check_pyint_environment(
         if not path_text:
             add(name, False, f"{name} is empty")
             continue
-        rc, out, err = run_wsl_command(
+        rc, out, err = run_check(
             f"test -d {quote_shell(path_text)} && test -w {quote_shell(path_text)} && echo ok",
-            distro=distro_value,
             timeout=10,
         )
         add(name, rc == 0 and "ok" in out, path_text or err)
 
     if gamma_env_wsl:
-        rc, out, err = run_wsl_command(
+        rc, out, err = run_check(
             f"test -f {quote_shell(gamma_env_wsl)} && echo ok",
-            distro=distro_value,
             timeout=10,
         )
         add("GAMMA env script", rc == 0 and "ok" in out, gamma_env_wsl or err)
@@ -385,16 +637,16 @@ def check_pyint_environment(
         add("GAMMA env script", True, "Not configured; using current PATH", skipped=True)
 
     gamma_prefix = _gamma_prefix(gamma_env_wsl)
+    pyint_prefix = _pyint_path_prefix(pyint_home_wsl)
     for name, command_name in (
         ("GAMMA LT1 import", "LT1_import_SLC_from_zipfiles1"),
         ("GAMMA geocode_back", "geocode_back"),
     ):
-        rc, out, err = run_wsl_command(
-            gamma_prefix + f"command -v {quote_shell(command_name)}",
-            distro=distro_value,
+        rc, out, err = run_check(
+            gamma_prefix + pyint_prefix + f"command -v {quote_shell(command_name)} >/dev/null 2>&1 && echo ok",
             timeout=10,
         )
-        add(name, rc == 0 and bool(out.strip()), out or err or command_name)
+        add(name, rc == 0 and "ok" in out, out or err or command_name)
 
     helper_path = (
         Path(__file__).resolve().parent.parent
@@ -412,7 +664,7 @@ def check_pyint_environment(
             + gamma_prefix
             + f"{quote_shell(python_value)} {quote_shell(pyint_app_wsl)} -h >/dev/null"
         )
-        rc, out, err = run_wsl_command(smoke_cmd, distro=distro_value, timeout=60)
+        rc, out, err = run_check(smoke_cmd, timeout=60)
         add("PyINT smoke test", rc == 0, out or err or "pyintApp.py -h")
     else:
         add("PyINT smoke test", True, "Skipped", skipped=True)
