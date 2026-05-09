@@ -5,7 +5,7 @@ Pydantic Schema 定义。
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from ..config import read_int_env
 
@@ -178,8 +178,17 @@ class RadarData(BaseModel):
     scene_center_lat: Optional[float] = None
     acquisition_time_utc: Optional[str] = None
     product_type: Optional[str] = None
+    source_product_token: Optional[str] = None
+    image_data_type: Optional[str] = None
+    image_data_format: Optional[str] = None
+    product_variant: Optional[str] = None
     product_level: Optional[str] = None
     product_unique_id: Optional[str] = None
+    satellite_family: Optional[str] = None
+    look_direction: Optional[str] = None
+    geocoded_flag: Optional[bool] = None
+    insar_source_ready: bool = False
+    insar_source_reason: Optional[str] = None
     file_path: str
     has_orbit_data: bool
     orbit_file_path: Optional[str] = None
@@ -242,6 +251,9 @@ class PairingRequest(BaseModel):
     require_same_imaging_mode: bool = True
     require_same_polarization: bool = True
     aoi_overlap_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    max_temporal_baseline_days: Optional[int] = Field(default=None, ge=1, le=3650)
+    pair_footprint_overlap_min_ratio: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    footprint_center_distance_max_meters: Optional[int] = Field(default=None, ge=0, le=100000)
 
     # === 双池日期（新增） ===
     master_date_from: Optional[str] = Field(default=None, pattern=r'^\d{8}$|^$')
@@ -260,6 +272,20 @@ class PairingRequest(BaseModel):
 
     # === 向后兼容（保留） ===
     start_date: Optional[str] = Field(default=None, pattern=r'^\d{8}$|^$')
+
+    @model_validator(mode='before')
+    @classmethod
+    def _apply_aliases(cls, data):
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        if normalized.get('max_temporal_baseline_days') not in (None, ''):
+            normalized['time_baseline_max'] = normalized['max_temporal_baseline_days']
+        if normalized.get('pair_footprint_overlap_min_ratio') not in (None, ''):
+            normalized['overlap_threshold'] = normalized['pair_footprint_overlap_min_ratio']
+        if normalized.get('footprint_center_distance_max_meters') not in (None, ''):
+            normalized['spatial_baseline_max_meters'] = normalized['footprint_center_distance_max_meters']
+        return normalized
 
     @field_validator(
         'master_date_from',
@@ -336,6 +362,7 @@ class RadarPair(BaseModel):
     selection_reason: Optional[str] = None
     time_baseline_days: int
     spatial_baseline_meters: float
+    scene_center_distance_meters: Optional[float] = None
 
 
 class PairingResponse(BaseModel):
@@ -413,6 +440,7 @@ class TimeseriesStackPlanEdge(BaseModel):
     slave_imaging_date: Optional[str] = None
     temporal_baseline_days: Optional[int] = None
     spatial_baseline_meters: Optional[float] = None
+    scene_center_distance_meters: Optional[float] = None
     perpendicular_baseline_meters: Optional[float] = None
     scene_overlap_ratio: Optional[float] = None
     pair_aoi_overlap_ratio: Optional[float] = None
@@ -518,6 +546,7 @@ class DinsarTaskItem(BaseModel):
     slave_polarization: Optional[str] = None
     time_baseline_days: Optional[int] = None
     spatial_baseline_meters: Optional[float] = None
+    scene_center_distance_meters: Optional[float] = None
     status: str
     remark: Optional[str] = None
     created_at: datetime

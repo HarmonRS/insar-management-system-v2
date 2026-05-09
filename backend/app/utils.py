@@ -33,8 +33,15 @@ def _radar_meta_base() -> Dict[str, Any]:
         "scene_center_lat": None,
         "acquisition_time_utc": None,
         "product_type": None,
+        "source_product_token": None,
+        "image_data_type": None,
+        "image_data_format": None,
+        "product_variant": None,
         "product_level": None,
         "product_unique_id": None,
+        "satellite_family": None,
+        "look_direction": None,
+        "geocoded_flag": None,
     }
 
 
@@ -69,6 +76,20 @@ def _parse_coord_token(value: Optional[str]) -> Optional[float]:
         return None
 
 
+def normalize_satellite_family(value: Optional[str]) -> Optional[str]:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return None
+    compact = raw.replace("-", "").replace("_", "").replace(" ", "")
+    if compact in {"LT1", "LT1A", "LT1B", "LUTAN1", "LUTAN1A", "LUTAN1B"}:
+        return "LT1"
+    if compact in {"S1", "S1A", "S1B", "SENTINEL1", "SENTINEL1A", "SENTINEL1B"}:
+        return "S1"
+    if compact in {"GF3", "GAOFEN3"}:
+        return "GF3"
+    return raw
+
+
 def parse_s1_radar_filename(folder_name: str) -> Optional[Dict[str, Any]]:
     """
     Parses key info from a Sentinel-1 radar data folder name.
@@ -81,8 +102,11 @@ def parse_s1_radar_filename(folder_name: str) -> Optional[Dict[str, Any]]:
     
     meta = _radar_meta_base()
     meta["satellite"] = parts[0]
+    meta["satellite_family"] = normalize_satellite_family(parts[0])
     meta["imaging_date"] = parts[4].split('T')[0]
     meta["imaging_mode"] = parts[1]
+    meta["source_product_token"] = parts[2]
+    meta["product_type"] = parts[2]
     polarization = parts[3]  # e.g., '1SDV' -> 'DV' is dual-pol VV/VH
     meta["polarization"] = polarization[2:] if len(polarization) > 2 else polarization
     return meta
@@ -121,6 +145,7 @@ def parse_lt1_radar_filename(folder_name: str) -> Optional[Dict[str, Any]]:
 
     meta = _radar_meta_base()
     meta["satellite"] = parts[0]
+    meta["satellite_family"] = normalize_satellite_family(parts[0])
     if len(parts) > 1:
         meta["satellite_mode"] = parts[1]
     if len(parts) > 2:
@@ -137,6 +162,7 @@ def parse_lt1_radar_filename(folder_name: str) -> Optional[Dict[str, Any]]:
         meta["imaging_date"] = _extract_date_yyyymmdd(parts[7])
         meta["acquisition_time_utc"] = parts[7]
     if len(parts) > 8:
+        meta["source_product_token"] = parts[8]
         meta["product_type"] = parts[8]
     if len(parts) > 9:
         meta["polarization"] = parts[9]
@@ -182,6 +208,7 @@ def parse_gf3_l2_dirname(folder_name: str) -> Optional[Dict[str, Any]]:
 
     meta = _radar_meta_base()
     meta["satellite"] = "GF3"
+    meta["satellite_family"] = normalize_satellite_family("GF3")
 
     parts = name.split("_")
     # Try to extract date: first 8-digit segment
@@ -437,14 +464,19 @@ def parse_xml_metadata(
         ])
 
         # --- Product Type / Level / Unique ID ---
-        product_type = _get_first_text([
+        image_data_type = _get_first_text([
             f".//{ns_prefix}imageDataInfo/{ns_prefix}imageDataType",
-            f".//{ns_prefix}orderInfo/{ns_prefix}productVariant",
-            f".//{ns_prefix}imageDataInfo/{ns_prefix}imageDataFormat",
             "//*[local-name()='imageDataInfo']/*[local-name()='imageDataType']",
+        ])
+        product_variant = _get_first_text([
+            f".//{ns_prefix}orderInfo/{ns_prefix}productVariant",
             "//*[local-name()='orderInfo']/*[local-name()='productVariant']",
+        ])
+        image_data_format = _get_first_text([
+            f".//{ns_prefix}imageDataInfo/{ns_prefix}imageDataFormat",
             "//*[local-name()='imageDataInfo']/*[local-name()='imageDataFormat']",
         ])
+        product_type = image_data_type or product_variant or image_data_format
         product_level = _get_first_text([
             f".//{ns_prefix}generalHeader/{ns_prefix}itemName",
             "//*[local-name()='generalHeader']/*[local-name()='itemName']",
@@ -527,6 +559,9 @@ def parse_xml_metadata(
                 "scene_center_lat": scene_center_lat,
                 "acquisition_time_utc": acquisition_time_utc,
                 "product_type": product_type,
+                "image_data_type": image_data_type,
+                "image_data_format": image_data_format,
+                "product_variant": product_variant,
                 "product_level": product_level,
                 "product_unique_id": product_unique_id,
                 "look_direction": look_direction,

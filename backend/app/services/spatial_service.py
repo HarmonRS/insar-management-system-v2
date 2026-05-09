@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import and_, cast, func
+from sqlalchemy import and_, cast, func, or_
 from sqlalchemy.orm import aliased
 
 from geoalchemy2 import Geography
@@ -43,7 +43,7 @@ from .dinsar_naming import build_pair_key, build_task_alias, ensure_unique_task_
 from .pairing_state_service import pairing_state_service
 
 
-PAIRING_POLICY_VERSION = "2026.04.phase3.v1"
+PAIRING_POLICY_VERSION = "2026.05.raw-source.v1"
 PAIRING_WARNING_CANDIDATE_THRESHOLD = 3000
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,10 @@ class SpatialService:
     ) -> List[dict]:
         master_alias = aliased(RadarDataORM)
         slave_alias = aliased(RadarDataORM)
+        center_distance_expr = func.coalesce(
+            PairingMetricCacheORM.scene_center_distance_meters,
+            PairingMetricCacheORM.spatial_baseline_meters,
+        )
 
         stmt = (
             select(PairingMetricCacheORM, master_alias, slave_alias)
@@ -165,8 +169,9 @@ class SpatialService:
                 PairingMetricCacheORM.status == "READY",
                 PairingMetricCacheORM.time_baseline_days >= params.time_baseline_min,
                 PairingMetricCacheORM.time_baseline_days <= params.time_baseline_max,
-                PairingMetricCacheORM.spatial_baseline_meters <= params.spatial_baseline_max_meters,
+                center_distance_expr <= params.spatial_baseline_max_meters,
                 PairingMetricCacheORM.scene_overlap_ratio >= params.overlap_threshold,
+                PairingMetricCacheORM.same_look_direction.is_(True),
             )
         )
 
@@ -177,7 +182,7 @@ class SpatialService:
             )
 
         if not params.cross_satellite_pairing:
-            stmt = stmt.where(PairingMetricCacheORM.same_satellite.is_(True))
+            stmt = stmt.where(PairingMetricCacheORM.same_satellite_family.is_(True))
 
         if params.require_same_imaging_mode:
             stmt = stmt.where(PairingMetricCacheORM.same_imaging_mode.is_(True))
@@ -186,9 +191,20 @@ class SpatialService:
             stmt = stmt.where(PairingMetricCacheORM.same_polarization.is_(True))
 
         if params.allowed_satellites:
+            allowed_satellites = [
+                str(item).strip().upper()
+                for item in params.allowed_satellites
+                if str(item).strip()
+            ]
             stmt = stmt.where(
-                master_alias.satellite.in_(params.allowed_satellites),
-                slave_alias.satellite.in_(params.allowed_satellites),
+                or_(
+                    func.upper(master_alias.satellite).in_(allowed_satellites),
+                    func.upper(master_alias.satellite_family).in_(allowed_satellites),
+                ),
+                or_(
+                    func.upper(slave_alias.satellite).in_(allowed_satellites),
+                    func.upper(slave_alias.satellite_family).in_(allowed_satellites),
+                ),
             )
 
         if params.master_date_from:
@@ -220,12 +236,18 @@ class SpatialService:
             PairingMetricCacheORM.master_imaging_date.asc(),
             PairingMetricCacheORM.slave_imaging_date.asc(),
             func.coalesce(PairingMetricCacheORM.scene_overlap_ratio, 0).desc(),
+            center_distance_expr.asc(),
             PairingMetricCacheORM.pair_uid.asc(),
         )
 
         result = await db.execute(stmt)
         candidate_pool: List[dict] = []
         for metric_row, master_row, slave_row in result.all():
+            center_distance = float(
+                metric_row.scene_center_distance_meters
+                if metric_row.scene_center_distance_meters is not None
+                else (metric_row.spatial_baseline_meters or 0)
+            )
             candidate_pool.append(
                 {
                     "metric_cache_ref_id": int(metric_row.id),
@@ -235,7 +257,8 @@ class SpatialService:
                     "master": RadarData.model_validate(master_row),
                     "slave": RadarData.model_validate(slave_row),
                     "days": int(metric_row.time_baseline_days or 0),
-                    "dist": float(metric_row.spatial_baseline_meters or 0),
+                    "dist": center_distance,
+                    "scene_center_distance_meters": center_distance,
                     "overlap_ratio": float(metric_row.scene_overlap_ratio or 0),
                 }
             )
@@ -270,6 +293,11 @@ class SpatialService:
                     selection_reason=candidate.get("selection_reason"),
                     time_baseline_days=int(candidate["days"]),
                     spatial_baseline_meters=float(candidate["dist"]),
+                    scene_center_distance_meters=float(
+                        candidate.get("scene_center_distance_meters")
+                        if candidate.get("scene_center_distance_meters") is not None
+                        else candidate.get("dist") or 0
+                    ),
                 )
             )
         return result_pairs
@@ -356,6 +384,12 @@ class SpatialService:
             "pair_uid": candidate.get("pair_uid"),
             "time_baseline_days": int(candidate.get("days") or 0),
             "spatial_baseline_meters": float(candidate.get("dist") or 0.0),
+            "scene_center_distance_meters": float(
+                candidate.get("scene_center_distance_meters")
+                if candidate.get("scene_center_distance_meters") is not None
+                else candidate.get("dist") or 0.0
+            ),
+            "legacy_spatial_baseline_field": "scene_center_distance_meters",
             "scene_overlap_ratio": float(candidate.get("overlap_ratio") or 0.0),
         }
 
@@ -420,6 +454,10 @@ class SpatialService:
 
         master_alias = aliased(RadarDataORM)
         slave_alias = aliased(RadarDataORM)
+        center_distance_expr = func.coalesce(
+            PairingMetricCacheORM.scene_center_distance_meters,
+            PairingMetricCacheORM.spatial_baseline_meters,
+        )
         stmt = (
             select(PairingMetricCacheORM, master_alias, slave_alias)
             .join(master_alias, master_alias.id == PairingMetricCacheORM.master_scene_ref_id)
@@ -431,14 +469,15 @@ class SpatialService:
                 PairingMetricCacheORM.slave_scene_ref_id.in_(scene_ids),
                 PairingMetricCacheORM.time_baseline_days >= params.time_baseline_min,
                 PairingMetricCacheORM.time_baseline_days <= params.time_baseline_max,
-                PairingMetricCacheORM.spatial_baseline_meters <= params.spatial_baseline_max_meters,
+                center_distance_expr <= params.spatial_baseline_max_meters,
                 PairingMetricCacheORM.scene_overlap_ratio >= params.network_overlap_threshold,
+                PairingMetricCacheORM.same_look_direction.is_(True),
             )
             .order_by(
                 PairingMetricCacheORM.master_imaging_date.asc(),
                 PairingMetricCacheORM.slave_imaging_date.asc(),
                 PairingMetricCacheORM.time_baseline_days.asc(),
-                PairingMetricCacheORM.spatial_baseline_meters.asc(),
+                center_distance_expr.asc(),
                 func.coalesce(PairingMetricCacheORM.scene_overlap_ratio, 0).desc(),
                 PairingMetricCacheORM.id.asc(),
             )
@@ -447,6 +486,11 @@ class SpatialService:
 
         candidate_pool: List[dict] = []
         for metric_row, master_row, slave_row in result.all():
+            center_distance = float(
+                metric_row.scene_center_distance_meters
+                if metric_row.scene_center_distance_meters is not None
+                else (metric_row.spatial_baseline_meters or 0.0)
+            )
             candidate_pool.append(
                 {
                     "metric_cache_ref_id": int(metric_row.id),
@@ -456,7 +500,8 @@ class SpatialService:
                     "master": RadarData.model_validate(master_row),
                     "slave": RadarData.model_validate(slave_row),
                     "days": int(metric_row.time_baseline_days or 0),
-                    "dist": float(metric_row.spatial_baseline_meters or 0.0),
+                    "dist": center_distance,
+                    "scene_center_distance_meters": center_distance,
                     "overlap_ratio": float(metric_row.scene_overlap_ratio or 0.0),
                 }
             )
@@ -511,6 +556,11 @@ class SpatialService:
                     "slave_imaging_date": slave.imaging_date,
                     "temporal_baseline_days": int(candidate.get("days") or 0),
                     "spatial_baseline_meters": float(candidate.get("dist") or 0.0),
+                    "scene_center_distance_meters": float(
+                        candidate.get("scene_center_distance_meters")
+                        if candidate.get("scene_center_distance_meters") is not None
+                        else candidate.get("dist") or 0.0
+                    ),
                     "scene_overlap_ratio": float(candidate.get("overlap_ratio") or 0.0),
                     "selection_reason": candidate.get("selection_reason"),
                     "selection_score": (
@@ -523,6 +573,11 @@ class SpatialService:
                         "selection_mode": selection_mode,
                         "pair_uid": candidate.get("pair_uid"),
                         "metric_version": pairing_state_service.metric_version,
+                        "scene_center_distance_meters": float(
+                            candidate.get("scene_center_distance_meters")
+                            if candidate.get("scene_center_distance_meters") is not None
+                            else candidate.get("dist") or 0.0
+                        ),
                         "time_baseline_min": params.time_baseline_min,
                         "time_baseline_max": params.time_baseline_max,
                         "spatial_baseline_max_meters": params.spatial_baseline_max_meters,
@@ -703,18 +758,44 @@ class SpatialService:
         if params.strategy == "sbas":
             return self._apply_sbas_strategy(candidate_pool, params, aoi_wkt=aoi_wkt)
         if params.strategy == "sequential":
-            return self._apply_sequential_strategy(candidate_pool, params.num_connections)
+            return self._apply_sequential_strategy(candidate_pool, params.num_connections, params)
         if params.strategy == "star":
-            return self._apply_star_strategy(candidate_pool, params.reference_image_id)
-        return self._apply_all_strategy(candidate_pool)
+            return self._apply_star_strategy(candidate_pool, params.reference_image_id, params)
+        return self._apply_all_strategy(candidate_pool, params)
 
-    def _apply_all_strategy(self, candidate_pool: List[dict]) -> Tuple[List[dict], List[str]]:
+    def _score_pair_candidate(self, candidate: dict, params: PairingRequest) -> float:
+        max_time = max(float(params.time_baseline_max or 1), 1.0)
+        max_center = max(float(params.spatial_baseline_max_meters or 1), 1.0)
+        time_score = 1.0 - min(float(candidate.get("days") or 0) / max_time, 1.0)
+        center_score = 1.0 - min(float(candidate.get("dist") or 0) / max_center, 1.0)
+        overlap_score = min(max(float(candidate.get("overlap_ratio") or 0), 0.0), 1.0)
+        source_score = 1.0 if (
+            bool(getattr(candidate.get("master"), "insar_source_ready", False))
+            and bool(getattr(candidate.get("slave"), "insar_source_ready", False))
+        ) else 0.0
+        orbit_score = 1.0 if (
+            bool(getattr(candidate.get("master"), "has_orbit_data", False))
+            and bool(getattr(candidate.get("slave"), "has_orbit_data", False))
+        ) else 0.0
+        return (
+            0.25 * time_score
+            + 0.20 * center_score
+            + 0.35 * overlap_score
+            + 0.15 * source_score
+            + 0.05 * orbit_score
+        )
+
+    def _apply_all_strategy(
+        self,
+        candidate_pool: List[dict],
+        params: PairingRequest,
+    ) -> Tuple[List[dict], List[str]]:
         return (
             [
                 {
                     **candidate,
                     "selection_reason": "all_candidate",
-                    "selection_score": float(candidate.get("overlap_ratio") or 0),
+                    "selection_score": self._score_pair_candidate(candidate, params),
                 }
                 for candidate in self._sorted_candidates(candidate_pool)
             ],
@@ -725,6 +806,7 @@ class SpatialService:
         self,
         candidate_pool: List[dict],
         num_connections: int,
+        params: PairingRequest,
     ) -> Tuple[List[dict], List[str]]:
         """
         Sequential: 按稳定时间序列排序，每景连接后续 N 景。
@@ -759,7 +841,7 @@ class SpatialService:
                     {
                         **candidate,
                         "selection_reason": "sequential_neighbor",
-                        "selection_score": float(candidate.get("overlap_ratio") or 0),
+                        "selection_score": self._score_pair_candidate(candidate, params),
                     }
                 )
                 picked_count += 1
@@ -770,6 +852,7 @@ class SpatialService:
         self,
         candidate_pool: List[dict],
         reference_image_id: Optional[int],
+        params: PairingRequest,
     ) -> Tuple[List[dict], List[str]]:
         """
         Star: 参考像固定为 master。
@@ -820,7 +903,7 @@ class SpatialService:
                     {
                         **candidate,
                         "selection_reason": "star_reference_master",
-                        "selection_score": float(candidate.get("overlap_ratio") or 0),
+                        "selection_score": self._score_pair_candidate(candidate, params),
                         "is_reference_edge": True,
                         "reference_image_id": int(reference_image_id),
                     }
@@ -1136,6 +1219,14 @@ class SpatialService:
         time_score = 1.0 - min(float(candidate.get("days") or 0) / max_time, 1.0)
         spatial_score = 1.0 - min(float(candidate.get("dist") or 0) / max_space, 1.0)
         overlap_score = min(max(float(candidate.get("overlap_ratio") or 0), 0.0), 1.0)
+        source_score = 1.0 if (
+            bool(getattr(candidate.get("master"), "insar_source_ready", False))
+            and bool(getattr(candidate.get("slave"), "insar_source_ready", False))
+        ) else 0.0
+        orbit_score = 1.0 if (
+            bool(getattr(candidate.get("master"), "has_orbit_data", False))
+            and bool(getattr(candidate.get("slave"), "has_orbit_data", False))
+        ) else 0.0
 
         aoi_gain = 0.0
         redundancy_penalty = 0.0
@@ -1153,10 +1244,12 @@ class SpatialService:
                 redundancy_penalty = max(0.0, min(overlap_area / candidate_area, 1.0))
 
         return (
-            0.35 * time_score
-            + 0.20 * spatial_score
+            0.30 * time_score
+            + 0.15 * spatial_score
             + 0.30 * overlap_score
-            + 0.15 * aoi_gain
+            + 0.10 * aoi_gain
+            + 0.10 * source_score
+            + 0.05 * orbit_score
             - float(params.coverage_diversity_penalty or 0.0) * redundancy_penalty
         )
 
@@ -1588,7 +1681,7 @@ class SpatialService:
         slave: RadarDataORM
     ) -> float:
         """
-        Calculate spatial baseline in meters using PostGIS sphere distance.
+        Calculate footprint center distance in meters using PostGIS sphere distance.
         """
         master_alias = RadarDataORM.__table__.alias("master")
         slave_alias = RadarDataORM.__table__.alias("slave")

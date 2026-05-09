@@ -138,7 +138,7 @@
   { zh: '请先训练模型。', en: 'Please train the model first.' },
 
   // PairingPanel
-  { zh: '基于时间基线、空间基线与重叠率筛选干涉对，可选 AOI 限定范围。', en: 'Filter interferometric pairs by temporal baseline, spatial baseline, and overlap ratio. Optional AOI constraint.' },
+  { zh: '基于时间基线、footprint 中心距与两景 footprint 最小重叠率筛选干涉对，可选 AOI 限定范围。', en: 'Filter interferometric pairs by temporal baseline, footprint center distance, and pair footprint overlap ratio. Optional AOI constraint.' },
   { zh: '配对', en: 'Pair' },
   { zh: '时序准备', en: 'Timeseries Prep' },
   { zh: '结果与刷新', en: 'Results & Refresh' },

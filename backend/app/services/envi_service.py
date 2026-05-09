@@ -530,6 +530,7 @@ def _write_envi_run_sidecar(
             "slave_polarization": pair_meta.get("slave_polarization"),
             "time_baseline_days": pair_meta.get("time_baseline_days"),
             "spatial_baseline_meters": pair_meta.get("spatial_baseline_meters"),
+            "scene_center_distance_meters": pair_meta.get("scene_center_distance_meters"),
             "scene_pair_uid": pair_meta.get("scene_pair_uid") or pair_meta.get("pair_uid"),
             "pair_uid": pair_meta.get("pair_uid") or pair_meta.get("scene_pair_uid"),
             "network_run_id": pair_meta.get("network_run_id"),

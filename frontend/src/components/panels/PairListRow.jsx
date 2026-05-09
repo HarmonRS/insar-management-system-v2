@@ -7,6 +7,7 @@ function PairListRow({
     onVisualizePair,
     onTogglePairVisibility,
 }) {
+    const centerDistance = pair.scene_center_distance_meters ?? pair.spatial_baseline_meters;
     return (
         <li className="pair-item">
             <input
@@ -20,7 +21,7 @@ function PairListRow({
                 <strong>{pair.task_name}</strong>
                 <div className="pair-details">
                     <span>时基: {pair.time_baseline_days}d</span>
-                    <span>空基: {pair.spatial_baseline_meters.toFixed(2)}m</span>
+                    <span>中心距: {Number(centerDistance || 0).toFixed(2)}m</span>
                 </div>
             </div>
             <button

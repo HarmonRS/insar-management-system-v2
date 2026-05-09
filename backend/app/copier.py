@@ -1,6 +1,8 @@
 ﻿import os
 import shutil
 import asyncio
+import tempfile
+import zipfile
 from datetime import datetime
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -34,12 +36,126 @@ async def _log_and_update(task_id: str, message: str, progress: Optional[int] = 
 def find_dinsar_source_to_copy(path: str) -> str:
     """
     Find D-InSAR source path.
-    Prefer the envi_import subfolder when present and non-empty.
+    D-InSAR pairing/distribution works on the raw source product directory.
     """
-    envi_path = os.path.join(path, "envi_import")
-    if os.path.isdir(envi_path) and os.listdir(envi_path):
-        return envi_path
     return path
+
+
+def _resolve_orbit_dest_path(
+    orbit_dir: str,
+    role: str,
+    source_path: str,
+    used_dest_paths: Dict[str, str],
+) -> str:
+    base_name = os.path.basename(source_path)
+    dest_path = os.path.join(orbit_dir, base_name)
+    dest_key = os.path.normcase(os.path.abspath(dest_path))
+    source_key = os.path.normcase(os.path.abspath(source_path))
+    if dest_key not in used_dest_paths or used_dest_paths[dest_key] == source_key:
+        return dest_path
+
+    role_path = os.path.join(orbit_dir, f"{role}_{base_name}")
+    role_key = os.path.normcase(os.path.abspath(role_path))
+    if role_key not in used_dest_paths or used_dest_paths[role_key] == source_key:
+        return role_path
+
+    stem, ext = os.path.splitext(base_name)
+    counter = 2
+    while True:
+        numbered_path = os.path.join(orbit_dir, f"{role}_{stem}_{counter}{ext}")
+        numbered_key = os.path.normcase(os.path.abspath(numbered_path))
+        if numbered_key not in used_dest_paths:
+            return numbered_path
+        counter += 1
+
+
+async def _copy_dinsar_orbit_files(
+    task_id: str,
+    item: Dict[str, Any],
+    task_dir: str,
+    include_orbit_files: bool,
+) -> List[Dict[str, Any]]:
+    if not include_orbit_files:
+        return []
+
+    orbit_dir = os.path.join(task_dir, "orbit")
+    copied_by_source: Dict[str, str] = {}
+    used_dest_paths: Dict[str, str] = {}
+    orbit_entries: List[Dict[str, Any]] = []
+    for role, key in (
+        ("master", "master_orbit_file_path"),
+        ("slave", "slave_orbit_file_path"),
+    ):
+        raw_path = item.get(key)
+        if not raw_path:
+            await _log_and_update(task_id, f" -> {role} orbit missing in catalog metadata")
+            orbit_entries.append(
+                {
+                    "role": role,
+                    "source_path": None,
+                    "copied": False,
+                    "reason": "missing_orbit_path",
+                }
+            )
+            continue
+
+        source_path = os.path.normpath(os.path.abspath(str(raw_path)))
+        if not os.path.isfile(source_path):
+            await _log_and_update(task_id, f" -> {role} orbit file not found: {source_path}")
+            orbit_entries.append(
+                {
+                    "role": role,
+                    "source_path": source_path,
+                    "copied": False,
+                    "reason": "source_file_not_found",
+                }
+            )
+            continue
+
+        await asyncio.to_thread(os.makedirs, orbit_dir, exist_ok=True)
+        source_key = os.path.normcase(source_path)
+        if source_key in copied_by_source:
+            dest_path = copied_by_source[source_key]
+        else:
+            dest_path = _resolve_orbit_dest_path(orbit_dir, role, source_path, used_dest_paths)
+            await asyncio.to_thread(shutil.copy2, source_path, dest_path)
+            copied_by_source[source_key] = dest_path
+            used_dest_paths[os.path.normcase(os.path.abspath(dest_path))] = source_key
+
+        orbit_entries.append(
+            {
+                "role": role,
+                "source_path": source_path,
+                "relative_path": os.path.relpath(dest_path, start=task_dir),
+                "copied": True,
+            }
+        )
+    return orbit_entries
+
+
+def _zip_task_directory(task_dir: str, zip_path: str) -> None:
+    parent_dir = os.path.dirname(task_dir)
+    temp_zip_path = f"{zip_path}.tmp"
+    try:
+        if os.path.exists(temp_zip_path):
+            os.remove(temp_zip_path)
+        with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for root, dirs, files in os.walk(task_dir):
+                rel_root = os.path.relpath(root, start=parent_dir)
+                for dirname in dirs:
+                    arcname = os.path.join(rel_root, dirname).replace(os.sep, "/") + "/"
+                    archive.writestr(arcname, "")
+                for filename in files:
+                    file_path = os.path.join(root, filename)
+                    arcname = os.path.join(rel_root, filename).replace(os.sep, "/")
+                    archive.write(file_path, arcname)
+        os.replace(temp_zip_path, zip_path)
+    finally:
+        if os.path.exists(temp_zip_path):
+            try:
+                os.remove(temp_zip_path)
+            except OSError:
+                pass
 
 
 async def run_ps_copy_items(task_id: str, items: List[Dict[str, Any]], dest_dir: str) -> None:
@@ -124,10 +240,25 @@ async def run_ps_copy_items(task_id: str, items: List[Dict[str, Any]], dest_dir:
         raise CopyTaskExecutionError(fail_msg) from e
 
 
-async def run_dinsar_copy_items(task_id: str, items: List[Dict[str, Any]], dest_dir: str) -> None:
+async def run_dinsar_copy_items(
+    task_id: str,
+    items: List[Dict[str, Any]],
+    dest_dir: str,
+    *,
+    include_orbit_files: bool = False,
+    export_zip: bool = False,
+) -> None:
     try:
         await task_service.start_task(task_id, message="Starting D-InSAR copy task...")
         await _log_and_update(task_id, f"D-InSAR copy started. Dest: {dest_dir}")
+        await _log_and_update(
+            task_id,
+            (
+                "D-InSAR copy options: "
+                f"include_orbit_files={include_orbit_files}, "
+                f"export_zip={export_zip}"
+            ),
+        )
 
         if not os.path.exists(dest_dir):
             try:
@@ -175,11 +306,22 @@ async def run_dinsar_copy_items(task_id: str, items: List[Dict[str, Any]], dest_
 
             await _log_and_update(task_id, f"[{i}/{total}] Processing: {task_name}")
 
-            task_dir = os.path.join(dest_dir, task_alias)
-            master_dir = os.path.join(task_dir, "master")
-            slave_dir = os.path.join(task_dir, "slave")
-
+            staging_root: Optional[str] = None
             try:
+                if export_zip:
+                    staging_root = await asyncio.to_thread(
+                        tempfile.mkdtemp,
+                        prefix="._dinsar_zip_",
+                        dir=dest_dir,
+                    )
+                    task_dir = os.path.join(staging_root, task_alias)
+                    zip_path = os.path.join(dest_dir, f"{task_alias}.zip")
+                else:
+                    task_dir = os.path.join(dest_dir, task_alias)
+                    zip_path = None
+                master_dir = os.path.join(task_dir, "master")
+                slave_dir = os.path.join(task_dir, "slave")
+
                 master_src_path = find_dinsar_source_to_copy(master_path)
                 if not os.path.exists(master_src_path):
                     await _log_and_update(task_id, f" -> Missing master: {master_src_path}")
@@ -194,6 +336,12 @@ async def run_dinsar_copy_items(task_id: str, items: List[Dict[str, Any]], dest_
 
                 await asyncio.to_thread(shutil.copytree, master_src_path, master_dir, dirs_exist_ok=True)
                 await asyncio.to_thread(shutil.copytree, slave_src_path, slave_dir, dirs_exist_ok=True)
+                orbit_entries = await _copy_dinsar_orbit_files(
+                    task_id,
+                    item,
+                    task_dir,
+                    include_orbit_files,
+                )
                 await asyncio.to_thread(
                     write_pair_metadata,
                     task_dir,
@@ -213,6 +361,12 @@ async def run_dinsar_copy_items(task_id: str, items: List[Dict[str, Any]], dest_
                         "slave_polarization": item.get("slave_polarization"),
                         "time_baseline_days": item.get("time_baseline_days"),
                         "spatial_baseline_meters": item.get("spatial_baseline_meters"),
+                        "scene_center_distance_meters": item.get("scene_center_distance_meters"),
+                        "package_format": "zip" if export_zip else "folder",
+                        "include_orbit_files": bool(include_orbit_files),
+                        "master_orbit_file_path": item.get("master_orbit_file_path"),
+                        "slave_orbit_file_path": item.get("slave_orbit_file_path"),
+                        "orbit_files": orbit_entries,
                         "scene_pair_uid": item.get("scene_pair_uid") or item.get("pair_uid"),
                         "pair_uid": item.get("pair_uid") or item.get("scene_pair_uid"),
                         "network_run_id": item.get("network_run_id"),
@@ -222,6 +376,9 @@ async def run_dinsar_copy_items(task_id: str, items: List[Dict[str, Any]], dest_
                         "copied_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                     },
                 )
+                if export_zip and zip_path:
+                    await asyncio.to_thread(_zip_task_directory, task_dir, zip_path)
+                    await _log_and_update(task_id, f" -> ZIP: {zip_path}")
 
                 await _log_and_update(task_id, " -> Success")
                 success_count += 1
@@ -231,8 +388,14 @@ async def run_dinsar_copy_items(task_id: str, items: List[Dict[str, Any]], dest_
             except Exception as e:
                 await _log_and_update(task_id, f" -> Failed: {e}")
                 failed_count += 1
+            finally:
+                if staging_root:
+                    await asyncio.to_thread(shutil.rmtree, staging_root, ignore_errors=True)
 
-        final_msg = f"D-InSAR copy finished. Success {success_count}, Failed {failed_count}"
+        final_msg = (
+            f"D-InSAR copy finished. Mode {'zip' if export_zip else 'folder'}. "
+            f"Success {success_count}, Failed {failed_count}"
+        )
         await _log_and_update(task_id, final_msg, progress=100)
         if failed_count > 0:
             await task_service.update_task(task_id, status="FAILED", message=final_msg, progress=100)

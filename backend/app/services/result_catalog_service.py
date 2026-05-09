@@ -149,6 +149,11 @@ def _build_pairing_trace_payload(
     task_network_edge_id = getattr(task_item, "network_edge_id", None) if task_item is not None else None
     task_policy_version = getattr(task_item, "policy_version", None) if task_item is not None else None
     task_selection_strategy = getattr(task_item, "selection_strategy", None) if task_item is not None else None
+    task_scene_center_distance = (
+        getattr(task_item, "scene_center_distance_meters", None)
+        if task_item is not None
+        else None
+    )
 
     candidate_network_edge_id = _coerce_optional_int(candidate_meta.get("network_edge_id"))
     task_network_edge_id = _coerce_optional_int(task_network_edge_id)
@@ -175,6 +180,11 @@ def _build_pairing_trace_payload(
         "selection_strategy": _first_text(
             candidate_meta.get("selection_strategy"),
             task_selection_strategy,
+        ),
+        "scene_center_distance_meters": (
+            candidate_meta.get("scene_center_distance_meters")
+            if candidate_meta.get("scene_center_distance_meters") is not None
+            else task_scene_center_distance
         ),
     }
     return {
@@ -240,6 +250,7 @@ def _resolve_candidate_identity(candidate: Dict[str, Any]) -> Dict[str, Any]:
         "slave_polarization",
         "time_baseline_days",
         "spatial_baseline_meters",
+        "scene_center_distance_meters",
     ):
         resolved[field] = run_meta.get(field)
         if resolved[field] in (None, ""):
@@ -608,8 +619,11 @@ class ResultCatalogService:
                     "slave_polarization": metric.slave_polarization,
                     "time_baseline_days": metric.time_baseline_days,
                     "spatial_baseline_meters": metric.spatial_baseline_meters,
+                    "scene_center_distance_meters": metric.scene_center_distance_meters,
                     "scene_overlap_ratio": metric.scene_overlap_ratio,
                     "same_satellite": metric.same_satellite,
+                    "same_satellite_family": metric.same_satellite_family,
+                    "same_look_direction": metric.same_look_direction,
                     "same_imaging_mode": metric.same_imaging_mode,
                     "same_polarization": metric.same_polarization,
                     "status": metric.status,
@@ -721,6 +735,12 @@ class ResultCatalogService:
                 "orbit_direction": None,
                 "time_baseline_days": getattr(task_item, "time_baseline_days", None) or candidate_meta.get("time_baseline_days"),
                 "spatial_baseline_meters": getattr(task_item, "spatial_baseline_meters", None) or candidate_meta.get("spatial_baseline_meters"),
+                "scene_center_distance_meters": (
+                    getattr(task_item, "scene_center_distance_meters", None)
+                    or candidate_meta.get("scene_center_distance_meters")
+                    or getattr(task_item, "spatial_baseline_meters", None)
+                    or candidate_meta.get("spatial_baseline_meters")
+                ),
                 "grid_size_m": profile_params.get("target_grid_size_m") or profile_params.get("geocoding_pixel_size_m"),
                 "radar_wavelength": profile_params.get("wavelength"),
                 "orbit_clip_margin": profile_params.get("orbit_margin_sec"),
@@ -1138,6 +1158,7 @@ class ResultCatalogService:
             orbit_direction=profile_payload.get("orbit_direction"),
             time_baseline_days=profile_payload.get("time_baseline_days"),
             spatial_baseline_meters=profile_payload.get("spatial_baseline_meters"),
+            scene_center_distance_meters=profile_payload.get("scene_center_distance_meters"),
             grid_size_m=profile_payload.get("grid_size_m"),
             radar_wavelength=profile_payload.get("radar_wavelength"),
             orbit_clip_margin=profile_payload.get("orbit_clip_margin"),
@@ -1532,6 +1553,7 @@ class ResultCatalogService:
                     "orbit_direction": profile.orbit_direction,
                     "time_baseline_days": profile.time_baseline_days,
                     "spatial_baseline_meters": profile.spatial_baseline_meters,
+                    "scene_center_distance_meters": profile.scene_center_distance_meters,
                     "grid_size_m": profile.grid_size_m,
                     "radar_wavelength": profile.radar_wavelength,
                     "orbit_clip_margin": profile.orbit_clip_margin,

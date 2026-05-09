@@ -266,6 +266,11 @@ async def create_dinsar_batch_endpoint(
             slave_polarization=slave.polarization,
             time_baseline_days=pair.time_baseline_days,
             spatial_baseline_meters=pair.spatial_baseline_meters,
+            scene_center_distance_meters=(
+                pair.scene_center_distance_meters
+                if pair.scene_center_distance_meters is not None
+                else pair.spatial_baseline_meters
+            ),
             status="PENDING",
         )
         db.add(item)

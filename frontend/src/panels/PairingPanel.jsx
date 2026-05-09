@@ -19,8 +19,8 @@ export default function PairingPanel({
                 <div className="panel-card-title">{en ? 'Pair Planning' : '配对规划'}</div>
                 <p className="panel-card-desc">
                     {en
-                        ? 'Filter interferometric pairs by temporal baseline, spatial baseline, and overlap ratio. Optional AOI constraint.'
-                        : '基于时间基线、空间基线与重叠率筛选干涉对，可选 AOI 限定范围。'
+                        ? 'Filter interferometric pairs by temporal baseline, footprint center distance, and pair footprint overlap ratio. Optional AOI constraint.'
+                        : '基于时间基线、footprint 中心距与两景 footprint 最小重叠率筛选干涉对，可选 AOI 限定范围。'
                     }
                 </p>
                 <div className="header-buttons" style={{ marginTop: '10px' }}>

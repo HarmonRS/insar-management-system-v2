@@ -11,23 +11,23 @@ const STRATEGY_DESCRIPTIONS = {
         title: '全部配对（默认）',
         description: '列出所有满足约束条件的候选干涉对，由用户自行筛选。',
         details: [
-            '• 系统遍历所有影像组合，保留满足时间基线、空间基线和重叠率阈值的配对',
+            '• 系统遍历所有影像组合，保留满足时间基线、footprint 中心距和两景 footprint 最小重叠率的配对',
             '• 结果按时间排序，用户可在配对列表中逐一勾选或取消',
             '• 适用于研究型场景，需要精确控制每一对干涉组合',
             '• 配对数量可能较多，建议配合 AOI 和日期范围缩小结果'
         ],
-        params: '参数：时间基线范围、空间基线上限、最小重叠率'
+        params: '参数：时间基线范围、中心距上限、两景 footprint 最小重叠率'
     },
     sbas: {
         title: 'SBAS (短基线子集)',
         description: '基于短基线原则的配对策略，通过覆盖优化算法自动筛选配对。',
         details: [
-            '• 优先选择时间和空间基线都较短的配对',
+            '• 优先选择时间间隔和 footprint 中心距都较短的配对',
             '• 通过覆盖优化算法，去除冗余配对，确保时间序列连续性',
             '• 适用于大范围、长时间序列的形变监测',
             '• 配对数量会比"全部配对"少，但覆盖更均匀'
         ],
-        params: '参数：时间基线、空间基线、重叠率阈值、覆盖多样性惩罚'
+        params: '参数：时间基线、中心距、两景 footprint 最小重叠率、覆盖多样性惩罚'
     },
     sequential: {
         title: 'Sequential (顺序配对)',
@@ -321,24 +321,24 @@ function PairingModal({
                         </div>
                     )}
 
-                    {/* 基线和重叠率约束 */}
+                    {/* 时间、中心距和重叠率约束 */}
                     <div className="form-group">
                         <label>时间基线最小值 (天):</label>
                         <input type="number" min="0" value={pairingParams.time_baseline_min}
                             onChange={e => setPairingParams({...pairingParams, time_baseline_min: parseInt(e.target.value) || 0})} />
                     </div>
                     <div className="form-group">
-                        <label>时间基线最大值 (天):</label>
+                        <label>最大时间间隔 (天):</label>
                         <input type="number" min="1" value={pairingParams.time_baseline_max}
                             onChange={e => setPairingParams({...pairingParams, time_baseline_max: parseInt(e.target.value) || 90})} />
                     </div>
                     <div className="form-group">
-                        <label>最小重叠率 (0-1):</label>
+                        <label>两景 footprint 最小重叠率 (0-1):</label>
                         <input type="number" step="0.1" min="0" max="1" value={pairingParams.overlap_threshold}
                             onChange={e => setPairingParams({...pairingParams, overlap_threshold: parseFloat(e.target.value) || 0})} />
                     </div>
                     <div className="form-group">
-                        <label>空间基线上限 (米):</label>
+                        <label>footprint 中心距上限 (米):</label>
                         <input type="number" min="0" value={pairingParams.spatial_baseline_max_meters}
                             onChange={e => setPairingParams({...pairingParams, spatial_baseline_max_meters: parseInt(e.target.value) || 3000})} />
                     </div>

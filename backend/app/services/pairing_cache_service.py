@@ -28,6 +28,38 @@ def _scene_uid_expr(alias: str) -> str:
     )
 
 
+def _satellite_family_expr(alias: str) -> str:
+    compact = (
+        f"upper(replace(replace(replace(COALESCE({alias}.satellite, ''), '-', ''), '_', ''), ' ', ''))"
+    )
+    return (
+        f"COALESCE(NULLIF({alias}.satellite_family, ''), "
+        f"CASE "
+        f"WHEN {compact} IN ('LT1', 'LT1A', 'LT1B', 'LUTAN1', 'LUTAN1A', 'LUTAN1B') THEN 'LT1' "
+        f"WHEN {compact} IN ('S1', 'S1A', 'S1B', 'SENTINEL1', 'SENTINEL1A', 'SENTINEL1B') THEN 'S1' "
+        f"WHEN NULLIF({alias}.satellite, '') IS NOT NULL THEN upper({alias}.satellite) "
+        f"ELSE NULL END)"
+    )
+
+
+def _same_satellite_family_expr(left_alias: str, right_alias: str) -> str:
+    left_family = _satellite_family_expr(left_alias)
+    right_family = _satellite_family_expr(right_alias)
+    return (
+        f"(NULLIF({left_family}, '') IS NOT NULL "
+        f"AND NULLIF({right_family}, '') IS NOT NULL "
+        f"AND {left_family} = {right_family})"
+    )
+
+
+def _same_look_direction_expr(left_alias: str, right_alias: str) -> str:
+    return (
+        f"(NULLIF({left_alias}.look_direction, '') IS NULL "
+        f"OR NULLIF({right_alias}.look_direction, '') IS NULL "
+        f"OR {left_alias}.look_direction = {right_alias}.look_direction)"
+    )
+
+
 def _orientation_is_left_master_expr(left_alias: str, right_alias: str) -> str:
     left_uid = _scene_uid_expr(left_alias)
     right_uid = _scene_uid_expr(right_alias)
@@ -48,6 +80,9 @@ def _hard_constraints_expr(left_alias: str, right_alias: str) -> str:
         f"AND {left_alias}.orbit_direction IS NOT NULL "
         f"AND {right_alias}.orbit_direction IS NOT NULL "
         f"AND {left_alias}.orbit_direction = {right_alias}.orbit_direction "
+        f"AND COALESCE({left_alias}.insar_source_ready, false) "
+        f"AND COALESCE({right_alias}.insar_source_ready, false) "
+        f"AND { _same_look_direction_expr(left_alias, right_alias) } "
         f"AND ST_Intersects({left_alias}.geom, {right_alias}.geom)"
     )
 
@@ -55,6 +90,9 @@ def _hard_constraints_expr(left_alias: str, right_alias: str) -> str:
 def _full_rebuild_insert_sql() -> str:
     master_uid = _scene_uid_expr("m")
     slave_uid = _scene_uid_expr("s")
+    center_distance = "ST_DistanceSphere(ST_Centroid(m.geom), ST_Centroid(s.geom))::double precision"
+    master_family = _satellite_family_expr("m")
+    slave_family = _satellite_family_expr("s")
     return f"""
         INSERT INTO pairing_metric_cache (
             master_scene_ref_id,
@@ -66,19 +104,26 @@ def _full_rebuild_insert_sql() -> str:
             orientation_rule_version,
             time_baseline_days,
             spatial_baseline_meters,
+            scene_center_distance_meters,
             scene_overlap_ratio,
             orbit_direction,
             same_satellite,
+            same_satellite_family,
+            same_look_direction,
             same_imaging_mode,
             same_polarization,
             master_imaging_date,
             slave_imaging_date,
             master_satellite,
             slave_satellite,
+            master_satellite_family,
+            slave_satellite_family,
             master_imaging_mode,
             slave_imaging_mode,
             master_polarization,
             slave_polarization,
+            master_look_direction,
+            slave_look_direction,
             master_file_path,
             slave_file_path,
             status,
@@ -93,13 +138,16 @@ def _full_rebuild_insert_sql() -> str:
             :metric_version AS metric_version,
             :orientation_rule_version AS orientation_rule_version,
             ABS(to_date(s.imaging_date, 'YYYYMMDD') - to_date(m.imaging_date, 'YYYYMMDD')) AS time_baseline_days,
-            ST_DistanceSphere(ST_Centroid(m.geom), ST_Centroid(s.geom))::double precision AS spatial_baseline_meters,
+            {center_distance} AS spatial_baseline_meters,
+            {center_distance} AS scene_center_distance_meters,
             (
                 ST_Area(ST_Intersection(m.geom, s.geom)::geography) /
                 NULLIF(GREATEST(ST_Area(m.geom::geography), ST_Area(s.geom::geography)), 0)
             )::double precision AS scene_overlap_ratio,
             m.orbit_direction,
             (m.satellite IS NOT NULL AND s.satellite IS NOT NULL AND m.satellite = s.satellite) AS same_satellite,
+            { _same_satellite_family_expr('m', 's') } AS same_satellite_family,
+            { _same_look_direction_expr('m', 's') } AS same_look_direction,
             (
                 NULLIF(m.imaging_mode, '') IS NOT NULL
                 AND NULLIF(s.imaging_mode, '') IS NOT NULL
@@ -114,10 +162,14 @@ def _full_rebuild_insert_sql() -> str:
             s.imaging_date AS slave_imaging_date,
             m.satellite AS master_satellite,
             s.satellite AS slave_satellite,
+            {master_family} AS master_satellite_family,
+            {slave_family} AS slave_satellite_family,
             m.imaging_mode AS master_imaging_mode,
             s.imaging_mode AS slave_imaging_mode,
             m.polarization AS master_polarization,
             s.polarization AS slave_polarization,
+            m.look_direction AS master_look_direction,
+            s.look_direction AS slave_look_direction,
             m.file_path AS master_file_path,
             s.file_path AS slave_file_path,
             'READY' AS status,
@@ -133,6 +185,9 @@ def _incremental_insert_sql() -> str:
     dirty_uid = _scene_uid_expr("d")
     other_uid = _scene_uid_expr("o")
     dirty_is_master = _orientation_is_left_master_expr("d", "o")
+    center_distance = "ST_DistanceSphere(ST_Centroid(d.geom), ST_Centroid(o.geom))::double precision"
+    dirty_family = _satellite_family_expr("d")
+    other_family = _satellite_family_expr("o")
     return f"""
         INSERT INTO pairing_metric_cache (
             master_scene_ref_id,
@@ -144,19 +199,26 @@ def _incremental_insert_sql() -> str:
             orientation_rule_version,
             time_baseline_days,
             spatial_baseline_meters,
+            scene_center_distance_meters,
             scene_overlap_ratio,
             orbit_direction,
             same_satellite,
+            same_satellite_family,
+            same_look_direction,
             same_imaging_mode,
             same_polarization,
             master_imaging_date,
             slave_imaging_date,
             master_satellite,
             slave_satellite,
+            master_satellite_family,
+            slave_satellite_family,
             master_imaging_mode,
             slave_imaging_mode,
             master_polarization,
             slave_polarization,
+            master_look_direction,
+            slave_look_direction,
             master_file_path,
             slave_file_path,
             status,
@@ -176,13 +238,16 @@ def _incremental_insert_sql() -> str:
             :metric_version AS metric_version,
             :orientation_rule_version AS orientation_rule_version,
             ABS(to_date(o.imaging_date, 'YYYYMMDD') - to_date(d.imaging_date, 'YYYYMMDD')) AS time_baseline_days,
-            ST_DistanceSphere(ST_Centroid(d.geom), ST_Centroid(o.geom))::double precision AS spatial_baseline_meters,
+            {center_distance} AS spatial_baseline_meters,
+            {center_distance} AS scene_center_distance_meters,
             (
                 ST_Area(ST_Intersection(d.geom, o.geom)::geography) /
                 NULLIF(GREATEST(ST_Area(d.geom::geography), ST_Area(o.geom::geography)), 0)
             )::double precision AS scene_overlap_ratio,
             d.orbit_direction,
             (d.satellite IS NOT NULL AND o.satellite IS NOT NULL AND d.satellite = o.satellite) AS same_satellite,
+            { _same_satellite_family_expr('d', 'o') } AS same_satellite_family,
+            { _same_look_direction_expr('d', 'o') } AS same_look_direction,
             (
                 NULLIF(d.imaging_mode, '') IS NOT NULL
                 AND NULLIF(o.imaging_mode, '') IS NOT NULL
@@ -197,10 +262,14 @@ def _incremental_insert_sql() -> str:
             CASE WHEN {dirty_is_master} THEN o.imaging_date ELSE d.imaging_date END AS slave_imaging_date,
             CASE WHEN {dirty_is_master} THEN d.satellite ELSE o.satellite END AS master_satellite,
             CASE WHEN {dirty_is_master} THEN o.satellite ELSE d.satellite END AS slave_satellite,
+            CASE WHEN {dirty_is_master} THEN {dirty_family} ELSE {other_family} END AS master_satellite_family,
+            CASE WHEN {dirty_is_master} THEN {other_family} ELSE {dirty_family} END AS slave_satellite_family,
             CASE WHEN {dirty_is_master} THEN d.imaging_mode ELSE o.imaging_mode END AS master_imaging_mode,
             CASE WHEN {dirty_is_master} THEN o.imaging_mode ELSE d.imaging_mode END AS slave_imaging_mode,
             CASE WHEN {dirty_is_master} THEN d.polarization ELSE o.polarization END AS master_polarization,
             CASE WHEN {dirty_is_master} THEN o.polarization ELSE d.polarization END AS slave_polarization,
+            CASE WHEN {dirty_is_master} THEN d.look_direction ELSE o.look_direction END AS master_look_direction,
+            CASE WHEN {dirty_is_master} THEN o.look_direction ELSE d.look_direction END AS slave_look_direction,
             CASE WHEN {dirty_is_master} THEN d.file_path ELSE o.file_path END AS master_file_path,
             CASE WHEN {dirty_is_master} THEN o.file_path ELSE d.file_path END AS slave_file_path,
             'READY' AS status,
@@ -228,7 +297,11 @@ class PairingCacheService:
         return state
 
     async def _count_pair_rows(self, db: AsyncSession) -> int:
-        result = await db.execute(select(func.count(PairingMetricCacheORM.id)))
+        result = await db.execute(
+            select(func.count(PairingMetricCacheORM.id)).where(
+                PairingMetricCacheORM.metric_version == pairing_state_service.metric_version
+            )
+        )
         return int(result.scalar_one() or 0)
 
     async def _count_scene_rows(self, db: AsyncSession) -> int:
@@ -381,6 +454,17 @@ class PairingCacheService:
         dirty_scene_count = len(dirty_scene_ids)
         pair_count = await self._count_pair_rows(db)
         scene_count = await self._count_scene_rows(db)
+
+        if dirty_scene_count == 0 and self._should_full_rebuild(
+            dirty_scene_count=dirty_scene_count,
+            scene_count=scene_count,
+            pair_count=pair_count,
+            force_full=force_full,
+        ):
+            result = await self.rebuild_metric_cache(db, commit=commit)
+            result["trigger_dirty_scene_count"] = dirty_scene_count
+            result["forced"] = force_full
+            return result
 
         if dirty_scene_count == 0:
             summary = await self._finalize_state_success(db, full_rebuild=False)

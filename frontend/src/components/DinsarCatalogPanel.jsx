@@ -476,7 +476,7 @@ export default function DinsarCatalogPanel({
                   <MetaField label="主影像日期" value={selectedProduct.profile?.master_imaging_date} />
                   <MetaField label="从影像日期" value={selectedProduct.profile?.slave_imaging_date} />
                   <MetaField label="时间基线" value={selectedProduct.profile?.time_baseline_days} />
-                  <MetaField label="空间基线" value={selectedProduct.profile?.spatial_baseline_meters} />
+                  <MetaField label="footprint 中心距" value={selectedProduct.profile?.scene_center_distance_meters ?? selectedProduct.profile?.spatial_baseline_meters} />
                 </div>
                 <div className="dinsar-catalog-section-card">
                   <div className="dinsar-catalog-section-title">空间范围</div>
@@ -521,7 +521,7 @@ export default function DinsarCatalogPanel({
                       <MetaField label="主从模式" value={`${selectedPairingMetric?.master_imaging_mode || '-'} / ${selectedPairingMetric?.slave_imaging_mode || '-'}`} />
                       <MetaField label="主从极化" value={`${selectedPairingMetric?.master_polarization || '-'} / ${selectedPairingMetric?.slave_polarization || '-'}`} />
                       <MetaField label="时间基线" value={selectedPairingMetric?.time_baseline_days} />
-                      <MetaField label="空间基线" value={selectedPairingMetric?.spatial_baseline_meters} />
+                      <MetaField label="footprint 中心距" value={selectedPairingMetric?.scene_center_distance_meters ?? selectedPairingMetric?.spatial_baseline_meters} />
                     </div>
                   </div>
                 )}

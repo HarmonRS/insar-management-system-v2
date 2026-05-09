@@ -33,6 +33,8 @@ class CopyBatchRequest(BaseModel):
     batch_id: str = Field(max_length=COPY_BATCH_TEXT_MAX_LENGTH)
     dest_dir: str = Field(max_length=COPY_BATCH_TEXT_MAX_LENGTH)
     copy_statuses: Optional[List[str]] = None
+    include_orbit_files: bool = False
+    export_zip: bool = False
 
     @field_validator("batch_id", "dest_dir", mode="before")
     @classmethod
@@ -138,6 +140,8 @@ async def copy_dinsar_pairs_endpoint(
             "file_type": "DINSAR_PAIRS",
             "batch_id": request.batch_id,
             "copy_statuses": copy_statuses,
+            "include_orbit_files": bool(request.include_orbit_files),
+            "export_zip": bool(request.export_zip),
         }
         task_id = await task_service.create_task("COPY_DATA", f"D-InSAR 数据分发: {request.dest_dir}", params=params)
 
@@ -146,6 +150,8 @@ async def copy_dinsar_pairs_endpoint(
             "dest_dir": request.dest_dir,
             "batch_id": request.batch_id,
             "copy_statuses": copy_statuses,
+            "include_orbit_files": bool(request.include_orbit_files),
+            "export_zip": bool(request.export_zip),
         }
         await job_queue_service.create_job("COPY_DATA", payload=payload, task_id=task_id)
         await _add_operation_audit_log(
@@ -158,6 +164,8 @@ async def copy_dinsar_pairs_endpoint(
                 "batch_id": request.batch_id,
                 "dest_dir": request.dest_dir,
                 "copy_statuses": copy_statuses,
+                "include_orbit_files": bool(request.include_orbit_files),
+                "export_zip": bool(request.export_zip),
             },
         )
         await db.commit()

@@ -33,7 +33,13 @@ from ..config import settings
 from ..models import (
     RadarDataORM, RadarData, DinsarResultORM, HazardPointORM, HazardPoint, ScanStateORM
 )
-from ..utils import get_parser, RADAR_PARSERS, find_xml_file, parse_xml_metadata
+from ..utils import (
+    get_parser,
+    RADAR_PARSERS,
+    find_xml_file,
+    normalize_satellite_family,
+    parse_xml_metadata,
+)
 from .task_service import task_service
 from .image_service import image_service
 from .orbit_converter import get_source_orbit_inventory, sync_orbit_pools
@@ -50,7 +56,7 @@ def _safe_mtime(path: str) -> float:
 _DATE_RE = re.compile(r"^\d{8}$")
 
 
-def _valid_imaging_date(value: str) -> bool:
+def _valid_imaging_date(value: Optional[str]) -> bool:
     return bool(value and _DATE_RE.match(value))
 
 
@@ -61,6 +67,62 @@ def _extract_date_from_text(value: Optional[str]) -> Optional[str]:
     if len(digits) >= 8:
         return digits[:8]
     return None
+
+
+def _text_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    return text_value or None
+
+
+def _bool_or_none(value: Any) -> Optional[bool]:
+    if value is None or isinstance(value, bool):
+        return value
+    text_value = str(value).strip().lower()
+    if text_value in {"1", "true", "yes", "y"}:
+        return True
+    if text_value in {"0", "false", "no", "n"}:
+        return False
+    return None
+
+
+def _build_insar_source_readiness(
+    meta: Dict[str, Any],
+    coverage_polygon: Optional[List[Tuple[float, float]]],
+) -> Tuple[bool, Optional[str]]:
+    reasons: List[str] = []
+    if not coverage_polygon or len(coverage_polygon) < 3:
+        reasons.append("missing_footprint")
+    if not _valid_imaging_date(_text_or_none(meta.get("imaging_date"))):
+        reasons.append("missing_date")
+    for field_name, reason in (
+        ("orbit_direction", "missing_orbit_direction"),
+        ("imaging_mode", "missing_imaging_mode"),
+        ("polarization", "missing_polarization"),
+        ("satellite_family", "missing_satellite_family"),
+    ):
+        if not _text_or_none(meta.get(field_name)):
+            reasons.append(reason)
+
+    geocoded_flag = _bool_or_none(meta.get("geocoded_flag"))
+    if geocoded_flag is True:
+        reasons.append("geocoded_product")
+
+    complex_tokens = {
+        _text_or_none(meta.get("image_data_type")),
+        _text_or_none(meta.get("product_type")),
+        _text_or_none(meta.get("source_product_token")),
+        _text_or_none(meta.get("product_variant")),
+    }
+    normalized_tokens = {str(token).strip().upper() for token in complex_tokens if token}
+    is_complex_source = bool(normalized_tokens.intersection({"COMPLEX", "SLC", "SSC"}))
+    if not is_complex_source:
+        reasons.append("not_complex_source")
+
+    if reasons:
+        return False, ";".join(reasons)
+    return True, None
 
 
 def _iter_dirs(root: str, last_mtime: float):
@@ -586,20 +648,31 @@ class DataService:
                             continue
                         merged_meta[key] = value
 
-                satellite = merged_meta.get("satellite")
-                imaging_date = merged_meta.get("imaging_date")
-                imaging_mode = merged_meta.get("imaging_mode")
-                polarization = merged_meta.get("polarization")
-                orbit_direction = merged_meta.get("orbit_direction")
-                satellite_mode = merged_meta.get("satellite_mode")
-                receiving_station = merged_meta.get("receiving_station")
-                orbit_circle = merged_meta.get("orbit_circle")
+                satellite = _text_or_none(merged_meta.get("satellite"))
+                imaging_date = _text_or_none(merged_meta.get("imaging_date"))
+                imaging_mode = _text_or_none(merged_meta.get("imaging_mode"))
+                polarization = _text_or_none(merged_meta.get("polarization"))
+                orbit_direction = _text_or_none(merged_meta.get("orbit_direction"))
+                satellite_mode = _text_or_none(merged_meta.get("satellite_mode"))
+                receiving_station = _text_or_none(merged_meta.get("receiving_station"))
+                orbit_circle = _text_or_none(merged_meta.get("orbit_circle"))
                 scene_center_lon = merged_meta.get("scene_center_lon")
                 scene_center_lat = merged_meta.get("scene_center_lat")
-                acquisition_time_utc = merged_meta.get("acquisition_time_utc")
-                product_type = merged_meta.get("product_type")
-                product_level = merged_meta.get("product_level")
-                product_unique_id = merged_meta.get("product_unique_id")
+                acquisition_time_utc = _text_or_none(merged_meta.get("acquisition_time_utc"))
+                product_type = _text_or_none(merged_meta.get("product_type"))
+                source_product_token = _text_or_none(merged_meta.get("source_product_token"))
+                image_data_type = _text_or_none(merged_meta.get("image_data_type"))
+                image_data_format = _text_or_none(merged_meta.get("image_data_format"))
+                product_variant = _text_or_none(merged_meta.get("product_variant"))
+                product_level = _text_or_none(merged_meta.get("product_level"))
+                product_unique_id = _text_or_none(merged_meta.get("product_unique_id"))
+                satellite_family = normalize_satellite_family(
+                    _text_or_none(merged_meta.get("satellite_family")) or satellite
+                )
+                look_direction = _text_or_none(merged_meta.get("look_direction"))
+                if look_direction:
+                    look_direction = look_direction.upper()
+                geocoded_flag = _bool_or_none(merged_meta.get("geocoded_flag"))
 
                 if not satellite:
                     continue
@@ -635,9 +708,27 @@ class DataService:
                     scene_center_lon = scene_center_lon if scene_center_lon is not None else poly.centroid.x
                     scene_center_lat = scene_center_lat if scene_center_lat is not None else poly.centroid.y
 
+                readiness_meta = {
+                    "satellite_family": satellite_family,
+                    "imaging_date": imaging_date,
+                    "imaging_mode": imaging_mode,
+                    "orbit_direction": orbit_direction,
+                    "polarization": polarization,
+                    "product_type": product_type,
+                    "source_product_token": source_product_token,
+                    "image_data_type": image_data_type,
+                    "product_variant": product_variant,
+                    "geocoded_flag": geocoded_flag,
+                }
+                insar_source_ready, insar_source_reason = _build_insar_source_readiness(
+                    readiness_meta,
+                    coverage_polygon,
+                )
+
                 data_to_upsert = {
                     "unique_id": unique_id,
                     "satellite": satellite,
+                    "satellite_family": satellite_family,
                     "imaging_date": imaging_date,
                     "imaging_mode": imaging_mode,
                     "orbit_direction": orbit_direction,
@@ -649,8 +740,16 @@ class DataService:
                     "scene_center_lat": scene_center_lat,
                     "acquisition_time_utc": acquisition_time_utc,
                     "product_type": product_type,
+                    "source_product_token": source_product_token,
+                    "image_data_type": image_data_type,
+                    "image_data_format": image_data_format,
+                    "product_variant": product_variant,
                     "product_level": product_level,
                     "product_unique_id": product_unique_id,
+                    "look_direction": look_direction,
+                    "geocoded_flag": geocoded_flag,
+                    "insar_source_ready": insar_source_ready,
+                    "insar_source_reason": insar_source_reason,
                     "file_path": radar_folder_path,
                     "has_orbit_data": has_orbit_data,
                     "orbit_file_path": orbit_file_path,

@@ -18,7 +18,7 @@ from ..models import (
 
 
 PAIRING_CACHE_SCOPE_GLOBAL = "global"
-DEFAULT_PAIRING_METRIC_VERSION = "2026.04.v1"
+DEFAULT_PAIRING_METRIC_VERSION = "2026.05.raw.v1"
 PAIRING_ORIENTATION_RULE_VERSION = "date_then_scene_uid_v1"
 
 
@@ -66,7 +66,11 @@ class PairingStateService:
         return int(result.scalar_one() or 0)
 
     async def _count_metric_cache_rows(self, db: AsyncSession) -> int:
-        result = await db.execute(select(func.count(PairingMetricCacheORM.id)))
+        result = await db.execute(
+            select(func.count(PairingMetricCacheORM.id)).where(
+                PairingMetricCacheORM.metric_version == self.metric_version
+            )
+        )
         return int(result.scalar_one() or 0)
 
     async def _get_global_state(self, db: AsyncSession) -> Optional[PairingCacheStateORM]:
@@ -135,7 +139,12 @@ class PairingStateService:
             await db.flush()
             created = True
 
-        state.metric_version = state.metric_version or self.metric_version
+        if state.metric_version != self.metric_version:
+            state.metric_version = self.metric_version
+            state.status = "DIRTY"
+            state.last_error = None
+        else:
+            state.metric_version = state.metric_version or self.metric_version
         state.scene_count = scene_count
         state.pair_count = metric_cache_count
         state.dirty_scene_count = dirty_scene_count

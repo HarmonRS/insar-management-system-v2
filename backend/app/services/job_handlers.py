@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from .. import database
 from ..config import settings
-from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskItemORM, PsTaskItemORM, SARSceneGeoORM, FloodDetectionORM, WaterDetectionORM, GF3ProcessingORM, AiDiagnosisORM
+from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskItemORM, PsTaskItemORM, RadarDataORM, SARSceneGeoORM, FloodDetectionORM, WaterDetectionORM, GF3ProcessingORM, AiDiagnosisORM
 from ..scheduler import scan_data_job
 from .data_service import data_service
 from .dinsar_compat_service import dinsar_compat_service
@@ -287,6 +287,8 @@ async def _handle_copy_data(job: SystemJobORM) -> None:
     dest_dir = payload.get("dest_dir")
     batch_id = payload.get("batch_id")
     copy_statuses = _normalize_copy_statuses(payload.get("copy_statuses"))
+    include_orbit_files = bool(payload.get("include_orbit_files"))
+    export_zip = bool(payload.get("export_zip"))
 
     if not batch_id:
         raise ValueError("COPY_DATA requires batch_id payload.")
@@ -318,6 +320,26 @@ async def _handle_copy_data(job: SystemJobORM) -> None:
                 .where(DinsarTaskItemORM.status.in_(copy_statuses))
                 .order_by(DinsarTaskItemORM.id.asc())
             )
+            task_items = result.scalars().all()
+            orbit_by_path: Dict[str, Optional[str]] = {}
+            if include_orbit_files:
+                scene_paths = [
+                    str(path)
+                    for item in task_items
+                    for path in (item.master_path, item.slave_path)
+                    if path
+                ]
+                if scene_paths:
+                    scene_result = await db.execute(
+                        select(RadarDataORM.file_path, RadarDataORM.orbit_file_path).where(
+                            RadarDataORM.file_path.in_(scene_paths)
+                        )
+                    )
+                    orbit_by_path = {
+                        os.path.normcase(os.path.normpath(str(file_path))): orbit_path
+                        for file_path, orbit_path in scene_result.all()
+                        if file_path
+                    }
             items = [
                 {
                     "task_name": item.task_name,
@@ -335,6 +357,13 @@ async def _handle_copy_data(job: SystemJobORM) -> None:
                     "slave_polarization": item.slave_polarization,
                     "time_baseline_days": item.time_baseline_days,
                     "spatial_baseline_meters": item.spatial_baseline_meters,
+                    "scene_center_distance_meters": item.scene_center_distance_meters,
+                    "master_orbit_file_path": orbit_by_path.get(
+                        os.path.normcase(os.path.normpath(str(item.master_path)))
+                    ) if include_orbit_files and item.master_path else None,
+                    "slave_orbit_file_path": orbit_by_path.get(
+                        os.path.normcase(os.path.normpath(str(item.slave_path)))
+                    ) if include_orbit_files and item.slave_path else None,
                     "scene_pair_uid": item.scene_pair_uid,
                     "pair_uid": item.scene_pair_uid,
                     "network_run_id": item.network_run_id,
@@ -342,13 +371,19 @@ async def _handle_copy_data(job: SystemJobORM) -> None:
                     "policy_version": item.policy_version,
                     "selection_strategy": item.selection_strategy,
                 }
-                for item in result.scalars().all()
+                for item in task_items
             ]
             if not items:
                 raise ValueError(
                     f"No D-InSAR items matched copy statuses: {', '.join(copy_statuses)}"
                 )
-            await run_dinsar_copy_items(job.task_id, items, dest_dir)
+            await run_dinsar_copy_items(
+                job.task_id,
+                items,
+                dest_dir,
+                include_orbit_files=include_orbit_files,
+                export_zip=export_zip,
+            )
             return
 
     raise ValueError(f"Unknown COPY_DATA file_type: {file_type}")

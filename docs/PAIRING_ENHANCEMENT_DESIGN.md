@@ -55,8 +55,8 @@
 
 **参数**：
 - `time_baseline_min/max`：时间基线范围（天）
-- `spatial_baseline_max_meters`：空间基线上限（米）
-- `overlap_threshold`：重叠率阈值
+- `spatial_baseline_max_meters`：footprint 中心距上限（米，兼容字段名保留）
+- `overlap_threshold`：两景 footprint 最小重叠率（兼容字段名保留）
 - `coverage_diversity_penalty`：覆盖多样性惩罚因子
 
 **配对逻辑**：
@@ -214,7 +214,7 @@ if allowed_satellites:
 
 不同卫星需要不同的配对参数：
 
-| 卫星 | 典型时间基线 | 典型空间基线 | 波长 | 备注 |
+| 卫星 | 典型时间基线 | 典型 footprint 中心距上限 | 波长 | 备注 |
 |---|---|---|---|---|
 | LT-1 | 30~90 天 | < 3000 m | L 波段 | 当前系统 |
 | Sentinel-1 | 6~12 天 | < 150 m | C 波段 | 高重访频率 |
@@ -415,8 +415,8 @@ async def find_dinsar_pairs(
 │ ☑ 使用双池模式（不勾选则主辅池合并）             │
 ├─────────────────────────────────────────────────┤
 │ 时间基线: [1] ~ [90] 天                         │
-│ 空间基线上限: [3000] 米                          │
-│ 重叠率阈值: [0.5]                                │
+│ footprint 中心距上限: [3000] 米                  │
+│ 两景 footprint 最小重叠率: [0.5]                 │
 │ 覆盖多样性惩罚: [0.3]                            │
 │                                                  │
 │ ☑ 成像模式一致  ☑ 极化一致  ☑ 仅精轨影像        │
@@ -513,7 +513,7 @@ async def find_dinsar_pairs(
 
 ## 十、未来扩展
 
-1. **基线网络可视化**：时间-空间基线散点图（D3.js / ECharts）
+1. **基线网络可视化**：时间-中心距散点图（D3.js / ECharts）
 2. **配对质量评分**：根据相干性、大气条件预估配对质量
 3. **自动参数推荐**：基于历史配对结果的机器学习推荐
 4. **批量配对模板**：保存常用配对参数为模板
@@ -528,7 +528,7 @@ async def find_dinsar_pairs(
 | 主影像 | Master / Reference | 配对中的参考影像 |
 | 辅影像 | Slave / Secondary | 配对中的从属影像 |
 | 时间基线 | Temporal Baseline | 两景影像的时间间隔 |
-| 空间基线 | Spatial Baseline | 两景影像的空间距离 |
+| footprint 中心距 | Footprint Center Distance | 两景影像 footprint 的中心距离 |
 | 短基线子集 | SBAS (Small Baseline Subset) | 配对策略之一 |
 | 星型配对 | Star Graph | 单主影像配对策略 |
 | 顺序配对 | Sequential Pairing | 时间顺序配对策略 |

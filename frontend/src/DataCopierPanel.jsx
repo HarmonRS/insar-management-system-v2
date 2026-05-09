@@ -13,9 +13,11 @@ const BATCH_API_MAX_PAGES = 200;
 
 const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
   const { t } = useI18n();
-  const [activeTab, setActiveTab] = useState('ps');
+  const [activeTab, setActiveTab] = useState('dinsar');
   const [destDir, setDestDir] = useState('');
   const [copyStatuses, setCopyStatuses] = useState(['COMPLETED']);
+  const [includeDinsarOrbitFiles, setIncludeDinsarOrbitFiles] = useState(false);
+  const [dinsarExportZip, setDinsarExportZip] = useState(false);
   const [batches, setBatches] = useState([]);
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -117,11 +119,16 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
       : `${apiEndpoint}/tools/copy-dinsar-pairs`;
 
     try {
-      const response = await axios.post(endpoint, {
+      const payload = {
         batch_id: selectedBatchId,
         dest_dir: destDir,
         copy_statuses: copyStatuses,
-      }, { withCredentials: true });
+      };
+      if (activeTab === 'dinsar') {
+        payload.include_orbit_files = includeDinsarOrbitFiles;
+        payload.export_zip = dinsarExportZip;
+      }
+      const response = await axios.post(endpoint, payload, { withCredentials: true });
       const taskId = response.data.task_id;
       setTaskId(taskId);
 
@@ -176,6 +183,42 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
         {readOnly && (
           <div style={{ fontSize: '12px', color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '6px', padding: '8px 10px' }}>
             当前账号为只读模式，无法发起复制任务。
+          </div>
+        )}
+        {activeTab === 'dinsar' && (
+          <div
+            className="input-group"
+            style={{
+              border: '1px solid #c7d2fe',
+              background: '#eef2ff',
+              borderRadius: '8px',
+              padding: '10px 12px',
+            }}
+          >
+            <label>D-InSAR 分发设置：</label>
+            <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', marginTop: '8px' }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <input
+                  type="checkbox"
+                  checked={includeDinsarOrbitFiles}
+                  onChange={(event) => setIncludeDinsarOrbitFiles(event.target.checked)}
+                  disabled={status === 'RUNNING' || readOnly}
+                />
+                <span>复制精密轨道到 Task/orbit</span>
+              </label>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <input
+                  type="checkbox"
+                  checked={dinsarExportZip}
+                  onChange={(event) => setDinsarExportZip(event.target.checked)}
+                  disabled={status === 'RUNNING' || readOnly}
+                />
+                <span>导出为 ZIP 压缩包</span>
+              </label>
+            </div>
+            <div style={{ fontSize: '12px', color: '#475569', marginTop: '6px' }}>
+              未勾选 ZIP 时直接导出 Task 文件夹；勾选后每个 Task 输出一个 .zip。
+            </div>
           </div>
         )}
         <div className="input-group">
