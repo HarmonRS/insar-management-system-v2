@@ -10,6 +10,30 @@ import {
 } from '../store';
 import { getSelectedRegionTreeId } from '../utils/appUiHelpers';
 
+const compactDinsarBatchScene = (scene = {}) => ({
+    file_path: scene.file_path || '',
+    satellite: scene.satellite || null,
+    imaging_date: scene.imaging_date || null,
+    imaging_mode: scene.imaging_mode || null,
+    polarization: scene.polarization || null,
+});
+
+const compactDinsarBatchPair = (pair = {}) => ({
+    task_name: pair.task_name || null,
+    task_alias: pair.task_alias || pair.task_name || null,
+    pair_key: pair.pair_key || null,
+    pair_uid: pair.pair_uid || null,
+    network_run_id: pair.network_run_id || null,
+    network_edge_id: pair.network_edge_id ?? null,
+    policy_version: pair.policy_version || null,
+    selection_strategy: pair.selection_strategy || null,
+    time_baseline_days: pair.time_baseline_days ?? null,
+    spatial_baseline_meters: pair.spatial_baseline_meters ?? null,
+    scene_center_distance_meters: pair.scene_center_distance_meters ?? pair.spatial_baseline_meters ?? null,
+    master: compactDinsarBatchScene(pair.master),
+    slave: compactDinsarBatchScene(pair.slave),
+});
+
 export default function usePairingLogic({
     fetchRegionGeometry,
     refreshBatchList,
@@ -116,9 +140,10 @@ export default function usePairingLogic({
             return;
         }
         try {
+            const batchPairs = selectedPairs.map(compactDinsarBatchPair);
             const response = await apiClient.post('/task-batches/dinsar', {
                 name: `DINSAR_${new Date().toISOString().slice(0, 10)}`,
-                pairs: selectedPairs
+                pairs: batchPairs
             });
             const batchId = response.data?.batch_id || '';
             addLog('success', `已创建 D-InSAR 批次: ${batchId || 'OK'}`);

@@ -21,6 +21,12 @@ MAX_SCAN_PATH_LENGTH = read_int_env(
     minimum=64,
     maximum=32767,
 )
+PAIRING_CENTER_DISTANCE_MAX_METERS = read_int_env(
+    "PAIRING_CENTER_DISTANCE_MAX_METERS",
+    20_000_000,
+    minimum=1,
+    maximum=50_000_000,
+)
 
 
 def _normalize_directory_list(value: Any, field_name: str) -> List[str]:
@@ -246,14 +252,15 @@ class PairingRequest(BaseModel):
     time_baseline_min: int = Field(default=1, ge=0, le=3650)
     time_baseline_max: int = Field(default=90, ge=1, le=3650)
     overlap_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
-    spatial_baseline_max_meters: int = Field(default=3000, ge=0, le=100000)
+    spatial_baseline_max_meters: int = Field(default=3000, ge=0, le=PAIRING_CENTER_DISTANCE_MAX_METERS)
+    limit_footprint_center_distance: bool = False
     coverage_diversity_penalty: float = Field(default=0.3, ge=0.0, le=1.0)
     require_same_imaging_mode: bool = True
     require_same_polarization: bool = True
     aoi_overlap_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     max_temporal_baseline_days: Optional[int] = Field(default=None, ge=1, le=3650)
     pair_footprint_overlap_min_ratio: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    footprint_center_distance_max_meters: Optional[int] = Field(default=None, ge=0, le=100000)
+    footprint_center_distance_max_meters: Optional[int] = Field(default=None, ge=0, le=PAIRING_CENTER_DISTANCE_MAX_METERS)
 
     # === 双池日期（新增） ===
     master_date_from: Optional[str] = Field(default=None, pattern=r'^\d{8}$|^$')

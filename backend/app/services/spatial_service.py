@@ -169,11 +169,13 @@ class SpatialService:
                 PairingMetricCacheORM.status == "READY",
                 PairingMetricCacheORM.time_baseline_days >= params.time_baseline_min,
                 PairingMetricCacheORM.time_baseline_days <= params.time_baseline_max,
-                center_distance_expr <= params.spatial_baseline_max_meters,
                 PairingMetricCacheORM.scene_overlap_ratio >= params.overlap_threshold,
                 PairingMetricCacheORM.same_look_direction.is_(True),
             )
         )
+
+        if params.limit_footprint_center_distance:
+            stmt = stmt.where(center_distance_expr <= params.spatial_baseline_max_meters)
 
         if require_orbit_data:
             stmt = stmt.where(
@@ -765,9 +767,12 @@ class SpatialService:
 
     def _score_pair_candidate(self, candidate: dict, params: PairingRequest) -> float:
         max_time = max(float(params.time_baseline_max or 1), 1.0)
-        max_center = max(float(params.spatial_baseline_max_meters or 1), 1.0)
         time_score = 1.0 - min(float(candidate.get("days") or 0) / max_time, 1.0)
-        center_score = 1.0 - min(float(candidate.get("dist") or 0) / max_center, 1.0)
+        if params.limit_footprint_center_distance:
+            max_center = max(float(params.spatial_baseline_max_meters or 1), 1.0)
+            center_score = 1.0 - min(float(candidate.get("dist") or 0) / max_center, 1.0)
+        else:
+            center_score = 1.0
         overlap_score = min(max(float(candidate.get("overlap_ratio") or 0), 0.0), 1.0)
         source_score = 1.0 if (
             bool(getattr(candidate.get("master"), "insar_source_ready", False))
@@ -1215,9 +1220,12 @@ class SpatialService:
         aoi_poly,
     ) -> float:
         max_time = max(float(params.time_baseline_max or 1), 1.0)
-        max_space = max(float(params.spatial_baseline_max_meters or 1), 1.0)
         time_score = 1.0 - min(float(candidate.get("days") or 0) / max_time, 1.0)
-        spatial_score = 1.0 - min(float(candidate.get("dist") or 0) / max_space, 1.0)
+        if params.limit_footprint_center_distance:
+            max_space = max(float(params.spatial_baseline_max_meters or 1), 1.0)
+            spatial_score = 1.0 - min(float(candidate.get("dist") or 0) / max_space, 1.0)
+        else:
+            spatial_score = 1.0
         overlap_score = min(max(float(candidate.get("overlap_ratio") or 0), 0.0), 1.0)
         source_score = 1.0 if (
             bool(getattr(candidate.get("master"), "insar_source_ready", False))

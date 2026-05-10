@@ -11,23 +11,23 @@ const STRATEGY_DESCRIPTIONS = {
         title: '全部配对（默认）',
         description: '列出所有满足约束条件的候选干涉对，由用户自行筛选。',
         details: [
-            '• 系统遍历所有影像组合，保留满足时间基线、footprint 中心距和两景 footprint 最小重叠率的配对',
+            '• 系统遍历所有影像组合，保留满足时间基线和两景 footprint 最小重叠率的配对',
             '• 结果按时间排序，用户可在配对列表中逐一勾选或取消',
             '• 适用于研究型场景，需要精确控制每一对干涉组合',
             '• 配对数量可能较多，建议配合 AOI 和日期范围缩小结果'
         ],
-        params: '参数：时间基线范围、中心距上限、两景 footprint 最小重叠率'
+        params: '参数：时间基线范围、两景 footprint 最小重叠率、可选 footprint 中心距上限'
     },
     sbas: {
         title: 'SBAS (短基线子集)',
         description: '基于短基线原则的配对策略，通过覆盖优化算法自动筛选配对。',
         details: [
-            '• 优先选择时间间隔和 footprint 中心距都较短的配对',
+            '• 优先选择时间间隔较短、覆盖质量较好的配对；可按需启用 footprint 中心距限制',
             '• 通过覆盖优化算法，去除冗余配对，确保时间序列连续性',
             '• 适用于大范围、长时间序列的形变监测',
             '• 配对数量会比"全部配对"少，但覆盖更均匀'
         ],
-        params: '参数：时间基线、中心距、两景 footprint 最小重叠率、覆盖多样性惩罚'
+        params: '参数：时间基线、两景 footprint 最小重叠率、覆盖多样性惩罚、可选 footprint 中心距上限'
     },
     sequential: {
         title: 'Sequential (顺序配对)',
@@ -337,10 +337,30 @@ function PairingModal({
                         <input type="number" step="0.1" min="0" max="1" value={pairingParams.overlap_threshold}
                             onChange={e => setPairingParams({...pairingParams, overlap_threshold: parseFloat(e.target.value) || 0})} />
                     </div>
+                    <div className="form-group checkbox-group">
+                        <input
+                            type="checkbox"
+                            id="limit-footprint-center-distance"
+                            checked={Boolean(pairingParams.limit_footprint_center_distance)}
+                            onChange={e => setPairingParams({
+                                ...pairingParams,
+                                limit_footprint_center_distance: e.target.checked
+                            })}
+                        />
+                        <label htmlFor="limit-footprint-center-distance">限制 footprint 中心距</label>
+                    </div>
                     <div className="form-group">
                         <label>footprint 中心距上限 (米):</label>
-                        <input type="number" min="0" value={pairingParams.spatial_baseline_max_meters}
-                            onChange={e => setPairingParams({...pairingParams, spatial_baseline_max_meters: parseInt(e.target.value) || 3000})} />
+                        <input
+                            type="number"
+                            min="0"
+                            value={pairingParams.spatial_baseline_max_meters}
+                            disabled={!pairingParams.limit_footprint_center_distance}
+                            onChange={e => setPairingParams({...pairingParams, spatial_baseline_max_meters: parseInt(e.target.value) || 3000})}
+                        />
+                        {!pairingParams.limit_footprint_center_distance && (
+                            <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '4px' }}>默认不按中心距过滤；勾选后使用上方数值。</div>
+                        )}
                     </div>
                     <div className="form-group">
                         <label>覆盖多样性惩罚 (0-1):</label>

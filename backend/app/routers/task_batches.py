@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -24,7 +24,6 @@ from ..models import (
     PsTaskItem,
     PsTaskItemORM,
     RadarData,
-    RadarPair,
     TimeseriesStackPlanEdgeORM,
     TimeseriesStackPlanItemORM,
     TimeseriesStackPlanORM,
@@ -97,13 +96,41 @@ def _normalize_list_pagination(limit: int, offset: int) -> tuple[int, int]:
     return safe_limit, safe_offset
 
 
+class DinsarBatchSceneCreate(BaseModel):
+    file_path: str = Field(min_length=1)
+    satellite: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
+    imaging_date: Optional[str] = Field(default=None, max_length=32)
+    imaging_mode: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
+    polarization: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class DinsarBatchPairCreate(BaseModel):
+    master: DinsarBatchSceneCreate
+    slave: DinsarBatchSceneCreate
+    task_name: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
+    task_alias: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
+    pair_key: Optional[str] = Field(default=None, max_length=128)
+    pair_uid: Optional[str] = Field(default=None, max_length=64)
+    network_run_id: Optional[str] = Field(default=None, max_length=64)
+    network_edge_id: Optional[int] = None
+    policy_version: Optional[str] = Field(default=None, max_length=32)
+    selection_strategy: Optional[str] = Field(default=None, max_length=32)
+    time_baseline_days: Optional[int] = None
+    spatial_baseline_meters: Optional[float] = None
+    scene_center_distance_meters: Optional[float] = None
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class DinsarBatchCreateRequest(BaseModel):
     name: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
-    pairs: List[RadarPair]
+    pairs: List[DinsarBatchPairCreate]
 
     @field_validator("pairs")
     @classmethod
-    def _validate_pairs_size(cls, value: List[RadarPair]) -> List[RadarPair]:
+    def _validate_pairs_size(cls, value: List[DinsarBatchPairCreate]) -> List[DinsarBatchPairCreate]:
         if len(value) > TASK_BATCH_MAX_ITEMS:
             raise ValueError(
                 f"pairs exceeds max item count ({TASK_BATCH_MAX_ITEMS})."
@@ -244,10 +271,11 @@ async def create_dinsar_batch_endpoint(
     for pair in request.pairs:
         master = pair.master
         slave = pair.slave
+        task_name = pair.task_name or pair.task_alias or f"DINSAR_{master.imaging_date or 'master'}_{slave.imaging_date or 'slave'}"
         item = DinsarTaskItemORM(
             batch_id=batch_id,
-            task_name=pair.task_name,
-            task_alias=pair.task_alias or pair.task_name,
+            task_name=task_name,
+            task_alias=pair.task_alias or task_name,
             pair_key=pair.pair_key,
             scene_pair_uid=pair.pair_uid,
             network_run_id=pair.network_run_id,
@@ -264,7 +292,7 @@ async def create_dinsar_batch_endpoint(
             slave_imaging_date=slave.imaging_date,
             slave_imaging_mode=slave.imaging_mode,
             slave_polarization=slave.polarization,
-            time_baseline_days=pair.time_baseline_days,
+            time_baseline_days=int(pair.time_baseline_days) if pair.time_baseline_days is not None else None,
             spatial_baseline_meters=pair.spatial_baseline_meters,
             scene_center_distance_meters=(
                 pair.scene_center_distance_meters

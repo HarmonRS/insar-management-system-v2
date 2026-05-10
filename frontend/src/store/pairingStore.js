@@ -18,6 +18,7 @@ export const usePairingStore = create((set) => ({
         time_baseline_max: 90,
         overlap_threshold: 0.5,
         spatial_baseline_max_meters: 3000,
+        limit_footprint_center_distance: false,
         coverage_diversity_penalty: 0.3,
         require_same_imaging_mode: false,
         require_same_polarization: false,

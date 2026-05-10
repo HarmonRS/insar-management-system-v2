@@ -4,6 +4,7 @@ import logging
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +43,7 @@ def get_pairing_request_from_form(
     time_baseline_max: int = Form(90),
     overlap_threshold: float = Form(0.5),
     spatial_baseline_max_meters: int = Form(3000),
+    limit_footprint_center_distance: bool = Form(False),
     max_temporal_baseline_days: Optional[int] = Form(None),
     pair_footprint_overlap_min_ratio: Optional[float] = Form(None),
     footprint_center_distance_max_meters: Optional[int] = Form(None),
@@ -70,29 +72,33 @@ def get_pairing_request_from_form(
         except Exception:
             satellites_list = None
 
-    return PairingRequest(
-        time_baseline_min=time_baseline_min,
-        time_baseline_max=time_baseline_max,
-        overlap_threshold=overlap_threshold,
-        spatial_baseline_max_meters=spatial_baseline_max_meters,
-        max_temporal_baseline_days=max_temporal_baseline_days,
-        pair_footprint_overlap_min_ratio=pair_footprint_overlap_min_ratio,
-        footprint_center_distance_max_meters=footprint_center_distance_max_meters,
-        coverage_diversity_penalty=coverage_diversity_penalty,
-        require_same_imaging_mode=require_same_imaging_mode,
-        require_same_polarization=require_same_polarization,
-        aoi_overlap_threshold=aoi_overlap_threshold,
-        start_date=start_date,
-        master_date_from=master_date_from,
-        master_date_to=master_date_to,
-        slave_date_from=slave_date_from,
-        slave_date_to=slave_date_to,
-        strategy=strategy,
-        num_connections=num_connections,
-        reference_image_id=reference_image_id,
-        allowed_satellites=satellites_list,
-        cross_satellite_pairing=cross_satellite_pairing,
-    )
+    try:
+        return PairingRequest(
+            time_baseline_min=time_baseline_min,
+            time_baseline_max=time_baseline_max,
+            overlap_threshold=overlap_threshold,
+            spatial_baseline_max_meters=spatial_baseline_max_meters,
+            limit_footprint_center_distance=limit_footprint_center_distance,
+            max_temporal_baseline_days=max_temporal_baseline_days,
+            pair_footprint_overlap_min_ratio=pair_footprint_overlap_min_ratio,
+            footprint_center_distance_max_meters=footprint_center_distance_max_meters,
+            coverage_diversity_penalty=coverage_diversity_penalty,
+            require_same_imaging_mode=require_same_imaging_mode,
+            require_same_polarization=require_same_polarization,
+            aoi_overlap_threshold=aoi_overlap_threshold,
+            start_date=start_date,
+            master_date_from=master_date_from,
+            master_date_to=master_date_to,
+            slave_date_from=slave_date_from,
+            slave_date_to=slave_date_to,
+            strategy=strategy,
+            num_connections=num_connections,
+            reference_image_id=reference_image_id,
+            allowed_satellites=satellites_list,
+            cross_satellite_pairing=cross_satellite_pairing,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
 
 def get_ps_request_from_form(
