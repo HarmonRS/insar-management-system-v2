@@ -479,5 +479,32 @@ class TaskService:
             if gen_db:
                 await db.close()
 
+    async def delete_task_record(
+        self,
+        task_id: str,
+        db: Optional[AsyncSession] = None,
+    ) -> bool:
+        gen_db = db is None
+        if gen_db:
+            db = get_db_session()
+
+        try:
+            result = await db.execute(
+                select(SystemTaskORM).where(SystemTaskORM.task_id == task_id)
+            )
+            task = result.scalar_one_or_none()
+            if task is None:
+                return False
+            await db.execute(delete(TaskLogORM).where(TaskLogORM.task_id == task_id))
+            await db.delete(task)
+            await db.commit()
+            return True
+        except Exception:
+            await db.rollback()
+            raise
+        finally:
+            if gen_db:
+                await db.close()
+
 
 task_service = TaskService()

@@ -1,8 +1,7 @@
 ﻿import React, { useCallback, useEffect, useState } from 'react';
 
-import { listEngines, listRuns, previewPyintInputAssets, submitRun } from './api/dinsarProduction';
-import { getJobLog } from './api/idl';
-import { clearTaskLogs, deleteTaskLog, getActiveTasks, getRecentTasks, getTaskLogs } from './api/tasks';
+import { deleteRunLog, deleteRunRecord, getRunLog, listEngines, listRuns, previewPyintInputAssets, submitRun } from './api/dinsarProduction';
+import { clearTaskLogs, deleteTaskLog, deleteTaskRecord, getActiveTasks, getRecentTasks, getTaskLogs } from './api/tasks';
 
 const card = {
   background: '#fff',
@@ -14,6 +13,10 @@ const card = {
 
 const EMPTY_ARRAY = [];
 const EMPTY_OBJECT = {};
+const RUN_HISTORY_PAGE_SIZE = 200;
+const TASK_HISTORY_PAGE_SIZE = 500;
+const TASK_LOG_PAGE_SIZE = 1000;
+const TERMINAL_STATUS_VALUES = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'CANCELED', 'success', 'failed', 'cancelled', 'canceled']);
 
 const ENGINE_STATUS_COLOR = {
   ok: '#22c55e',
@@ -120,6 +123,11 @@ function taskStatusToRunStatus(status) {
   return 'pending';
 }
 
+function isTerminalRunRow(run) {
+  return TERMINAL_STATUS_VALUES.has(String(run?.raw_status || '').trim())
+    || TERMINAL_STATUS_VALUES.has(String(run?.status || '').trim());
+}
+
 function epochSeconds(value) {
   if (value == null || value === '') return null;
   if (typeof value === 'number') return value;
@@ -166,7 +174,7 @@ function inferTaskPaths(task) {
   };
 }
 
-function mergeRunRows(productionRuns, recentTasks, limit = 20) {
+function mergeRunRows(productionRuns, recentTasks, limit = null) {
   const rows = (productionRuns || []).map(run => ({
     ...run,
     record_type: run?.record_type || 'run',
@@ -190,9 +198,21 @@ function mergeRunRows(productionRuns, recentTasks, limit = 20) {
     representedTaskIds.add(taskId);
   });
 
-  return rows
-    .sort((a, b) => Number(b?.started_at || 0) - Number(a?.started_at || 0))
-    .slice(0, limit);
+  const sortedRows = rows.sort((a, b) => Number(b?.started_at || 0) - Number(a?.started_at || 0));
+  return limit == null ? sortedRows : sortedRows.slice(0, limit);
+}
+
+async function fetchAllTaskLogs(taskId) {
+  const allLogs = [];
+  let offset = 0;
+  while (true) {
+    const data = await getTaskLogs(taskId, TASK_LOG_PAGE_SIZE, offset);
+    const pageLogs = data?.logs || [];
+    allLogs.push(...pageLogs);
+    if (pageLogs.length < TASK_LOG_PAGE_SIZE) break;
+    offset += pageLogs.length;
+  }
+  return allLogs;
 }
 
 function formatTaskLogContent(taskId, logs) {
@@ -535,7 +555,15 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const [runs, setRuns] = useState([]);
   const [runsLoading, setRunsLoading] = useState(false);
 
-  const [logModal, setLogModal] = useState({ open: false, runId: '', content: '', loading: false });
+  const [logModal, setLogModal] = useState({
+    open: false,
+    runId: '',
+    taskId: '',
+    source: 'run',
+    content: '',
+    loading: false,
+  });
+  const [runLogDeletingId, setRunLogDeletingId] = useState('');
   const [activeTask, setActiveTask] = useState(null);
   const [recentTask, setRecentTask] = useState(null);
   const [taskLogs, setTaskLogs] = useState([]);
@@ -591,12 +619,36 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     const silent = !!options.silent;
     if (!silent) setRunsLoading(true);
     try {
-      const [runData, taskData] = await Promise.all([
-        listRuns(20),
-        getRecentTasks(['ISCE2_RUN', 'PYINT_RUN', 'IDL_RUN_DINSAR'], [], 20, 0),
+      const loadProductionRuns = async () => {
+        const allRuns = [];
+        let offset = 0;
+        while (true) {
+          const data = await listRuns(RUN_HISTORY_PAGE_SIZE, offset);
+          const pageRuns = data?.runs || [];
+          allRuns.push(...pageRuns);
+          const total = Number(data?.total || 0);
+          if (pageRuns.length < RUN_HISTORY_PAGE_SIZE || allRuns.length >= total) break;
+          offset += pageRuns.length;
+        }
+        return allRuns;
+      };
+      const loadRecentTasks = async () => {
+        const allTasks = [];
+        let offset = 0;
+        while (true) {
+          const data = await getRecentTasks(['ISCE2_RUN', 'PYINT_RUN', 'IDL_RUN_DINSAR'], [], TASK_HISTORY_PAGE_SIZE, offset);
+          const pageTasks = Array.isArray(data) ? data : (data?.tasks || []);
+          allTasks.push(...pageTasks);
+          if (pageTasks.length < TASK_HISTORY_PAGE_SIZE) break;
+          offset += pageTasks.length;
+        }
+        return allTasks;
+      };
+      const [productionRuns, recentTasks] = await Promise.all([
+        loadProductionRuns(),
+        loadRecentTasks(),
       ]);
-      const recentTasks = Array.isArray(taskData) ? taskData : (taskData?.tasks || []);
-      const nextRuns = mergeRunRows(runData.runs || [], recentTasks, 20);
+      const nextRuns = mergeRunRows(productionRuns, recentTasks);
       setRuns(nextRuns);
       return nextRuns;
     } catch {
@@ -641,8 +693,8 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
     if (!silent) setTaskLogsLoading(true);
     try {
-      const data = await getTaskLogs(taskId, 120, 0);
-      setTaskLogs(data?.logs || []);
+      const logs = await fetchAllTaskLogs(taskId);
+      setTaskLogs(logs);
     } catch {
       setTaskLogs([]);
     } finally {
@@ -830,24 +882,111 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
 
   const handleViewLog = async run => {
     const runId = typeof run === 'string' ? run : (run?.run_id || run?.task_id || '');
-    setLogModal({ open: true, runId, content: '', loading: true });
+    const source = typeof run !== 'string' && run?.log_source === 'task' ? 'task' : 'run';
+    const taskId = typeof run !== 'string' ? (run?.task_id || '') : '';
+    setLogModal({ open: true, runId, taskId, source, content: '', loading: true });
     try {
-      if (typeof run !== 'string' && run?.log_source === 'task' && run?.task_id) {
-        const data = await getTaskLogs(run.task_id, 200, 0);
+      if (source === 'task' && taskId) {
+        const logs = await fetchAllTaskLogs(taskId);
         setLogModal({
           open: true,
           runId,
-          content: formatTaskLogContent(run.task_id, data?.logs || []),
+          taskId,
+          source,
+          content: formatTaskLogContent(taskId, logs),
           loading: false,
         });
         return;
       }
-      const data = await getJobLog(runId);
-      setLogModal({ open: true, runId, content: data.content || '', loading: false });
+      const data = await getRunLog(runId);
+      setLogModal({ open: true, runId, taskId: '', source, content: data.content || '', loading: false });
     } catch {
-      setLogModal({ open: true, runId, content: '日志加载失败。', loading: false });
+      setLogModal({ open: true, runId, taskId, source, content: '日志加载失败，可能日志文件不存在或已被删除。', loading: false });
     }
   };
+
+  const handleDeleteRunRowLog = useCallback(async run => {
+    if (readOnly || runLogDeletingId) return;
+    const source = run?.log_source === 'task' ? 'task' : 'run';
+    const runId = run?.run_id || run?.task_id || '';
+    const taskId = run?.task_id || '';
+    const label = source === 'task' ? `任务 ${taskId}` : `运行 ${runId}`;
+    if (!runId) return;
+    if (!window.confirm(`确定要删除${label}的日志吗？运行记录和产物不会删除。`)) return;
+
+    setRunLogDeletingId(runId);
+    try {
+      if (source === 'task') {
+        await clearTaskLogs(taskId || runId);
+        if (logTaskId === (taskId || runId)) {
+          await loadTaskLogs(taskId || runId);
+        }
+      } else {
+        await deleteRunLog(runId);
+      }
+      if (logModal.open && logModal.runId === runId) {
+        setLogModal(current => ({
+          ...current,
+          content: '日志已删除。',
+          loading: false,
+        }));
+      }
+      setSubmitError(false);
+      setSubmitMsg('日志已删除。');
+      await refreshMonitor({ silent: true });
+    } catch (err) {
+      setSubmitError(true);
+      setSubmitMsg(`删除日志失败：${err?.response?.data?.detail || err.message}`);
+    } finally {
+      setRunLogDeletingId('');
+    }
+  }, [loadTaskLogs, logModal.open, logModal.runId, logTaskId, readOnly, refreshMonitor, runLogDeletingId]);
+
+  const handleDeleteOpenLog = useCallback(async () => {
+    if (!logModal.open || readOnly || runLogDeletingId) return;
+    await handleDeleteRunRowLog({
+      run_id: logModal.runId,
+      task_id: logModal.taskId,
+      log_source: logModal.source,
+    });
+  }, [handleDeleteRunRowLog, logModal, readOnly, runLogDeletingId]);
+
+  const handleDeleteRunHistory = useCallback(async run => {
+    if (readOnly || runLogDeletingId) return;
+    const isTaskRecord = run?.log_source === 'task';
+    const recordId = isTaskRecord ? (run?.task_id || run?.run_id || '') : (run?.run_id || '');
+    const taskId = run?.task_id || '';
+    if (!recordId) return;
+    if (!isTerminalRunRow(run)) {
+      setSubmitError(true);
+      setSubmitMsg('运行中记录不能删除。');
+      return;
+    }
+    if (!window.confirm(`确定要删除运行记录 ${recordId} 吗？只删除记录和日志，不删除产物目录。`)) return;
+
+    setRunLogDeletingId(recordId);
+    try {
+      if (isTaskRecord) {
+        await deleteTaskRecord(recordId);
+      } else {
+        await deleteRunRecord(recordId);
+      }
+      if (logTaskId === (taskId || recordId)) {
+        setTaskLogs([]);
+      }
+      if (logModal.open && logModal.runId === recordId) {
+        setLogModal({ open: false, runId: '', taskId: '', source: 'run', content: '', loading: false });
+      }
+      setSubmitError(false);
+      setSubmitMsg('运行记录已删除，产物目录未删除。');
+      await refreshMonitor({ silent: true });
+    } catch (err) {
+      setSubmitError(true);
+      setSubmitMsg(`删除运行记录失败：${err?.response?.data?.detail || err.message}`);
+    } finally {
+      setRunLogDeletingId('');
+    }
+  }, [logModal.open, logModal.runId, logTaskId, readOnly, refreshMonitor, runLogDeletingId]);
 
   const isSubmitDisabled = readOnly || submitting || !currentEngineObj?.available || pyintPreviewBlocksSubmit;
 
@@ -871,30 +1010,53 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
               color: '#e2e8f0',
               borderRadius: 10,
               padding: 24,
-              width: 720,
-              maxHeight: '80vh',
+              width: 'min(960px, 92vw)',
+              maxHeight: '82vh',
               display: 'flex',
               flexDirection: 'column',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
               <strong>运行日志 - {logModal.runId}</strong>
-              <button
-                onClick={() => setLogModal({ open: false, runId: '', content: '', loading: false })}
-                style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 18 }}
-              >
-                关闭
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {!readOnly && (
+                  <button
+                    onClick={handleDeleteOpenLog}
+                    disabled={runLogDeletingId === logModal.runId}
+                    style={{
+                      border: '1px solid #7f1d1d',
+                      borderRadius: 4,
+                      background: '#450a0a',
+                      color: '#fecaca',
+                      cursor: runLogDeletingId === logModal.runId ? 'not-allowed' : 'pointer',
+                      fontSize: 12,
+                      padding: '4px 10px',
+                    }}
+                  >
+                    {runLogDeletingId === logModal.runId ? '删除中...' : '删除日志'}
+                  </button>
+                )}
+                <button
+                  onClick={() => setLogModal({ open: false, runId: '', taskId: '', source: 'run', content: '', loading: false })}
+                  style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 18 }}
+                >
+                  关闭
+                </button>
+              </div>
             </div>
             <pre
               style={{
                 flex: 1,
+                minHeight: 0,
                 overflowY: 'auto',
                 fontSize: 11,
                 lineHeight: 1.5,
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-all',
                 margin: 0,
+                padding: 12,
+                borderRadius: 6,
+                background: '#0f172a',
               }}
             >
               {logModal.loading ? '加载中...' : logModal.content || '（日志为空）'}
@@ -1560,63 +1722,115 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           </div>
         )}
 
-        <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>最近 20 条运行记录</div>
+        <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>运行记录（已加载 {runs.length} 条）</div>
         {runsLoading ? (
           <div style={{ fontSize: 12, color: '#94a3b8' }}>加载中...</div>
         ) : runs.length === 0 ? (
           <div style={{ fontSize: 12, color: '#94a3b8' }}>暂无记录。</div>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-            <thead>
-              <tr style={{ background: '#f8fafc' }}>
-                {['运行ID', '引擎', '状态', '时间', '路径', '操作'].map(header => (
-                  <th
-                    key={header}
-                    style={{ padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid #e2e8f0', color: '#64748b' }}
-                  >
-                    {header}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {runs.map(run => (
-                <tr key={`${run.record_type || 'run'}-${run.run_id}`} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                  <td style={{ padding: '4px 8px', fontFamily: 'monospace', fontSize: 11 }}>{run.run_id}</td>
-                  <td style={{ padding: '4px 8px' }}>{formatEngineLabel(run.engine)}</td>
-                  <td
-                    style={{
-                      padding: '4px 8px',
-                      color: run.status === 'success' ? '#16a34a' : run.status === 'failed' ? '#ef4444' : '#64748b',
-                    }}
-                  >
-                    {formatStatus(run.status)}
-                  </td>
-                  <td style={{ padding: '4px 8px', color: '#94a3b8' }}>
-                    {run.started_at ? new Date(run.started_at * 1000).toLocaleString() : '-'}
-                  </td>
-                  <td style={{ padding: '4px 8px', maxWidth: 520, fontSize: 11 }}>
-                    <RunPathBlock run={run} />
-                  </td>
-                  <td style={{ padding: '4px 8px' }}>
-                    <button
-                      onClick={() => handleViewLog(run)}
+          <div style={{ maxHeight: 520, overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: 6 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr>
+                  {['运行ID', '引擎', '状态', '时间', '路径', '操作'].map(header => (
+                    <th
+                      key={header}
                       style={{
-                        fontSize: 11,
-                        padding: '2px 8px',
-                        borderRadius: 3,
-                        border: '1px solid #e2e8f0',
-                        cursor: 'pointer',
+                        position: 'sticky',
+                        top: 0,
+                        zIndex: 1,
+                        padding: '6px 8px',
+                        textAlign: 'left',
+                        borderBottom: '1px solid #e2e8f0',
                         background: '#f8fafc',
+                        color: '#64748b',
                       }}
                     >
-                      查看日志
-                    </button>
-                  </td>
+                      {header}
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {runs.map(run => {
+                  const recordId = run.log_source === 'task' ? (run.task_id || run.run_id) : run.run_id;
+                  const canDeleteRecord = isTerminalRunRow(run);
+                  return (
+                    <tr key={`${run.record_type || 'run'}-${run.run_id}`} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                      <td style={{ padding: '6px 8px', fontFamily: 'monospace', fontSize: 11 }}>{run.run_id}</td>
+                      <td style={{ padding: '6px 8px' }}>{formatEngineLabel(run.engine)}</td>
+                      <td
+                        style={{
+                          padding: '6px 8px',
+                          color: run.status === 'success' ? '#16a34a' : run.status === 'failed' ? '#ef4444' : '#64748b',
+                        }}
+                      >
+                        {formatStatus(run.status)}
+                      </td>
+                      <td style={{ padding: '6px 8px', color: '#94a3b8', whiteSpace: 'nowrap' }}>
+                        {run.started_at ? new Date(run.started_at * 1000).toLocaleString() : '-'}
+                      </td>
+                      <td style={{ padding: '6px 8px', maxWidth: 520, fontSize: 11 }}>
+                        <RunPathBlock run={run} />
+                      </td>
+                      <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>
+                        <button
+                          onClick={() => handleViewLog(run)}
+                          style={{
+                            fontSize: 11,
+                            padding: '2px 8px',
+                            borderRadius: 3,
+                            border: '1px solid #e2e8f0',
+                            cursor: 'pointer',
+                            background: '#f8fafc',
+                          }}
+                        >
+                          查看日志
+                        </button>
+                        {!readOnly && (
+                          <button
+                            onClick={() => handleDeleteRunRowLog(run)}
+                            disabled={!!runLogDeletingId}
+                            style={{
+                              marginLeft: 6,
+                              fontSize: 11,
+                              padding: '2px 8px',
+                              borderRadius: 3,
+                              border: '1px solid #fecaca',
+                              cursor: runLogDeletingId ? 'not-allowed' : 'pointer',
+                              background: '#fef2f2',
+                              color: '#b91c1c',
+                            }}
+                          >
+                            {runLogDeletingId === (run.run_id || run.task_id) ? '删除中...' : '删除日志'}
+                          </button>
+                        )}
+                        {!readOnly && (
+                          <button
+                            onClick={() => handleDeleteRunHistory(run)}
+                            disabled={!!runLogDeletingId || !canDeleteRecord}
+                            title={canDeleteRecord ? '只删除记录和日志，不删除产物目录' : '运行中记录不能删除'}
+                            style={{
+                              marginLeft: 6,
+                              fontSize: 11,
+                              padding: '2px 8px',
+                              borderRadius: 3,
+                              border: '1px solid #fed7aa',
+                              cursor: runLogDeletingId || !canDeleteRecord ? 'not-allowed' : 'pointer',
+                              background: runLogDeletingId || !canDeleteRecord ? '#f8fafc' : '#fff7ed',
+                              color: runLogDeletingId || !canDeleteRecord ? '#94a3b8' : '#9a3412',
+                            }}
+                          >
+                            {runLogDeletingId === recordId ? '删除中...' : '删除记录'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

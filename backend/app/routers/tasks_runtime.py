@@ -181,6 +181,26 @@ async def clear_task_logs(
     }
 
 
+@router.delete("/tasks/{task_id}")
+async def delete_task_record(
+    task_id: str,
+    admin_user: AuthUserORM = Depends(_require_admin),
+):
+    task = await task_service.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    if str(task.status or "").upper() in {"PENDING", "RUNNING"}:
+        raise HTTPException(status_code=409, detail="Cannot delete a pending or running task.")
+
+    deleted = await task_service.delete_task_record(task_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return {
+        "task_id": task_id,
+        "deleted": True,
+    }
+
+
 @router.post("/tasks/{task_id}/force-cancel")
 async def force_cancel_task(
     task_id: str,

@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import database
@@ -18,7 +18,12 @@ from ..models import (
     DinsarProductionExecutionORM,
     DinsarProductionRunItemORM,
     DinsarProductionRunORM,
+    SystemJobORM,
     SystemTaskORM,
+    TaskLogORM,
+    WorkflowArtifactORM,
+    WorkflowRunORM,
+    WorkflowStepORM,
 )
 from .envi_service import RUNTIME_DIR, _collect_task_folders, _resolve_dinsar_pair_identity, _to_local_path
 from .task_service import task_service
@@ -999,6 +1004,81 @@ class DinsarProductionService:
 
     def append_run_log(self, run_id: str, message: str) -> str:
         return _append_run_log_sync(run_id, message)
+
+    def read_run_log(self, run_id: str, *, max_bytes: int = 200 * 1024) -> Dict[str, Any]:
+        log_path = _run_log_path(run_id)
+        if not os.path.isfile(log_path):
+            raise FileNotFoundError(log_path)
+        size_bytes = os.path.getsize(log_path)
+        truncated = size_bytes > max_bytes
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fp:
+            if truncated:
+                fp.seek(size_bytes - max_bytes)
+                content = "...[日志已截断，仅显示末尾]...\n" + fp.read()
+            else:
+                content = fp.read()
+        return {
+            "run_id": run_id,
+            "content": content,
+            "size_bytes": size_bytes,
+            "truncated": truncated,
+            "log_path": log_path,
+        }
+
+    def delete_run_log(self, run_id: str) -> bool:
+        log_path = _run_log_path(run_id)
+        if not os.path.isfile(log_path):
+            return False
+        os.unlink(log_path)
+        return True
+
+    async def delete_run_record(
+        self,
+        run_id: str,
+        *,
+        db: AsyncSession,
+    ) -> Optional[Dict[str, Any]]:
+        run = await self.get_run(run_id, db)
+        if run is None:
+            return None
+        if str(run.status or "").strip().upper() not in TERMINAL_RUN_STATUSES:
+            raise ValueError("Cannot delete a pending or running production run.")
+
+        task_id = str(run.task_id or "").strip()
+        workflow_run_id = str(run.workflow_run_id or "").strip()
+        if task_id:
+            task_result = await db.execute(
+                select(SystemTaskORM).where(SystemTaskORM.task_id == task_id)
+            )
+            task = task_result.scalar_one_or_none()
+            if task is not None and str(task.status or "").strip().upper() in {"PENDING", "RUNNING"}:
+                raise ValueError("Cannot delete a production run with a pending or running task.")
+
+        deleted = {
+            "run_id": run.run_id,
+            "task_id": task_id or None,
+            "workflow_run_id": workflow_run_id or None,
+        }
+        await db.execute(delete(DinsarProductionExecutionORM).where(DinsarProductionExecutionORM.run_id == run.run_id))
+        await db.execute(delete(DinsarProductionRunItemORM).where(DinsarProductionRunItemORM.run_id == run.run_id))
+        await db.execute(delete(DinsarProductionRunORM).where(DinsarProductionRunORM.run_id == run.run_id))
+
+        if task_id:
+            await db.execute(delete(TaskLogORM).where(TaskLogORM.task_id == task_id))
+            await db.execute(delete(SystemJobORM).where(SystemJobORM.task_id == task_id))
+            await db.execute(delete(SystemTaskORM).where(SystemTaskORM.task_id == task_id))
+        if workflow_run_id:
+            await db.execute(delete(SystemJobORM).where(SystemJobORM.workflow_run_id == workflow_run_id))
+            await db.execute(delete(WorkflowArtifactORM).where(WorkflowArtifactORM.run_id == workflow_run_id))
+            await db.execute(delete(WorkflowStepORM).where(WorkflowStepORM.run_id == workflow_run_id))
+            await db.execute(delete(WorkflowRunORM).where(WorkflowRunORM.run_id == workflow_run_id))
+
+        await db.commit()
+        try:
+            deleted["log_deleted"] = await asyncio.to_thread(self.delete_run_log, run_id)
+        except OSError:
+            deleted["log_deleted"] = False
+        return deleted
 
     def build_execution_manifest(
         self,

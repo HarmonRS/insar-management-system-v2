@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +18,9 @@ from ..services.pyint_input_assets_service import build_pyint_input_preview, sum
 from ..services.task_service import task_service
 
 router = APIRouter(prefix="/dinsar-production", tags=["dinsar-production"])
+
+_RUN_ID_RE = re.compile(r"^[\w\-]{4,128}$")
+_LOG_MAX_BYTES = 200 * 1024
 
 DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
     "DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS",
@@ -351,7 +355,74 @@ async def submit_run(
 
 
 @router.get("/runs")
-async def list_runs(limit: int = 20):
+async def list_runs(limit: int = 20, offset: int = 0):
     async with _new_session() as db:
-        result = await dinsar_production_service.list_runs(db, limit=limit)
+        result = await dinsar_production_service.list_runs(db, limit=limit, offset=offset)
     return result
+
+
+@router.get("/runs/{run_id}/log")
+async def get_run_log(
+    run_id: str,
+    current_user: AuthUserORM = Depends(_get_current_user),
+):
+    _ = current_user
+    normalized_run_id = str(run_id or "").strip()
+    if not _RUN_ID_RE.match(normalized_run_id):
+        raise HTTPException(status_code=400, detail="Invalid run_id format.")
+    try:
+        return await asyncio.to_thread(
+            dinsar_production_service.read_run_log,
+            normalized_run_id,
+            max_bytes=_LOG_MAX_BYTES,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Run log file not found.") from exc
+
+
+@router.delete("/runs/{run_id}/log")
+async def delete_run_log(
+    run_id: str,
+    current_user: AuthUserORM = Depends(_require_admin),
+):
+    _ = current_user
+    normalized_run_id = str(run_id or "").strip()
+    if not _RUN_ID_RE.match(normalized_run_id):
+        raise HTTPException(status_code=400, detail="Invalid run_id format.")
+    deleted = await asyncio.to_thread(
+        dinsar_production_service.delete_run_log,
+        normalized_run_id,
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Run log file not found.")
+    return {
+        "run_id": normalized_run_id,
+        "deleted": True,
+    }
+
+
+@router.delete("/runs/{run_id}")
+async def delete_run_record(
+    run_id: str,
+    current_user: AuthUserORM = Depends(_require_admin),
+):
+    _ = current_user
+    normalized_run_id = str(run_id or "").strip()
+    if not _RUN_ID_RE.match(normalized_run_id):
+        raise HTTPException(status_code=400, detail="Invalid run_id format.")
+
+    async with _new_session() as db:
+        try:
+            result = await dinsar_production_service.delete_run_record(
+                normalized_run_id,
+                db=db,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Production run not found.")
+    return {
+        **result,
+        "deleted": True,
+        "products_deleted": False,
+    }

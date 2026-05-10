@@ -16,8 +16,19 @@ export const submitRun = (payload) =>
   apiClient.post('/dinsar-production/run', payload).then(r => r.data);
 
 // 运行历史
-export const listRuns = (limit = 20) =>
-  apiClient.get(`/dinsar-production/runs?limit=${encodeURIComponent(limit)}`).then(r => r.data);
+export const listRuns = (limit = 20, offset = 0) =>
+  apiClient.get(
+    `/dinsar-production/runs?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+  ).then(r => r.data);
+
+export const getRunLog = (runId) =>
+  apiClient.get(`/dinsar-production/runs/${encodeURIComponent(runId)}/log`).then(r => r.data);
+
+export const deleteRunLog = (runId) =>
+  apiClient.delete(`/dinsar-production/runs/${encodeURIComponent(runId)}/log`).then(r => r.data);
+
+export const deleteRunRecord = (runId) =>
+  apiClient.delete(`/dinsar-production/runs/${encodeURIComponent(runId)}`).then(r => r.data);
 
 export const previewPyintInputAssets = (payload) =>
   apiClient.post('/dinsar-production/engines/pyint/preview-input-assets', payload).then(r => r.data);
