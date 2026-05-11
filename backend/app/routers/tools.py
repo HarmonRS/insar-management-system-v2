@@ -27,6 +27,13 @@ COPY_BATCH_MAX_STATUS_COUNT = read_int_env(
     minimum=1,
     maximum=64,
 )
+COPY_BATCH_MAX_COPY_ITEMS = read_int_env(
+    "COPY_BATCH_MAX_COPY_ITEMS",
+    5000,
+    minimum=1,
+    maximum=200000,
+)
+COPY_DINSAR_PACKAGE_MODES = {"task_folder", "task_zip", "source_bundle"}
 
 
 class CopyBatchRequest(BaseModel):
@@ -35,6 +42,9 @@ class CopyBatchRequest(BaseModel):
     copy_statuses: Optional[List[str]] = None
     include_orbit_files: bool = False
     export_zip: bool = False
+    package_mode: str = "task_folder"
+    skip_existing: bool = True
+    max_items: Optional[int] = None
 
     @field_validator("batch_id", "dest_dir", mode="before")
     @classmethod
@@ -56,6 +66,33 @@ class CopyBatchRequest(BaseModel):
                 f"copy_statuses exceeds max count ({COPY_BATCH_MAX_STATUS_COUNT})."
             )
         return value
+
+    @field_validator("max_items", mode="before")
+    @classmethod
+    def _normalize_max_items(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_items must be an integer.") from exc
+        if parsed <= 0:
+            return None
+        if parsed > COPY_BATCH_MAX_COPY_ITEMS:
+            raise ValueError(
+                f"max_items exceeds max item count ({COPY_BATCH_MAX_COPY_ITEMS})."
+            )
+        return parsed
+
+    @field_validator("package_mode", mode="before")
+    @classmethod
+    def _normalize_package_mode(cls, value):
+        normalized = str(value or "task_folder").strip().lower()
+        if normalized not in COPY_DINSAR_PACKAGE_MODES:
+            raise ValueError(
+                f"package_mode must be one of: {sorted(COPY_DINSAR_PACKAGE_MODES)}."
+            )
+        return normalized
 
 
 def _normalize_copy_batch_statuses(copy_statuses: Optional[List[str]]) -> List[str]:
@@ -135,13 +172,19 @@ async def copy_dinsar_pairs_endpoint(
     _validate_export_path(request.dest_dir, "dest_dir")
     try:
         copy_statuses = _normalize_copy_batch_statuses(request.copy_statuses)
+        package_mode = request.package_mode
+        if bool(request.export_zip) and package_mode == "task_folder":
+            package_mode = "task_zip"
         params = {
             "dest_dir": request.dest_dir,
             "file_type": "DINSAR_PAIRS",
             "batch_id": request.batch_id,
             "copy_statuses": copy_statuses,
             "include_orbit_files": bool(request.include_orbit_files),
-            "export_zip": bool(request.export_zip),
+            "export_zip": package_mode == "task_zip",
+            "package_mode": package_mode,
+            "skip_existing": bool(request.skip_existing),
+            "max_items": request.max_items,
         }
         task_id = await task_service.create_task("COPY_DATA", f"D-InSAR 数据分发: {request.dest_dir}", params=params)
 
@@ -151,7 +194,10 @@ async def copy_dinsar_pairs_endpoint(
             "batch_id": request.batch_id,
             "copy_statuses": copy_statuses,
             "include_orbit_files": bool(request.include_orbit_files),
-            "export_zip": bool(request.export_zip),
+            "export_zip": package_mode == "task_zip",
+            "package_mode": package_mode,
+            "skip_existing": bool(request.skip_existing),
+            "max_items": request.max_items,
         }
         await job_queue_service.create_job("COPY_DATA", payload=payload, task_id=task_id)
         await _add_operation_audit_log(
@@ -165,7 +211,10 @@ async def copy_dinsar_pairs_endpoint(
                 "dest_dir": request.dest_dir,
                 "copy_statuses": copy_statuses,
                 "include_orbit_files": bool(request.include_orbit_files),
-                "export_zip": bool(request.export_zip),
+                "export_zip": package_mode == "task_zip",
+                "package_mode": package_mode,
+                "skip_existing": bool(request.skip_existing),
+                "max_items": request.max_items,
             },
         )
         await db.commit()

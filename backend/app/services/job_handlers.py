@@ -50,7 +50,7 @@ from .timeseries_service import (
     timeseries_service,
 )
 from .unpack_service import run_unpack_task
-from ..copier import run_ps_copy_items, run_dinsar_copy_items
+from ..copier import run_ps_copy_items, run_dinsar_copy_items, run_dinsar_source_bundle_items
 from ..ai_service import (
     train_quality_model,
     predict_quality,
@@ -114,6 +114,16 @@ def _normalize_copy_statuses(raw_statuses: Any) -> List[str]:
             normalized.append(status)
 
     return normalized or ["COMPLETED"]
+
+
+def _normalize_positive_int(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _dedupe_existing_dirs(paths: Any) -> List[str]:
@@ -289,6 +299,9 @@ async def _handle_copy_data(job: SystemJobORM) -> None:
     copy_statuses = _normalize_copy_statuses(payload.get("copy_statuses"))
     include_orbit_files = bool(payload.get("include_orbit_files"))
     export_zip = bool(payload.get("export_zip"))
+    package_mode = str(payload.get("package_mode") or ("task_zip" if export_zip else "task_folder")).strip().lower()
+    skip_existing = payload.get("skip_existing") is not False
+    max_items = _normalize_positive_int(payload.get("max_items"))
 
     if not batch_id:
         raise ValueError("COPY_DATA requires batch_id payload.")
@@ -377,13 +390,25 @@ async def _handle_copy_data(job: SystemJobORM) -> None:
                 raise ValueError(
                     f"No D-InSAR items matched copy statuses: {', '.join(copy_statuses)}"
                 )
-            await run_dinsar_copy_items(
-                job.task_id,
-                items,
-                dest_dir,
-                include_orbit_files=include_orbit_files,
-                export_zip=export_zip,
-            )
+            if package_mode in {"source_bundle", "bundle", "dedupe_source"}:
+                await run_dinsar_source_bundle_items(
+                    job.task_id,
+                    items,
+                    dest_dir,
+                    include_orbit_files=include_orbit_files,
+                    skip_existing=skip_existing,
+                    max_items=max_items,
+                )
+            else:
+                await run_dinsar_copy_items(
+                    job.task_id,
+                    items,
+                    dest_dir,
+                    include_orbit_files=include_orbit_files,
+                    export_zip=(package_mode == "task_zip" or export_zip),
+                    skip_existing=skip_existing,
+                    max_items=max_items,
+                )
             return
 
     raise ValueError(f"Unknown COPY_DATA file_type: {file_type}")

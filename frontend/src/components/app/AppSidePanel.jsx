@@ -262,7 +262,11 @@ export default function AppSidePanel({
                         <LazyDataCopierPanel
                             apiEndpoint={apiEndpoint}
                             readOnly={isReadOnlyUser}
-                            onJobQueued={(taskId) => taskPanel.onTaskStart(taskId, '数据分发任务已入队，正在处理...')}
+                            onJobQueued={(taskId) => taskPanel.onTaskStart(
+                                taskId,
+                                '数据分发任务已入队，正在处理...',
+                                { taskType: 'COPY_DATA', nonBlocking: true },
+                            )}
                         />
                     </Suspense>
                 </div>

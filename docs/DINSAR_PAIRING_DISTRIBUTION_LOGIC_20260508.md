@@ -279,7 +279,10 @@ score =
 - `dest_dir`
 - `copy_statuses`，为空时默认 `["COMPLETED"]`
 - `include_orbit_files`，默认 `false`；为 `true` 时把 master/slave 精轨复制到 Task 内的 `orbit/`
-- `export_zip`，默认 `false`；为 `true` 时每个 Task 输出为一个 `.zip` 包
+- `package_mode`，支持 `task_folder`、`task_zip`、`source_bundle`
+- `export_zip`，兼容旧参数；为 `true` 且 `package_mode=task_folder` 时等价于 `task_zip`
+- `skip_existing`，默认 `true`
+- `max_items`，每次最多处理的新 Task 或新 pair 数量；为空或 0 表示不限制
 
 后端动作：
 
@@ -288,7 +291,9 @@ score =
 3. 创建 `SystemJob`，job_type 也是 `COPY_DATA`。
 4. worker 领取 job 后进入 `job_handlers._handle_copy_data()`。
 5. `_handle_copy_data()` 根据 `batch_id` 查询 `dinsar_task_items`，只取 `copy_statuses` 命中的条目。
-6. 调用 [backend/app/copier.py](../backend/app/copier.py) 的 `run_dinsar_copy_items()`。
+6. 根据 `package_mode` 调用 [backend/app/copier.py](../backend/app/copier.py) 的 `run_dinsar_copy_items()` 或 `run_dinsar_source_bundle_items()`。
+
+### 9.1 Task 文件夹 / ZIP 模式
 
 `run_dinsar_copy_items()` 对每个 item 执行：
 
@@ -298,8 +303,10 @@ score =
 - slave 目录：`<task_alias>/slave`
 - 如果启用 `include_orbit_files`，从 `radar_data.orbit_file_path` 找 master/slave 精轨并复制到 `<task_alias>/orbit/`
 - 直接复制配对时保存的原始产品目录；D-InSAR 分发不再优先使用 `envi_import/`
-- 使用 `shutil.copytree(..., dirs_exist_ok=True)` 复制 master/slave
+- 先复制到临时目录，完成后再替换为最终 Task 目录或 ZIP，避免留下半成品
 - 写入 `<task_alias>/.dinsar_pair.json`
+- `skip_existing=true` 时，文件夹模式检查 `<task_alias>/master` 和 `<task_alias>/slave` 非空即跳过；ZIP 模式只检查 `<task_alias>.zip` 存在且大小大于 0，不打开 ZIP 做深度校验
+- `max_items` 限制本次新复制数量；已跳过的既有 Task 不消耗本次额度
 
 `.dinsar_pair.json` 是后续生产追踪的关键 sidecar，包含：
 
@@ -319,7 +326,32 @@ score =
 - `selection_strategy`
 - `copied_at`
 
-当前实现不会清空已有 Task 目录，而是合并复制；如果目标已有旧文件，需要人工确认目录状态。
+当前实现不再合并写入已有 Task 目录。目标 Task 已完整存在时跳过；目标同名目录存在但不完整时，为避免误覆盖，会报错并要求人工处理。
+
+### 9.2 去重源数据包模式
+
+`package_mode=source_bundle` 时，分发不生成每个 `Task_*`，而是在同一个目标目录内维护：
+
+```text
+<dest_dir>/
+  data/
+  orbit/
+  pairs.json
+  manifest.json
+```
+
+规则：
+
+- `data/` 只复制唯一源影像目录或文件，命名为 `scene_<source_path_hash>_<source_name>`。
+- `orbit/` 只复制唯一精密轨道文件，命名为 `orbit_<source_path_hash>_<orbit_name>`。
+- `pairs.json` 记录每个 pair 的 master/slave 数据相对路径、轨道相对路径、pair 元数据和 `identity_key`。
+- `manifest.json` 记录 package 统计信息、场景清单、轨道清单和本次追加统计。
+- 同一目标目录再次分发时，系统先读取已有 `pairs.json/manifest.json`，根据 `identity_key`、`scene_pair_uid/pair_uid`、`pair_key`、`network_run_id + network_edge_id`、源路径或 bundle 相对路径识别已导出的 pair。
+- `max_items` 在跳过已导出 pair 后生效。因此 500 个 pair 第一次限制 100，第二次同一目录限制 100，会追加下一批未导出的 100 个 pair。
+- `data/` / `orbit/` 仍按文件存在性跳过重复复制；pair 级续跑以 `pairs.json` 为准。
+- `pairs.json` 和 `manifest.json` 写入时先写临时文件，再原子替换。
+
+这个模式面向外部分发和后续离线还原，不直接作为本系统生产输入。反向还原工具任务书见 [DINSAR_SOURCE_BUNDLE_REVERSE_TOOL_TASK_20260511.md](DINSAR_SOURCE_BUNDLE_REVERSE_TOOL_TASK_20260511.md)。
 
 ## 10. 生产提交与运行分发
 

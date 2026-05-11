@@ -11,7 +11,7 @@ import { normalizePagePayload } from '../utils/appHelpers';
 import { normalizeTaskStatus } from '../utils/appUiHelpers';
 import { DEFAULT_LIST_PAGE_SIZE } from '../config/appConstants';
 
-const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES']);
+const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES', 'COPY_DATA']);
 
 export default function useDinsarOperations({
     onCleanupDinsarLayers,

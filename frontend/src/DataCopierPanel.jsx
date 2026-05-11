@@ -16,8 +16,10 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
   const [activeTab, setActiveTab] = useState('dinsar');
   const [destDir, setDestDir] = useState('');
   const [copyStatuses, setCopyStatuses] = useState(['COMPLETED']);
-  const [includeDinsarOrbitFiles, setIncludeDinsarOrbitFiles] = useState(false);
-  const [dinsarExportZip, setDinsarExportZip] = useState(false);
+  const [includeDinsarOrbitFiles, setIncludeDinsarOrbitFiles] = useState(true);
+  const [dinsarPackageMode, setDinsarPackageMode] = useState('task_folder');
+  const [skipExistingDinsarTasks, setSkipExistingDinsarTasks] = useState(true);
+  const [dinsarMaxItems, setDinsarMaxItems] = useState('200');
   const [batches, setBatches] = useState([]);
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -84,7 +86,10 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
   const fetchLogs = async () => {
     if (!taskId) return;
     try {
-      const response = await axios.get(`${apiEndpoint}/tools/copy-status/${taskId}`, { withCredentials: true });
+      const response = await axios.get(`${apiEndpoint}/tools/copy-status/${taskId}`, {
+        withCredentials: true,
+        params: { limit: 1000 },
+      });
       setLogs(response.data.logs);
       const nextStatus = normalizeStatus(response.data.status);
       if (nextStatus && nextStatus !== 'UNKNOWN') {
@@ -126,13 +131,19 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
       };
       if (activeTab === 'dinsar') {
         payload.include_orbit_files = includeDinsarOrbitFiles;
-        payload.export_zip = dinsarExportZip;
+        payload.package_mode = dinsarPackageMode;
+        payload.export_zip = dinsarPackageMode === 'task_zip';
+        payload.skip_existing = skipExistingDinsarTasks;
+        const parsedMaxItems = Number.parseInt(dinsarMaxItems, 10);
+        if (Number.isFinite(parsedMaxItems) && parsedMaxItems > 0) {
+          payload.max_items = parsedMaxItems;
+        }
       }
       const response = await axios.post(endpoint, payload, { withCredentials: true });
       const taskId = response.data.task_id;
       setTaskId(taskId);
 
-      // 触发全局锁定
+      // 通知全局任务状态；COPY_DATA 在全局控制里按非阻塞处理。
       if (onJobQueued) {
         onJobQueued(taskId);
       }
@@ -196,6 +207,41 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
             }}
           >
             <label>D-InSAR 分发设置：</label>
+            <div style={{ display: 'grid', gap: '6px', marginTop: '8px' }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <input
+                  type="radio"
+                  name="dinsar-package-mode"
+                  value="task_folder"
+                  checked={dinsarPackageMode === 'task_folder'}
+                  onChange={(event) => setDinsarPackageMode(event.target.value)}
+                  disabled={status === 'RUNNING' || readOnly}
+                />
+                <span>生产 Task 文件夹</span>
+              </label>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <input
+                  type="radio"
+                  name="dinsar-package-mode"
+                  value="task_zip"
+                  checked={dinsarPackageMode === 'task_zip'}
+                  onChange={(event) => setDinsarPackageMode(event.target.value)}
+                  disabled={status === 'RUNNING' || readOnly}
+                />
+                <span>生产 Task ZIP</span>
+              </label>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <input
+                  type="radio"
+                  name="dinsar-package-mode"
+                  value="source_bundle"
+                  checked={dinsarPackageMode === 'source_bundle'}
+                  onChange={(event) => setDinsarPackageMode(event.target.value)}
+                  disabled={status === 'RUNNING' || readOnly}
+                />
+                <span>去重源数据包（data / orbit / pairs.json）</span>
+              </label>
+            </div>
             <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', marginTop: '8px' }}>
               <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                 <input
@@ -204,20 +250,32 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
                   onChange={(event) => setIncludeDinsarOrbitFiles(event.target.checked)}
                   disabled={status === 'RUNNING' || readOnly}
                 />
-                <span>复制精密轨道到 Task/orbit</span>
+                <span>{dinsarPackageMode === 'source_bundle' ? '复制精密轨道到 orbit/' : '复制精密轨道到 Task/orbit'}</span>
               </label>
               <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                 <input
                   type="checkbox"
-                  checked={dinsarExportZip}
-                  onChange={(event) => setDinsarExportZip(event.target.checked)}
+                  checked={skipExistingDinsarTasks}
+                  onChange={(event) => setSkipExistingDinsarTasks(event.target.checked)}
                   disabled={status === 'RUNNING' || readOnly}
                 />
-                <span>导出为 ZIP 压缩包</span>
+                <span>{dinsarPackageMode === 'source_bundle' ? '复用已存在的 data/orbit' : '跳过目标目录中已存在的 Task'}</span>
               </label>
             </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '8px' }}>
+              <label style={{ fontSize: '13px' }}>{dinsarPackageMode === 'source_bundle' ? '每次最多追加新配对:' : '每次最多分发新 Task:'}</label>
+              <input
+                type="number"
+                min="0"
+                value={dinsarMaxItems}
+                onChange={(event) => setDinsarMaxItems(event.target.value)}
+                disabled={status === 'RUNNING' || readOnly}
+                style={{ width: '110px', padding: '5px 7px' }}
+              />
+              <span style={{ fontSize: '12px', color: '#64748b' }}>0 或留空表示不限制</span>
+            </div>
             <div style={{ fontSize: '12px', color: '#475569', marginTop: '6px' }}>
-              未勾选 ZIP 时直接导出 Task 文件夹；勾选后每个 Task 输出一个 .zip。
+              去重源数据包只复制唯一影像和精轨，并写出 pairs.json；再次分发到同一目录时会接着追加未导出的配对。
             </div>
           </div>
         )}
