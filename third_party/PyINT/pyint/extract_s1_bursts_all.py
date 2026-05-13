@@ -26,9 +26,27 @@ def work(data0):
     stderr = p.stderr
     
     if type(stderr) == bytes:
-        aa=stderr.decode("utf-8")
+        aa=stderr.decode("utf-8", errors="replace")
     else:
         aa = stderr
+    if type(stdout) == bytes:
+        bb=stdout.decode("utf-8", errors="replace")
+    else:
+        bb = stdout
+    if p.returncode != 0:
+        detail_parts = []
+        if bb:
+            detail_parts.append(bb)
+        if aa:
+            detail_parts.append(aa)
+        detail = '\n'.join(part.strip() for part in detail_parts if part and part.strip())
+        str0 = cmd[0] + ' ' + cmd[1] + ' ' + cmd[2] + '\n'
+        with open(err_file, 'a') as f:
+            f.write(str0)
+            if detail:
+                f.write(detail)
+                f.write('\n')
+        raise RuntimeError(str0.strip() + ' failed with rc=' + str(p.returncode) + ('\n' + detail if detail else ''))
     
     if aa:
         str0 = cmd[0] + ' ' + cmd[1] + ' ' + cmd[2] + '\n'
@@ -75,21 +93,30 @@ def main(argv):
     projectDir = scratchDir + '/' + projectName 
     slcDir    = scratchDir + '/' + projectName + '/SLC'
     slc_list = [os.path.basename(fname) for fname in sorted(glob.glob(slcDir + '/*'))]
+    templateDir = os.getenv('TEMPLATEDIR')
+    templateFile = templateDir + "/" + projectName + ".template"
+    templateDict=ut.update_template(templateFile)
+    master_date = templateDict['masterDate']
     
     err_txt = scratchDir + '/' + projectName + '/extract_s1_bursts_all.err'
     if os.path.isfile(err_txt): os.remove(err_txt)
     
     data_para = []
     for i in range(len(slc_list)):
+        if slc_list[i] == master_date:
+            continue
         cmd0 = ['extract_s1_bursts.py',projectName,slc_list[i]]
         data0 = [cmd0,err_txt]
         data_para.append(data0)
     
-    ut.parallel_process(data_para, work, n_jobs=inps.parallelNumb, use_kwargs=False)
+    results = ut.parallel_process(data_para, work, n_jobs=inps.parallelNumb, use_kwargs=False)
+    failures = [str(item) for item in results if isinstance(item, Exception)]
+    if failures:
+        raise RuntimeError('\n\n'.join(failures))
     print("Extract TOPS bursts for project %s is done! " % projectName)
     ut.print_process_time(start_time, time.time())
     
-    sys.exit(1)
+    sys.exit(0)
     
 if __name__ == '__main__':
     main(sys.argv[:])    

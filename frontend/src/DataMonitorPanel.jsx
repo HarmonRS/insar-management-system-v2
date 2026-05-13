@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import './App.css';
 import { useI18n } from './i18n/I18nContext';
+import { getAssetInventoryStatus, scanAssetInventory, unpackSentinel1Batch } from './api/assets';
 
 const DEFAULT_MONITOR_CONFIG = {
   radar_dirs: [],
@@ -8,6 +9,9 @@ const DEFAULT_MONITOR_CONFIG = {
   dinsar_dirs: [],
   gf3_source_dirs: [],
   gf3_storage_dirs: [],
+  s1_source_dirs: [],
+  s1_storage_dirs: [],
+  s1_orbit_dirs: [],
 };
 
 const DEFAULT_UNPACK_CONFIG = {
@@ -42,6 +46,7 @@ const parseUnpackRunValue = (rawValue, label) => {
 };
 
 const formatList = (list) => (Array.isArray(list) && list.length ? list.join('; ') : '未配置');
+const normalizeComparePath = (value) => String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 
 const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled = true }) => {
   const { t } = useI18n();
@@ -50,8 +55,6 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const [logs, setLogs] = useState([]);
   const [activeTasks, setActiveTasks] = useState([]);
   const [unpackConfig, setUnpackConfig] = useState(DEFAULT_UNPACK_CONFIG);
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState('');
   const [unpackLoading, setUnpackLoading] = useState(false);
   const [unpackMessage, setUnpackMessage] = useState('');
   const [showUnpackDialog, setShowUnpackDialog] = useState(false);
@@ -59,7 +62,11 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const [unpackDialogError, setUnpackDialogError] = useState('');
   const [unpackTaskId, setUnpackTaskId] = useState('');
   const [unpackTaskTerminal, setUnpackTaskTerminal] = useState(false);
+  const [s1Loading, setS1Loading] = useState(false);
+  const [s1ScanLoading, setS1ScanLoading] = useState(false);
+  const [s1Message, setS1Message] = useState('');
   const [gf3Loading, setGf3Loading] = useState(false);
+  const [gf3ProcessLoading, setGf3ProcessLoading] = useState(false);
   const [gf3Message, setGf3Message] = useState('');
   const logEndRef = useRef(null);
 
@@ -76,6 +83,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const unpackActiveTask = displayActiveTasks.find((task) =>
     task.task_id === unpackTaskId || task.task_type === 'UNPACK_ARCHIVES'
   );
+  const s1ActiveTask = displayActiveTasks.find((task) => task.task_type === 'UNPACK_SENTINEL1');
 
   useEffect(() => {
     if (!enabled) {
@@ -102,6 +110,9 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
           ...data,
           radar_dirs: toArray(data?.radar_dirs),
           dinsar_dirs: toArray(data?.dinsar_dirs),
+          s1_source_dirs: toArray(data?.s1_source_dirs),
+          s1_storage_dirs: toArray(data?.s1_storage_dirs),
+          s1_orbit_dirs: toArray(data?.s1_orbit_dirs),
           gf3_source_dirs: toArray(data?.gf3_source_dirs),
           gf3_storage_dirs: toArray(data?.gf3_storage_dirs),
         });
@@ -267,51 +278,134 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
 
   const hasRadarDirs = config.radar_dirs.length > 0;
   const hasOrbitDir = typeof config.orbit_dir === 'string' && config.orbit_dir.trim() !== '';
-  const hasDinsarDirs = config.dinsar_dirs.length > 0;
+  const hasS1SourceDirs = config.s1_source_dirs.length > 0;
+  const hasS1StorageDirs = config.s1_storage_dirs.length > 0;
+  const hasS1OrbitDirs = config.s1_orbit_dirs.length > 0;
   const hasGf3SourceDirs = config.gf3_source_dirs.length > 0;
   const hasGf3StorageDirs = config.gf3_storage_dirs.length > 0;
 
   const canRunRadar = !readOnly && configLoaded && hasRadarDirs;
   const canRunOrbit = !readOnly && configLoaded && hasOrbitDir;
-  const canRunDinsar = !readOnly && configLoaded && hasDinsarDirs;
+  const canRunS1 = !readOnly && configLoaded && (hasS1SourceDirs || hasS1StorageDirs || hasS1OrbitDirs);
+  const canRunS1Scan = !readOnly && configLoaded && hasS1SourceDirs;
+  const canRunS1OrbitScan = !readOnly && configLoaded && hasS1OrbitDirs;
   const canRunGf3Scan = !readOnly && configLoaded && hasGf3StorageDirs;
   const canRunGf3Process = !readOnly && configLoaded && hasGf3SourceDirs;
   const canOpenUnpackDialog = !readOnly && unpackConfig.source_dirs.length > 0;
 
-  const handleRunNow = async (target) => {
+  const handleS1Run = async () => {
     if (readOnly) {
-      setMessage('当前账户为只读模式，无法触发扫描。');
+      setS1Message('当前账户为只读模式，无法触发 Sentinel-1 任务。');
       return;
     }
-
-    setLoading(true);
-    const targetMap = {
-      radar: 'LT-1 数据',
-      orbit: '精轨数据',
-      dinsar: 'D-InSAR 结果',
-      gf3: 'GF3 数据',
-    };
-    setMessage(`正在触发${targetMap[target] || '全部'}手动扫描...`);
-
+    setS1Loading(true);
+    setS1Message('Sentinel-1 任务启动中...');
     try {
-      const url = target ? `${apiEndpoint}/monitor/run-now?target=${target}` : `${apiEndpoint}/monitor/run-now`;
-      const res = await fetch(url, {
+      const res = await unpackSentinel1Batch({
+        scan_before_unpack: true,
+        overwrite: false,
+      });
+      setS1Message(res.message || 'Sentinel-1 任务已启动');
+      if (onTaskStart) {
+        onTaskStart(res.task_id, 'Sentinel-1 任务已启动。', {
+          nonBlocking: true,
+          taskType: 'UNPACK_SENTINEL1',
+        });
+      }
+    } catch (err) {
+      setS1Message(`失败：${err?.response?.data?.detail || err.message || '未知错误'}`);
+    } finally {
+      setS1Loading(false);
+    }
+  };
+
+  const handleS1Scan = async () => {
+    if (readOnly) {
+      setS1Message('当前账户为只读模式，无法触发 Sentinel-1 扫描。');
+      return;
+    }
+    setS1ScanLoading(true);
+    setS1Message('Sentinel-1 源数据扫描启动中...');
+    try {
+      const inventoryStatus = await getAssetInventoryStatus();
+      const sourcePathSet = new Set(config.s1_source_dirs.map(normalizeComparePath));
+      const rootIds = (inventoryStatus?.states || [])
+        .filter((item) => item?.inventory_type === 'source_product' && sourcePathSet.has(normalizeComparePath(item?.root_path)))
+        .map((item) => item.root_ref_id)
+        .filter((value, index, array) => value && array.indexOf(value) === index);
+      const res = await scanAssetInventory({
+        inventory_types: ['source_product'],
+        root_ids: rootIds,
+        bind_orbits: true,
+      });
+      setS1Message(res.message || 'Sentinel-1 源数据扫描任务已启动');
+      onTaskStart?.(res.task_id, 'Sentinel-1 源数据扫描任务已启动。', {
+        nonBlocking: true,
+        taskType: 'SCAN_ASSET_INVENTORY',
+      });
+    } catch (err) {
+      setS1Message(`失败：${err?.response?.data?.detail || err.message || '未知错误'}`);
+    } finally {
+      setS1ScanLoading(false);
+    }
+  };
+
+  const handleS1OrbitScan = async () => {
+    if (readOnly) {
+      setS1Message('当前账户为只读模式，无法触发 Sentinel-1 精轨扫描。');
+      return;
+    }
+    setS1ScanLoading(true);
+    setS1Message('Sentinel-1 精轨扫描启动中...');
+    try {
+      const inventoryStatus = await getAssetInventoryStatus();
+      const orbitPathSet = new Set(config.s1_orbit_dirs.map(normalizeComparePath));
+      const rootIds = (inventoryStatus?.states || [])
+        .filter((item) => item?.inventory_type === 'orbit_asset' && orbitPathSet.has(normalizeComparePath(item?.root_path)))
+        .map((item) => item.root_ref_id)
+        .filter((value, index, array) => value && array.indexOf(value) === index);
+      const res = await scanAssetInventory({
+        inventory_types: ['orbit_asset'],
+        root_ids: rootIds,
+        bind_orbits: true,
+      });
+      setS1Message(res.message || 'Sentinel-1 精轨扫描任务已启动');
+      onTaskStart?.(res.task_id, 'Sentinel-1 精轨扫描任务已启动。', {
+        nonBlocking: true,
+        taskType: 'SCAN_ASSET_INVENTORY',
+      });
+    } catch (err) {
+      setS1Message(`失败：${err?.response?.data?.detail || err.message || '未知错误'}`);
+    } finally {
+      setS1ScanLoading(false);
+    }
+  };
+
+  const handleGf3BatchProcess = async () => {
+    if (readOnly) {
+      setGf3Message('当前账户为只读模式，无法触发 GF3 预处理。');
+      return;
+    }
+    setGf3ProcessLoading(true);
+    setGf3Message('GF3 预处理启动中...');
+    try {
+      const res = await fetch(`${apiEndpoint}/monitor/gf3-process`, {
         method: 'POST',
         credentials: 'include',
       });
       const data = await parseJsonSafe(res, {});
       if (res.ok) {
-        setMessage(data.message || '扫描任务已启动。');
+        setGf3Message(data.message || 'GF3 批量处理任务已启动');
         if (onTaskStart) {
-          onTaskStart(data.task_id, `已触发${targetMap[target] || '全部'}手动扫描...`);
+          onTaskStart(data.task_id, 'GF3 L1A→L2 批量处理已启动。');
         }
       } else {
-        setMessage(`触发失败: ${data.detail || '未知错误'}`);
+        setGf3Message(`失败：${data.detail || '未知错误'}`);
       }
     } catch (err) {
-      setMessage(`触发失败: ${err.message}`);
+      setGf3Message(`失败：${err.message || '未知错误'}`);
     } finally {
-      setLoading(false);
+      setGf3ProcessLoading(false);
     }
   };
 
@@ -397,29 +491,79 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
     }
   };
 
-  const handleGf3BatchProcess = async () => {
+  const handleRadarScan = async () => {
     if (readOnly) {
-      setGf3Message('当前账户为只读模式，无法触发 GF3 处理。');
+      setUnpackMessage('当前账户为只读模式，无法触发扫描。');
       return;
     }
-    setGf3Loading(true);
-    setGf3Message('GF3 批量处理启动中...');
+    setUnpackMessage('LT-1 扫描启动中...');
     try {
-      const res = await fetch(`${apiEndpoint}/monitor/gf3-process`, {
+      const res = await fetch(`${apiEndpoint}/monitor/run-now?target=radar`, {
         method: 'POST',
         credentials: 'include',
       });
       const data = await parseJsonSafe(res, {});
       if (res.ok) {
-        setGf3Message(data.message || 'GF3 批量处理任务已启动');
+        setUnpackMessage(data.message || 'LT-1 扫描任务已启动');
         if (onTaskStart) {
-          onTaskStart(data.task_id, 'GF3 L1A→L2 批量处理已启动。');
+          onTaskStart(data.task_id, '已触发 LT-1 手动扫描...');
+        }
+      } else {
+        setUnpackMessage(`失败：${data.detail || '未知错误'}`);
+      }
+    } catch (err) {
+      setUnpackMessage(`失败：${err.message || '未知错误'}`);
+    }
+  };
+
+  const handleOrbitScan = async () => {
+    if (readOnly) {
+      setUnpackMessage('当前账户为只读模式，无法触发扫描。');
+      return;
+    }
+    setUnpackMessage('精轨扫描启动中...');
+    try {
+      const res = await fetch(`${apiEndpoint}/monitor/run-now?target=orbit`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await parseJsonSafe(res, {});
+      if (res.ok) {
+        setUnpackMessage(data.message || '精轨扫描任务已启动');
+        if (onTaskStart) {
+          onTaskStart(data.task_id, '已触发精轨手动扫描...');
+        }
+      } else {
+        setUnpackMessage(`失败：${data.detail || '未知错误'}`);
+      }
+    } catch (err) {
+      setUnpackMessage(`失败：${err.message || '未知错误'}`);
+    }
+  };
+
+  const handleGf3Scan = async () => {
+    if (readOnly) {
+      setGf3Message('当前账户为只读模式，无法触发扫描。');
+      return;
+    }
+    setGf3Loading(true);
+    setGf3Message('GF3 扫描启动中...');
+    try {
+      const res = await fetch(`${apiEndpoint}/monitor/run-now?target=gf3`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await parseJsonSafe(res, {});
+      if (res.ok) {
+        setGf3Message(data.message || 'GF3 扫描任务已启动');
+        if (onTaskStart) {
+          onTaskStart(data.task_id, '已触发 GF3 手动扫描...');
         }
       } else {
         setGf3Message(`失败：${data.detail || '未知错误'}`);
       }
     } catch (err) {
-      setGf3Message(`失败：${err.message}`);
+      setGf3Message(`失败：${err.message || '未知错误'}`);
     } finally {
       setGf3Loading(false);
     }
@@ -436,17 +580,6 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const labelStyle = { minWidth: '100px', color: 'var(--color-text-muted)', flexShrink: 0 };
   const rowStyle = { display: 'flex', gap: '8px' };
   const gridStyle = { display: 'grid', rowGap: '6px', fontSize: '0.9em', color: 'var(--color-text-secondary)' };
-
-  const scanBtnStyle = (canRun) => ({
-    flex: 1,
-    padding: '8px 5px',
-    backgroundColor: 'var(--color-info)',
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: loading || !canRun ? 'not-allowed' : 'pointer',
-    fontSize: '0.85em',
-  });
 
   const actionBtnStyle = (isLoading, isDisabled) => ({
     padding: '6px 10px',
@@ -495,6 +628,9 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
           <div style={gridStyle}>
             <div style={rowStyle}><span style={labelStyle}>LT-1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.radar_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>LT-1 精轨</span><span style={{ wordBreak: 'break-all' }}>{config.orbit_dir || '未配置'}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>S1 源数据</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_source_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>S1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_storage_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>S1 精轨</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_orbit_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>GF3 来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>GF3 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>D-InSAR 结果</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.dinsar_dirs)}</span></div>
@@ -502,20 +638,34 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
         </div>
 
         <div style={sectionStyle}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>LT-1 归档解包</div>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>LT-1 归档解包 / 扫描</div>
           <div style={{ ...gridStyle, marginBottom: '8px' }}>
             <div style={rowStyle}><span style={labelStyle}>来源目录</span><span style={{ wordBreak: 'break-all' }}>{formatList(unpackConfig.source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>LT-1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(unpackConfig.insar_storage_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>单次上限</span><span>{unpackConfig.max_files_per_run > 0 ? `${unpackConfig.max_files_per_run} 个压缩包` : '不限'}</span></div>
             <div style={rowStyle}><span style={labelStyle}>最长运行</span><span>{unpackConfig.max_runtime_minutes > 0 ? `${unpackConfig.max_runtime_minutes} 分钟` : '不限'}</span></div>
           </div>
-          <div style={{ display: 'flex', gap: '10px' }}>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
             <button
               onClick={handleOpenUnpackDialog}
               disabled={unpackLoading || !canOpenUnpackDialog}
               style={actionBtnStyle(unpackLoading, !canOpenUnpackDialog)}
             >
               {unpackLoading ? '运行中...' : (readOnly ? '只读模式' : 'LT-1 解包')}
+            </button>
+            <button
+              onClick={handleRadarScan}
+              disabled={readOnly || !canRunRadar}
+              style={actionBtnStyle(false, !canRunRadar)}
+            >
+              {readOnly ? '只读模式' : '扫描 LT-1'}
+            </button>
+            <button
+              onClick={handleOrbitScan}
+              disabled={readOnly || !canRunOrbit}
+              style={actionBtnStyle(false, !canRunOrbit)}
+            >
+              {readOnly ? '只读模式' : '扫描精轨'}
             </button>
             <div
               style={{
@@ -530,7 +680,48 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
         </div>
 
         <div style={sectionStyle}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>GF3 L1A → L2 处理</div>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>Sentinel-1 解包 / 扫描</div>
+          <div style={{ ...gridStyle, marginBottom: '8px' }}>
+            <div style={rowStyle}><span style={labelStyle}>S1 源数据</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_source_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>S1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_storage_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>S1 精轨</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_orbit_dirs)}</span></div>
+          </div>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              onClick={handleS1Run}
+              disabled={s1Loading || s1ScanLoading || !canRunS1}
+              style={actionBtnStyle(s1Loading, !canRunS1)}
+            >
+              {s1Loading ? '运行中...' : (readOnly ? '只读模式' : 'Sentinel-1 解包')}
+            </button>
+            <button
+              onClick={handleS1Scan}
+              disabled={s1ScanLoading || s1Loading || !canRunS1Scan}
+              style={actionBtnStyle(s1ScanLoading, !canRunS1Scan)}
+            >
+              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描 S1 源数据')}
+            </button>
+            <button
+              onClick={handleS1OrbitScan}
+              disabled={s1ScanLoading || s1Loading || !canRunS1OrbitScan}
+              style={actionBtnStyle(s1ScanLoading, !canRunS1OrbitScan)}
+            >
+              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描 S1 精轨')}
+            </button>
+            <div
+              style={{
+                fontSize: '0.85em',
+                color: s1Message.includes('失败') ? 'var(--color-danger)' : 'var(--color-text-muted)',
+                alignSelf: 'center',
+              }}
+            >
+              {s1ActiveTask ? (s1ActiveTask.message || 'Sentinel-1 任务运行中...') : s1Message}
+            </div>
+          </div>
+        </div>
+
+        <div style={sectionStyle}>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>GF3 归档预处理</div>
           <div style={{ ...gridStyle, marginBottom: '8px' }}>
             <div style={rowStyle}><span style={labelStyle}>L1A 来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>L2 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
@@ -538,10 +729,17 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
           <div style={{ display: 'flex', gap: '10px' }}>
             <button
               onClick={handleGf3BatchProcess}
-              disabled={gf3Loading || readOnly || !canRunGf3Process}
-              style={actionBtnStyle(gf3Loading, readOnly || !canRunGf3Process)}
+              disabled={gf3ProcessLoading || readOnly || !canRunGf3Process}
+              style={actionBtnStyle(gf3ProcessLoading, readOnly || !canRunGf3Process)}
             >
-              {gf3Loading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 L1A→L2')}
+              {gf3ProcessLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 预处理')}
+            </button>
+            <button
+              onClick={handleGf3Scan}
+              disabled={gf3Loading || readOnly || !canRunGf3Scan}
+              style={actionBtnStyle(gf3Loading, readOnly || !canRunGf3Scan)}
+            >
+              {gf3Loading ? '运行中...' : (readOnly ? '只读模式' : '扫描 GF3')}
             </button>
             <div
               style={{
@@ -554,63 +752,31 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
             </div>
           </div>
         </div>
-
-        <div style={sectionStyle}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>活动任务</div>
-          {displayActiveTasks.length === 0 ? (
-            <div style={{ fontSize: '0.85em', color: 'var(--color-text-muted)' }}>当前无活动任务。</div>
-          ) : (
-            <div style={{ display: 'grid', rowGap: '8px' }}>
-              {displayActiveTasks.slice(0, 4).map((task) => (
-                <div key={task.task_id} style={{ fontSize: '0.85em', color: 'var(--color-text-secondary)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                    <span>{task.task_type}</span>
-                    <span>{task.progress}%</span>
-                  </div>
-                  <div style={{ height: '6px', background: 'var(--color-panel-muted)', borderRadius: '3px', overflow: 'hidden' }}>
-                    <div style={{ width: `${task.progress}%`, height: '100%', background: 'var(--color-info)' }} />
-                  </div>
-                  <div style={{ color: 'var(--color-text-muted)', marginTop: '4px', wordBreak: 'break-all' }}>{t(task.message || '')}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div style={{ marginBottom: '4px' }}>
-          <h4 style={{ margin: '0 0 5px 0', fontSize: '1em' }}>实时日志</h4>
-          <div
-            style={{
-              height: '160px',
-              overflowY: 'auto',
-              backgroundColor: '#0f172a',
-              color: '#22c55e',
-              padding: '10px',
-              fontFamily: 'monospace',
-              fontSize: '0.85em',
-              borderRadius: '4px',
-            }}
-          >
-            {displayLogs.length === 0 ? (
-              <div style={{ color: 'var(--color-text-muted)' }}>暂无日志...</div>
-            ) : (
-              displayLogs.map((log, index) => (
-                <div key={index} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{t(log)}</div>
-              ))
-            )}
-            <div ref={logEndRef} />
-          </div>
-        </div>
       </div>
 
       <div style={{ flexShrink: 0, borderTop: '1px solid var(--color-border)', paddingTop: '10px', marginTop: '6px' }}>
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '6px' }}>
-          <button onClick={() => handleRunNow('radar')} disabled={loading || !canRunRadar} style={scanBtnStyle(canRunRadar)}>扫描 LT-1</button>
-          <button onClick={() => handleRunNow('gf3')} disabled={loading || !canRunGf3Scan} style={scanBtnStyle(canRunGf3Scan)}>扫描 GF3</button>
-          <button onClick={() => handleRunNow('orbit')} disabled={loading || !canRunOrbit} style={scanBtnStyle(canRunOrbit)}>扫描精轨</button>
-          <button onClick={() => handleRunNow('dinsar')} disabled={loading || !canRunDinsar} style={scanBtnStyle(canRunDinsar)}>扫描 D-InSAR</button>
+        <div style={{ fontWeight: 'bold', marginBottom: '6px', color: 'var(--color-text-primary)' }}>实时日志</div>
+        <div
+          style={{
+            height: '160px',
+            overflowY: 'auto',
+            backgroundColor: '#0f172a',
+            color: '#22c55e',
+            padding: '10px',
+            fontFamily: 'monospace',
+            fontSize: '0.85em',
+            borderRadius: '4px',
+          }}
+        >
+          {displayLogs.length === 0 ? (
+            <div style={{ color: 'var(--color-text-muted)' }}>暂无日志...</div>
+          ) : (
+            displayLogs.map((log, index) => (
+              <div key={index} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{t(log)}</div>
+            ))
+          )}
+          <div ref={logEndRef} />
         </div>
-        {message && <div style={{ color: message.includes('失败') ? 'red' : 'green', fontSize: '0.9em' }}>{message}</div>}
       </div>
 
       {showUnpackDialog && (

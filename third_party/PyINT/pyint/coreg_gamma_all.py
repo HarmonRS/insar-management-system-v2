@@ -158,8 +158,11 @@ def main(argv):
     if not os.path.isdir(rslcDir): os.mkdir(rslcDir)
     ensure_master_rslc(projectName)
     
-    if 'S1' in projectName: cmd_command = 'coreg_s1_gamma.py'
-    else: cmd_command = 'coreg_gamma.py'
+    template_satellite = str(ut.update_template(templateDir + "/" + projectName + ".template").get('satelite', '') or '')
+    if str(template_satellite).startswith('S1') or 'S1' in projectName:
+        cmd_command = 'coreg_s1_gamma.py'
+    else:
+        cmd_command = 'coreg_gamma.py'
         
     err_txt = scratchDir + '/' + projectName + '/coreg_gamma_all.err'
     if os.path.isfile(err_txt): os.remove(err_txt)

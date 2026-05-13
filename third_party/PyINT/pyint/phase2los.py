@@ -83,7 +83,7 @@ def main(argv):
       wavelength = 0.0312283810417
     elif satelite == 'TSX':
       wavelength = 0.03106657823461874
-    elif satelite == 'S1A':
+    elif str(satelite).startswith('S1'):
       wavelength = 0.0554657647
     elif satelite == 'ALOS2': 
       wavelength = 0.2424525 
@@ -106,4 +106,3 @@ def main(argv):
 
 if __name__ == '__main__':
     main(sys.argv[:])
-

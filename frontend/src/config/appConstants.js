@@ -145,7 +145,7 @@ export const LEFT_GROUP_SECTIONS = {
 };
 
 export const LEFT_GROUP_TABS = {
-  data: ['ingest', 'data', 'hazard'],
+  data: ['ingest', 'asset_inventory', 'data', 'hazard'],
   production_planning: LEFT_GROUP_SECTIONS.production_planning.flatMap(section => section.tabs),
   production_management: [PRODUCTION_WORKSPACE_TAB],
   insar_analysis: LEFT_GROUP_SECTIONS.insar_analysis.flatMap(section => section.tabs),
@@ -180,6 +180,7 @@ export const FULL_WIDTH_LEFT_TABS = new Set([
 
 export const ADMIN_ONLY_TABS = new Set([
   'ingest',
+  'asset_inventory',
   'pairing',
   'pairs',
   'ps_results',
@@ -199,6 +200,7 @@ export const BATCH_API_MAX_PAGES = 200;
 
 export const SATELLITE_GROUPS = [
   { key: 'LT-1', label: 'LT-1', prefixes: ['LT1'] },
+  { key: 'S1', label: 'Sentinel-1', prefixes: ['S1'] },
   { key: 'GF-3', label: 'GF-3', prefixes: ['GF3'] },
 ];
 

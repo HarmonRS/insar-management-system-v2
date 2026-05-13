@@ -291,7 +291,7 @@ def main(argv):
     iw3 = Sdate + '.IW3.slc*'
     call_str = 'rm '+ iw1 + ' ' + iw2 + ' '+ iw3
     os.system(call_str)
-    sys.exit(1)
+    sys.exit(0)
 
 if __name__ == '__main__':
     main(sys.argv[:])

@@ -14,6 +14,7 @@ import { getLeftTabLabel } from '../../utils/appUiHelpers';
 import { PanelLoadingBody, PanelLoadingPanel } from './AppLoadingFallbacks';
 
 const LazyDataMonitorPanel = lazy(() => import('../../DataMonitorPanel'));
+const LazyAssetInventoryPanel = lazy(() => import('../../AssetInventoryPanel'));
 const LazyDataCopierPanel = lazy(() => import('../../DataCopierPanel'));
 const LazyIDLAutomationPanel = lazy(() => import('../../IDLAutomationPanel'));
 const LazyHazardPointPanel = lazy(() => import('../../HazardPointPanel'));
@@ -232,6 +233,17 @@ export default function AppSidePanel({
                             onTaskStart={taskPanel.onTaskStart}
                             readOnly={isReadOnlyUser}
                             enabled={!!currentUser && licenseOk}
+                        />
+                    </Suspense>
+                </div>
+            )}
+
+            {leftPanelTab === 'asset_inventory' && (
+                <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
+                    <Suspense fallback={<PanelLoadingBody message="正在加载资产库存..." />}>
+                        <LazyAssetInventoryPanel
+                            readOnly={isReadOnlyUser}
+                            onTaskStart={taskPanel.onTaskStart}
                         />
                     </Suspense>
                 </div>

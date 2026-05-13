@@ -59,6 +59,19 @@ export default function useRadarSearch({
     clearRadarSearchResults,
     clearRadarMapLayers,
 }) {
+    const getSatelliteCatalog = () => {
+        const satellites = useRadarStore.getState().radarSearchOptions?.satellite;
+        return Array.isArray(satellites) ? satellites.filter(Boolean) : [];
+    };
+
+    const getSatellitesForGroup = (groupKey, satellites = getSatelliteCatalog()) => {
+        const group = SATELLITE_GROUPS.find((item) => item.key === groupKey);
+        if (!group) return [];
+        return satellites.filter((sat) =>
+            group.prefixes.some((prefix) => String(sat || '').startsWith(prefix))
+        );
+    };
+
     const fetchRadarImagingDates = useCallback(async () => {
         try {
             const response = await apiClient.get('/radar-data/imaging-dates');
@@ -74,13 +87,31 @@ export default function useRadarSearch({
         try {
             setRadarSearchOptionsLoading(true);
             const params = {};
-            if (Array.isArray(satelliteFilter) && satelliteFilter.length > 0) {
-                params.satellite = satelliteFilter;
+            const storeState = useRadarStore.getState();
+            const satelliteCatalog = getSatelliteCatalog();
+            const hasExplicitSatelliteFilter = Array.isArray(satelliteFilter);
+            let resolvedSatelliteFilter = hasExplicitSatelliteFilter
+                ? satelliteFilter.filter(Boolean)
+                : [];
+
+            if (!hasExplicitSatelliteFilter) {
+                const groupKey = storeState.selectedSatelliteGroup;
+                if (groupKey && groupKey !== 'all') {
+                    resolvedSatelliteFilter = getSatellitesForGroup(groupKey, satelliteCatalog);
+                }
+            }
+
+            if (resolvedSatelliteFilter.length > 0) {
+                params.satellite = resolvedSatelliteFilter;
             }
             const response = await apiClient.get('/radar-data/search/options', { params });
             const payload = response?.data && typeof response.data === 'object' ? response.data : {};
+            const payloadSatellites = Array.isArray(payload.satellite) ? payload.satellite.filter(Boolean) : [];
+            const nextSatelliteCatalog = satelliteCatalog.length > payloadSatellites.length
+                ? satelliteCatalog
+                : payloadSatellites;
             setRadarSearchOptions({
-                satellite: Array.isArray(payload.satellite) ? payload.satellite : [],
+                satellite: nextSatelliteCatalog,
                 satellite_mode: Array.isArray(payload.satellite_mode) ? payload.satellite_mode : [],
                 receiving_station: Array.isArray(payload.receiving_station) ? payload.receiving_station : [],
                 imaging_mode: Array.isArray(payload.imaging_mode) ? payload.imaging_mode : [],
@@ -119,14 +150,9 @@ export default function useRadarSearch({
             orbit_direction: '',
         }));
         if (groupKey === 'all') {
-            fetchRadarSearchOptions();
+            fetchRadarSearchOptions([]);
         } else {
-            const group = SATELLITE_GROUPS.find((g) => g.key === groupKey);
-            if (!group) return;
-            const allSatellites = useRadarStore.getState().radarSearchOptions.satellite;
-            const matched = allSatellites.filter((sat) =>
-                group.prefixes.some((prefix) => sat.startsWith(prefix))
-            );
+            const matched = getSatellitesForGroup(groupKey);
             if (matched.length > 0) {
                 fetchRadarSearchOptions(matched);
             }
@@ -265,15 +291,9 @@ export default function useRadarSearch({
     const applyRadarSearch = useCallback(async () => {
         const draftWithSatelliteGroup = { ...radarSearchDraft };
         if (selectedSatelliteGroup && selectedSatelliteGroup !== 'all') {
-            const group = SATELLITE_GROUPS.find((g) => g.key === selectedSatelliteGroup);
-            if (group) {
-                const allSatellites = useRadarStore.getState().radarSearchOptions.satellite;
-                const matched = allSatellites.filter((sat) =>
-                    group.prefixes.some((prefix) => sat.startsWith(prefix))
-                );
-                if (matched.length > 0) {
-                    draftWithSatelliteGroup.satellite = matched.join(',');
-                }
+            const matched = getSatellitesForGroup(selectedSatelliteGroup);
+            if (matched.length > 0) {
+                draftWithSatelliteGroup.satellite = matched.join(',');
             }
         }
         const normalizedCriteria = normalizeRadarSearchCriteria(draftWithSatelliteGroup, RADAR_SEARCH_DEFAULTS);
@@ -349,7 +369,7 @@ export default function useRadarSearch({
         radarSearchRequestSeqRef.current += 1;
         setHasRadarSearched(false);
         clearRadarSearchResults({ limit: radarPagination.limit });
-        fetchRadarSearchOptions();
+        fetchRadarSearchOptions([]);
         addLog('info', '已清除检索条件，请点击"搜索"或"搜索全部"获取数据。');
     }, [
         radarPagination.limit, radarSearchRequestSeqRef,
@@ -377,7 +397,7 @@ export default function useRadarSearch({
         setRadarSearchRegionError('');
         setRadarSearchAoiToken('');
         setSelectedSatelliteGroup('all');
-        fetchRadarSearchOptions();
+        fetchRadarSearchOptions([]);
 
         setHasRadarSearched(true);
         setIsLoading(true);

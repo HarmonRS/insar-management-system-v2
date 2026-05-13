@@ -39,6 +39,7 @@ from .dinsar_naming import (
     build_fallback_pair_key,
     find_json_sidecar,
 )
+from ..utils import normalize_satellite_family
 from .dinsar_result_layout_service import (
     RUN_CURRENT_DIRNAME,
     RUN_NATIVE_DIRNAME,
@@ -203,10 +204,16 @@ def _resolve_candidate_identity(candidate: Dict[str, Any]) -> Dict[str, Any]:
         pair_meta.get("task_alias"),
         candidate.get("task_name"),
     ) or "Task_unknown_unknown"
+    satellite_family = normalize_satellite_family(
+        pair_meta.get("master_satellite")
+        or pair_meta.get("slave_satellite")
+        or run_meta.get("master_satellite")
+        or run_meta.get("slave_satellite")
+    )
     pair_key = _first_text(
         run_meta.get("pair_key"),
         pair_meta.get("pair_key"),
-    ) or build_fallback_pair_key(task_alias, source_dir)
+    ) or build_fallback_pair_key(task_alias, source_dir, satellite_family=satellite_family)
     run_key = _first_text(run_meta.get("run_key")) or (
         "legacy_" + _stable_digest(candidate.get("engine_code"), pair_key, source_dir, candidate["primary_file"], length=16)
     )

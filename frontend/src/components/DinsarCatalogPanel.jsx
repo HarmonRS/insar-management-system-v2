@@ -13,6 +13,7 @@ import {
   buildDinsarEngineOptions,
   getDinsarEngineMeta,
 } from '../utils/dinsarEngines';
+import { formatSatelliteFamilyLabel, inferSatelliteFamilyFromResultLike } from '../utils/satelliteFamily';
 
 const STATUS_TONE_MAP = {
   READY: 'ready',
@@ -383,6 +384,7 @@ export default function DinsarCatalogPanel({
               {products.map((item) => {
                 const tone = STATUS_TONE_MAP[item.status] || 'neutral';
                 const engineMeta = getDinsarEngineMeta(item.engine_code);
+                const satelliteFamily = inferSatelliteFamilyFromResultLike(item);
                 return (
                   <button
                     key={item.id}
@@ -396,6 +398,9 @@ export default function DinsarCatalogPanel({
                     </div>
                     <div className="dinsar-catalog-list-item-badges">
                       <span className={`dinsar-engine-badge tone-${engineMeta.tone}`}>{engineMeta.shortLabel}</span>
+                      {satelliteFamily && (
+                        <span className="dinsar-engine-badge tone-unknown">{formatSatelliteFamilyLabel(satelliteFamily)}</span>
+                      )}
                       <span>{formatDateTime(item.published_at)}</span>
                     </div>
                     <div className="dinsar-catalog-list-item-meta">
@@ -434,6 +439,9 @@ export default function DinsarCatalogPanel({
             <div className="dinsar-catalog-empty error">{selectedProduct.error}</div>
           ) : (
             <div className="dinsar-catalog-detail-body">
+              {(() => {
+                const satelliteFamily = inferSatelliteFamilyFromResultLike(selectedProduct?.profile || selectedProduct);
+                return (
               <div className="dinsar-catalog-hero">
                 <div className="dinsar-catalog-preview-frame">
                   <img
@@ -452,6 +460,11 @@ export default function DinsarCatalogPanel({
                       <span className={`dinsar-engine-badge tone-${selectedProductEngine.tone}`}>
                         {selectedProductEngine.shortLabel}
                       </span>
+                      {satelliteFamily && (
+                        <span className="dinsar-engine-badge tone-unknown">
+                          {formatSatelliteFamilyLabel(satelliteFamily)}
+                        </span>
+                      )}
                       <StatusPill label={selectedProduct.status || 'UNKNOWN'} tone={selectedStatusTone} />
                     </div>
                   </div>
@@ -469,6 +482,8 @@ export default function DinsarCatalogPanel({
                   </div>
                 </div>
               </div>
+                );
+              })()}
 
               <div className="dinsar-catalog-detail-grid">
                 <div className="dinsar-catalog-section-card">

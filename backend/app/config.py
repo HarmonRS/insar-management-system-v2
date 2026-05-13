@@ -167,6 +167,9 @@ class Settings(BaseSettings):
     DB_SCHEMA_RESET_CONFIRM: bool = False
 
     UNPACK_SOURCE_DIRS: str = ""
+    SOURCE_PRODUCT_DIRS: str = ""
+    SENTINEL1_STORAGE_DIRS: str = ""
+    ORBIT_SOURCE_DIRS: str = ""
     INSAR_STORAGE_DIRS: str = ""
     MONITOR_RADAR_DIRS: str = ""
     MONITOR_DINSAR_DIRS: str = ""
@@ -859,6 +862,13 @@ def validate_runtime_config() -> dict[str, Any]:
     _check_path(label="SRTM_DEM_DIR", value=settings.SRTM_DEM_DIR, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="WATER_RESULTS_DIR", value=settings.WATER_RESULTS_DIR, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="MONITOR_ORBIT_DIR", value=settings.MONITOR_ORBIT_DIR, errors=errors, warnings=warnings, expect_file=False)
+    for label, value in (
+        ("SOURCE_PRODUCT_DIRS", settings.SOURCE_PRODUCT_DIRS),
+        ("SENTINEL1_STORAGE_DIRS", settings.SENTINEL1_STORAGE_DIRS),
+        ("ORBIT_SOURCE_DIRS", settings.ORBIT_SOURCE_DIRS),
+    ):
+        for item in split_env_paths(value):
+            _check_path(label=label, value=item, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="ORBIT_POOL_ENVI", value=settings.ORBIT_POOL_ENVI, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="ORBIT_POOL_ISCE2", value=settings.ORBIT_POOL_ISCE2, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="RESULT_PUBLISH_ROOT", value=settings.RESULT_PUBLISH_ROOT, errors=errors, warnings=warnings, expect_file=False)

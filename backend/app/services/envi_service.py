@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from ..config import get_env_text, settings
 from ..process_utils import is_any_process_running
+from ..utils import normalize_satellite_family
 from .dinsar_naming import (
     PAIR_META_FILENAME,
     build_fallback_pair_key,
@@ -480,7 +481,14 @@ def _utc_now_text() -> str:
 def _resolve_dinsar_pair_identity(task_dir: str, task_name: str) -> tuple[str, str, Dict[str, Any]]:
     pair_meta = find_json_sidecar(task_dir, PAIR_META_FILENAME, max_levels=0) or {}
     task_alias = str(pair_meta.get("task_alias") or task_name).strip() or task_name
-    pair_key = str(pair_meta.get("pair_key") or "").strip() or build_fallback_pair_key(task_alias, task_dir)
+    satellite_family = normalize_satellite_family(
+        pair_meta.get("master_satellite") or pair_meta.get("slave_satellite")
+    )
+    pair_key = str(pair_meta.get("pair_key") or "").strip() or build_fallback_pair_key(
+        task_alias,
+        task_dir,
+        satellite_family=satellite_family,
+    )
     return task_alias, pair_key, pair_meta
 
 

@@ -20,6 +20,10 @@ const getTaskTypeLabel = (taskType) => {
       return '灾害点同步';
     case 'UNPACK_ARCHIVES':
       return 'LT-1 解包';
+    case 'UNPACK_SENTINEL1':
+      return 'Sentinel-1 解包';
+    case 'SCAN_ASSET_INVENTORY':
+      return '资产库存扫描';
     case 'IDL_IMPORT':
       return 'ENVI 数据导入';
     case 'IDL_DINSAR':

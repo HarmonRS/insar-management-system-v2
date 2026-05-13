@@ -238,7 +238,7 @@ def _chunked(items: List[Any], size: int):
 
 
 _RADAR_PREVIEW_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
-_RADAR_PREVIEW_KEYWORDS = ("quicklook", "preview", "browse", "thumbnail", "thumb", "overview")
+_RADAR_PREVIEW_KEYWORDS = ("quicklook", "quick-look", "preview", "browse", "thumbnail", "thumb", "overview")
 _RADAR_CACHE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -396,7 +396,18 @@ class DataService:
                     continue
 
                 path = os.path.join(root, name)
+                root_lower = root.lower()
                 keyword_score = 0 if any(key in lower_name for key in _RADAR_PREVIEW_KEYWORDS) else 1
+                if lower_name == "quick-look.png":
+                    keyword_score = -3
+                elif lower_name == "quicklook.png":
+                    keyword_score = -2
+                elif lower_name.startswith("quick-look.") or lower_name.startswith("quicklook."):
+                    keyword_score = min(keyword_score, -1)
+                if f"{os.sep}preview" in root_lower:
+                    keyword_score -= 1
+                if f"{os.sep}icons" in root_lower:
+                    keyword_score += 2
                 ext_score = 0 if lower_name.endswith((".jpg", ".jpeg")) else 1
                 try:
                     size_score = -os.path.getsize(path)

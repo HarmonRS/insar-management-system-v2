@@ -159,7 +159,7 @@ def main(argv):
         call_str = 'SLC_burst_corners ' + SLC_par_list[kk] + ' ' +  TOP_par_list[kk] + ' > ' +BURST
         os.system(call_str)
     print("Down to SLC for %s is done! " % date)
-    sys.exit(1)
+    sys.exit(0)
 
 if __name__ == '__main__':
     main(sys.argv[:])

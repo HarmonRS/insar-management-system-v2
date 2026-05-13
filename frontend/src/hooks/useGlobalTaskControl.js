@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import apiClient from '../api/client';
 import { normalizeTaskStatus } from '../utils/appUiHelpers';
 
-const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES', 'COPY_DATA']);
+const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES', 'UNPACK_SENTINEL1', 'SCAN_ASSET_INVENTORY', 'COPY_DATA']);
 
 const isTaskNonBlocking = (taskId, taskType, nonBlockingTaskIds = []) => (
   NON_BLOCKING_TASK_TYPES.has(String(taskType || '').toUpperCase())

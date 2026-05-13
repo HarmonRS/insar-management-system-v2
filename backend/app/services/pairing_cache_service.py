@@ -36,7 +36,7 @@ def _satellite_family_expr(alias: str) -> str:
         f"COALESCE(NULLIF({alias}.satellite_family, ''), "
         f"CASE "
         f"WHEN {compact} IN ('LT1', 'LT1A', 'LT1B', 'LUTAN1', 'LUTAN1A', 'LUTAN1B') THEN 'LT1' "
-        f"WHEN {compact} IN ('S1', 'S1A', 'S1B', 'SENTINEL1', 'SENTINEL1A', 'SENTINEL1B') THEN 'S1' "
+        f"WHEN {compact} IN ('S1', 'S1A', 'S1B', 'S1C', 'SENTINEL1', 'SENTINEL1A', 'SENTINEL1B', 'SENTINEL1C') THEN 'S1' "
         f"WHEN NULLIF({alias}.satellite, '') IS NOT NULL THEN upper({alias}.satellite) "
         f"ELSE NULL END)"
     )

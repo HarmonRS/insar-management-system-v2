@@ -2,6 +2,7 @@
 
 import { deleteRunLog, deleteRunRecord, getRunLog, listEngines, listRuns, previewPyintInputAssets, submitRun } from './api/dinsarProduction';
 import { clearTaskLogs, deleteTaskLog, deleteTaskRecord, getActiveTasks, getRecentTasks, getTaskLogs } from './api/tasks';
+import { formatSatelliteFamilyLabel, inferSatelliteFamilyFromResultLike } from './utils/satelliteFamily';
 
 const card = {
   background: '#fff',
@@ -160,6 +161,9 @@ function taskToRunRow(task) {
     completed_items: null,
     failed_items: null,
     skipped_items: null,
+    master_satellite: task?.master_satellite || '',
+    slave_satellite: task?.slave_satellite || '',
+    pair_key: task?.pair_key || '',
   };
 }
 
@@ -1375,12 +1379,12 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
-              <div>
-                <div style={{ fontSize: 12, color: '#0f172a', fontWeight: 600 }}>PyINT 输入资产预检</div>
-                <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
-                  提交前检查 Task_* 结构、DEM 策略和 LT-1 轨道是否齐备。即使不手动预检，后端提交时也会做同样校验。
+                <div>
+                  <div style={{ fontSize: 12, color: '#0f172a', fontWeight: 600 }}>PyINT 输入资产预检</div>
+                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
+                  提交前检查 Task_* 结构、DEM 策略以及生产所需源数据和轨道文件是否齐备。即使不手动预检，后端提交时也会做同样校验。
+                  </div>
                 </div>
-              </div>
               <button
                 onClick={handlePreviewPyint}
                 disabled={readOnly || pyintPreviewLoading || !rootDir.trim()}
@@ -1436,7 +1440,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                   { label: 'DEM 策略', value: formatPyintDemMode(pyintPreview?.dem?.mode), color: '#1d4ed8' },
                   { label: '轨道策略', value: formatPyintOrbitPolicy(pyintPreview?.orbits?.policy), color: '#7c3aed' },
                   {
-                    label: '精轨桥接',
+                    label: '轨道处理',
                     value: pyintPreview?.precise_orbit_bridge?.enabled
                       ? formatPyintPreciseOrbitMode(pyintPreview?.precise_orbit_bridge?.mode)
                       : '关闭',
@@ -1732,7 +1736,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr>
-                  {['运行ID', '引擎', '状态', '时间', '路径', '操作'].map(header => (
+                  {['运行ID', '引擎', '数据', '状态', '时间', '路径', '操作'].map(header => (
                     <th
                       key={header}
                       style={{
@@ -1759,6 +1763,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                     <tr key={`${run.record_type || 'run'}-${run.run_id}`} style={{ borderBottom: '1px solid #f1f5f9' }}>
                       <td style={{ padding: '6px 8px', fontFamily: 'monospace', fontSize: 11 }}>{run.run_id}</td>
                       <td style={{ padding: '6px 8px' }}>{formatEngineLabel(run.engine)}</td>
+                      <td style={{ padding: '6px 8px' }}>{formatSatelliteFamilyLabel(inferSatelliteFamilyFromResultLike(run))}</td>
                       <td
                         style={{
                           padding: '6px 8px',

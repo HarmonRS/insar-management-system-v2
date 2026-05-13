@@ -99,9 +99,15 @@ def _normalize_list_pagination(limit: int, offset: int) -> tuple[int, int]:
 class DinsarBatchSceneCreate(BaseModel):
     file_path: str = Field(min_length=1)
     satellite: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
+    satellite_family: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
     imaging_date: Optional[str] = Field(default=None, max_length=32)
     imaging_mode: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
     polarization: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
+    orbit_direction: Optional[str] = Field(default=None, max_length=BATCH_TEXT_MAX_LENGTH)
+    relative_orbit: Optional[str] = Field(default=None, max_length=64)
+    absolute_orbit: Optional[str] = Field(default=None, max_length=64)
+    has_orbit_data: Optional[bool] = None
+    orbit_file_path: Optional[str] = Field(default=None, max_length=4096)
 
     model_config = ConfigDict(extra="ignore")
 

@@ -7,6 +7,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from ..utils import normalize_satellite_family
+
 
 PAIR_META_FILENAME = ".dinsar_pair.json"
 RUN_META_FILENAME = ".dinsar_run.json"
@@ -48,6 +50,7 @@ def build_pair_key(
     slave_path: Any,
     master_date: Any = None,
     slave_date: Any = None,
+    satellite_family: Any = None,
 ) -> str:
     master_date_text = _normalize_date(master_date)
     slave_date_text = _normalize_date(slave_date)
@@ -60,17 +63,23 @@ def build_pair_key(
         ]
     )
     digest = hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:10]
-    return f"lt1_{master_date_text}_{slave_date_text}_{digest}"
+    family = str(normalize_satellite_family(satellite_family) or "").strip().lower()
+    if not family:
+        family = "pair"
+    return f"{family}_{master_date_text}_{slave_date_text}_{digest}"
 
 
-def build_fallback_pair_key(task_alias: Any, source_hint: Any = None) -> str:
+def build_fallback_pair_key(task_alias: Any, source_hint: Any = None, satellite_family: Any = None) -> str:
     alias = str(task_alias or "").strip() or "Task_unknown_unknown"
     parts = alias.split("_")
     master_date = parts[1] if len(parts) > 2 else "unknown"
     slave_date = parts[2] if len(parts) > 2 else "unknown"
     payload = "||".join([alias, normalize_path(source_hint)])
     digest = hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:10]
-    return f"lt1_{_normalize_date(master_date)}_{_normalize_date(slave_date)}_{digest}"
+    family = str(normalize_satellite_family(satellite_family) or "").strip().lower()
+    if not family:
+        family = "pair"
+    return f"{family}_{_normalize_date(master_date)}_{_normalize_date(slave_date)}_{digest}"
 
 
 def build_run_key(

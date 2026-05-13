@@ -231,9 +231,9 @@ def main(argv):
     #        if os.path.isfile(HGTSIM): os.remove(HGTSIM)
     else:
         print('The SLC has already coregister Done')
-        sys.exit(1)
+        sys.exit(0)
     print("Coregister TOP SLC image to the reference TOPS image is done !!")
-    sys.exit(1)
+    sys.exit(0)
 
 if __name__ == '__main__':
     main(sys.argv[:])

@@ -1,7 +1,7 @@
 import os
 import asyncio
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from sqlalchemy import and_, func, literal, or_, select, text
@@ -11,9 +11,14 @@ from ..config import read_int_env, settings, split_env_paths
 from ..db_maintenance import inspect_database_structure
 from ..models import (
     AiDiagnosisORM,
+    AssetInventoryIssueORM,
+    AssetInventoryStateORM,
     DinsarResultORM,
+    OrbitAssetORM,
     ResultCatalogStateORM,
     ResultProductORM,
+    SceneOrbitBindingORM,
+    SourceProductAssetORM,
     SystemWorkerHeartbeatORM,
 )
 from ..idl_service import get_idl_status
@@ -399,6 +404,51 @@ def _sanitize_pairing_system_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _sanitize_asset_inventory_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    source_roots = payload.get("source_roots", {}) or {}
+    orbit_roots = payload.get("orbit_roots", {}) or {}
+    source_assets = payload.get("source_assets", {}) or {}
+    orbit_assets = payload.get("orbit_assets", {}) or {}
+    bindings = payload.get("bindings", {}) or {}
+    issues = payload.get("issues", {}) or {}
+    return {
+        "ok": bool(payload.get("ok")),
+        "source_roots": {
+            "configured_count": int(source_roots.get("configured_count") or 0),
+            "accessible_count": int(source_roots.get("accessible_count") or 0),
+            "needs_rescan_count": int(source_roots.get("needs_rescan_count") or 0),
+        },
+        "orbit_roots": {
+            "configured_count": int(orbit_roots.get("configured_count") or 0),
+            "accessible_count": int(orbit_roots.get("accessible_count") or 0),
+            "needs_rescan_count": int(orbit_roots.get("needs_rescan_count") or 0),
+        },
+        "source_assets": {
+            "total_count": int(source_assets.get("total_count") or 0),
+            "lt1_count": int(source_assets.get("lt1_count") or 0),
+            "s1_count": int(source_assets.get("s1_count") or 0),
+            "parse_failed_count": int(source_assets.get("parse_failed_count") or 0),
+        },
+        "orbit_assets": {
+            "total_count": int(orbit_assets.get("total_count") or 0),
+            "lt1_count": int(orbit_assets.get("lt1_count") or 0),
+            "s1_count": int(orbit_assets.get("s1_count") or 0),
+            "parse_failed_count": int(orbit_assets.get("parse_failed_count") or 0),
+        },
+        "bindings": {
+            "scene_count": int(bindings.get("scene_count") or 0),
+            "matched_count": int(bindings.get("matched_count") or 0),
+            "missing_count": int(bindings.get("missing_count") or 0),
+            "ambiguous_count": int(bindings.get("ambiguous_count") or 0),
+        },
+        "issues": {
+            "open_count": int(issues.get("open_count") or 0),
+            "error_count": int(issues.get("error_count") or 0),
+            "warning_count": int(issues.get("warning_count") or 0),
+        },
+    }
+
+
 def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     database = payload.get("database", {}) or {}
     worker = payload.get("worker", {}) or {}
@@ -411,6 +461,7 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     dinsar_bridge = payload.get("dinsar_bridge", {}) or {}
     source_roots = payload.get("source_roots", {}) or {}
     product_packages = payload.get("product_packages", {}) or {}
+    asset_inventory = payload.get("asset_inventory", {}) or {}
     wsl_runtime = payload.get("wsl_runtime", {}) or {}
     pairing_system = payload.get("pairing_system", {}) or {}
     idl = payload.get("idl", {}) or {}
@@ -423,6 +474,7 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     sanitized_dinsar_bridge = _sanitize_bridge_status(dinsar_bridge)
     sanitized_source_roots = _sanitize_source_roots_status(source_roots)
     sanitized_product_packages = _sanitize_product_package_status(product_packages)
+    sanitized_asset_inventory = _sanitize_asset_inventory_status(asset_inventory)
     sanitized_wsl_runtime = _sanitize_wsl_runtime_status(wsl_runtime)
     sanitized_pairing_system = _sanitize_pairing_system_status(pairing_system)
 
@@ -451,6 +503,7 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         "dinsar_bridge": sanitized_dinsar_bridge,
         "source_roots": sanitized_source_roots,
         "product_packages": sanitized_product_packages,
+        "asset_inventory": sanitized_asset_inventory,
         "wsl_runtime": sanitized_wsl_runtime,
         "pairing_system": sanitized_pairing_system,
         "idl": {
@@ -905,6 +958,221 @@ async def _check_product_packages() -> Dict[str, Any]:
     return status
 
 
+async def _check_asset_inventory() -> Dict[str, Any]:
+    status: Dict[str, Any] = {
+        "ok": False,
+        "source_roots": {
+            "configured_count": 0,
+            "accessible_count": 0,
+            "inaccessible_count": 0,
+            "needs_rescan_count": 0,
+            "items": [],
+        },
+        "orbit_roots": {
+            "configured_count": 0,
+            "accessible_count": 0,
+            "inaccessible_count": 0,
+            "needs_rescan_count": 0,
+            "items": [],
+        },
+        "source_assets": {
+            "total_count": 0,
+            "lt1_count": 0,
+            "s1_count": 0,
+            "parse_failed_count": 0,
+            "by_family": {},
+        },
+        "orbit_assets": {
+            "total_count": 0,
+            "lt1_count": 0,
+            "s1_count": 0,
+            "parse_failed_count": 0,
+            "by_family": {},
+        },
+        "bindings": {
+            "scene_count": 0,
+            "matched_count": 0,
+            "missing_count": 0,
+            "ambiguous_count": 0,
+        },
+        "issues": {
+            "open_count": 0,
+            "error_count": 0,
+            "warning_count": 0,
+            "by_code": {},
+        },
+        "error": None,
+    }
+
+    source_paths: List[str] = []
+    for value in (
+        settings.SOURCE_PRODUCT_DIRS,
+        settings.INSAR_STORAGE_DIRS,
+        settings.MONITOR_RADAR_DIRS,
+    ):
+        for path in split_env_paths(value):
+            if path not in source_paths:
+                source_paths.append(path)
+
+    orbit_paths: List[str] = []
+    for value in (
+        settings.ORBIT_SOURCE_DIRS,
+        settings.MONITOR_ORBIT_DIR,
+    ):
+        for path in split_env_paths(value):
+            if path not in orbit_paths:
+                orbit_paths.append(path)
+
+    for path in source_paths:
+        item = _probe_directory_status(path)
+        item["role"] = "source_product_pool"
+        status["source_roots"]["items"].append(item)
+    for path in orbit_paths:
+        item = _probe_directory_status(path)
+        item["role"] = "orbit_asset_pool"
+        status["orbit_roots"]["items"].append(item)
+
+    for key in ("source_roots", "orbit_roots"):
+        root_status = status[key]
+        root_status["configured_count"] = len(root_status["items"])
+        root_status["accessible_count"] = sum(1 for item in root_status["items"] if item.get("accessible"))
+        root_status["inaccessible_count"] = root_status["configured_count"] - root_status["accessible_count"]
+
+    try:
+        session_factory = _get_session_factory()
+        async with session_factory() as db:
+            state_rows = (
+                await db.execute(
+                    select(
+                        AssetInventoryStateORM.inventory_type,
+                        func.count(AssetInventoryStateORM.id),
+                    )
+                    .where(AssetInventoryStateORM.needs_rescan == True)  # noqa: E712
+                    .group_by(AssetInventoryStateORM.inventory_type)
+                )
+            ).all()
+            for inventory_type, count in state_rows:
+                key = "orbit_roots" if str(inventory_type or "").lower().startswith("orbit") else "source_roots"
+                status[key]["needs_rescan_count"] += int(count or 0)
+
+            source_family_rows = (
+                await db.execute(
+                    select(
+                        SourceProductAssetORM.satellite_family,
+                        func.count(SourceProductAssetORM.id),
+                    )
+                    .where(
+                        SourceProductAssetORM.is_active == True,  # noqa: E712
+                        SourceProductAssetORM.source_format != "S1_ZIP",
+                    )
+                    .group_by(SourceProductAssetORM.satellite_family)
+                )
+            ).all()
+            for family, count in source_family_rows:
+                family_key = str(family or "unknown").strip().upper() or "unknown"
+                value = int(count or 0)
+                status["source_assets"]["by_family"][family_key] = value
+                status["source_assets"]["total_count"] += value
+            status["source_assets"]["lt1_count"] = int(status["source_assets"]["by_family"].get("LT1", 0))
+            status["source_assets"]["s1_count"] = int(status["source_assets"]["by_family"].get("S1", 0))
+            source_parse_failed = await db.execute(
+                select(func.count(SourceProductAssetORM.id)).where(
+                    SourceProductAssetORM.parse_status == "FAILED",
+                    SourceProductAssetORM.source_format != "S1_ZIP",
+                )
+            )
+            status["source_assets"]["parse_failed_count"] = int(source_parse_failed.scalar_one() or 0)
+
+            orbit_family_rows = (
+                await db.execute(
+                    select(
+                        OrbitAssetORM.satellite_family,
+                        func.count(OrbitAssetORM.id),
+                    )
+                    .where(OrbitAssetORM.is_active == True)  # noqa: E712
+                    .group_by(OrbitAssetORM.satellite_family)
+                )
+            ).all()
+            for family, count in orbit_family_rows:
+                family_key = str(family or "unknown").strip().upper() or "unknown"
+                value = int(count or 0)
+                status["orbit_assets"]["by_family"][family_key] = value
+                status["orbit_assets"]["total_count"] += value
+            status["orbit_assets"]["lt1_count"] = int(status["orbit_assets"]["by_family"].get("LT1", 0))
+            status["orbit_assets"]["s1_count"] = int(status["orbit_assets"]["by_family"].get("S1", 0))
+            orbit_parse_failed = await db.execute(
+                select(func.count(OrbitAssetORM.id)).where(OrbitAssetORM.parse_status == "FAILED")
+            )
+            status["orbit_assets"]["parse_failed_count"] = int(orbit_parse_failed.scalar_one() or 0)
+
+            scene_count = await db.execute(select(func.count(SceneOrbitBindingORM.radar_data_id.distinct())))
+            status["bindings"]["scene_count"] = int(scene_count.scalar_one() or 0)
+            selected_count = await db.execute(
+                select(func.count(SceneOrbitBindingORM.id)).where(SceneOrbitBindingORM.selection_status == "SELECTED")
+            )
+            status["bindings"]["matched_count"] = int(selected_count.scalar_one() or 0)
+            missing_count = await db.execute(
+                select(func.count(AssetInventoryIssueORM.id)).where(
+                    AssetInventoryIssueORM.status == "OPEN",
+                    AssetInventoryIssueORM.issue_code == "scene_missing_orbit",
+                )
+            )
+            status["bindings"]["missing_count"] = int(missing_count.scalar_one() or 0)
+            ambiguous_count = await db.execute(
+                select(func.count(AssetInventoryIssueORM.id)).where(
+                    AssetInventoryIssueORM.status == "OPEN",
+                    AssetInventoryIssueORM.issue_code == "scene_ambiguous_orbit",
+                )
+            )
+            status["bindings"]["ambiguous_count"] = int(ambiguous_count.scalar_one() or 0)
+
+            issue_rows = (
+                await db.execute(
+                    select(
+                        AssetInventoryIssueORM.severity,
+                        func.count(AssetInventoryIssueORM.id),
+                    )
+                    .where(AssetInventoryIssueORM.status == "OPEN")
+                    .group_by(AssetInventoryIssueORM.severity)
+                )
+            ).all()
+            for severity, count in issue_rows:
+                severity_key = str(severity or "warning").strip().lower() or "warning"
+                value = int(count or 0)
+                status["issues"]["open_count"] += value
+                if severity_key == "error":
+                    status["issues"]["error_count"] += value
+                elif severity_key == "warning":
+                    status["issues"]["warning_count"] += value
+
+            issue_code_rows = (
+                await db.execute(
+                    select(
+                        AssetInventoryIssueORM.issue_code,
+                        func.count(AssetInventoryIssueORM.id),
+                    )
+                    .where(AssetInventoryIssueORM.status == "OPEN")
+                    .group_by(AssetInventoryIssueORM.issue_code)
+                )
+            ).all()
+            status["issues"]["by_code"] = {
+                str(code or "unknown"): int(count or 0)
+                for code, count in issue_code_rows
+            }
+
+        status["ok"] = (
+            status["source_roots"]["inaccessible_count"] == 0
+            and status["orbit_roots"]["inaccessible_count"] == 0
+            and status["source_assets"]["parse_failed_count"] == 0
+            and status["orbit_assets"]["parse_failed_count"] == 0
+            and status["issues"]["error_count"] == 0
+        )
+    except Exception as exc:
+        status["error"] = str(exc)
+
+    return status
+
+
 async def _check_wsl_runtime() -> Dict[str, Any]:
     status = {
         "ok": False,
@@ -989,6 +1257,7 @@ async def get_health_status(
     dinsar_bridge_status = await _check_dinsar_bridge()
     source_roots_status = await _check_source_roots()
     product_packages_status = await _check_product_packages()
+    asset_inventory_status = await _check_asset_inventory()
     wsl_runtime_status = await _check_wsl_runtime()
     pairing_system_status = await pairing_state_service.get_pairing_system_status()
     engines_status = {"ok": None, "overall": None, "engines": []}
@@ -1005,6 +1274,7 @@ async def get_health_status(
             dinsar_bridge_status.get("ok"),
             source_roots_status.get("ok"),
             product_packages_status.get("ok"),
+            asset_inventory_status.get("ok"),
             wsl_runtime_status.get("ok"),
             pairing_system_status.get("ok"),
             (not settings.TIMESERIES_ENABLED) or timeseries_result_catalog_status.get("ok"),
@@ -1028,6 +1298,7 @@ async def get_health_status(
         "dinsar_bridge": dinsar_bridge_status,
         "source_roots": source_roots_status,
         "product_packages": product_packages_status,
+        "asset_inventory": asset_inventory_status,
         "wsl_runtime": wsl_runtime_status,
         "pairing_system": pairing_system_status,
         "idl": {

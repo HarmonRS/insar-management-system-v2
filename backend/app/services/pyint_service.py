@@ -13,10 +13,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from ..config import get_env_text, read_bool_env, settings
 from .dinsar_naming import PAIR_META_FILENAME, build_fallback_pair_key, find_json_sidecar
+from ..utils import normalize_satellite_family
 from .wsl_service import run_wsl_exec
 
 
 LT1_INPUT_GLOBS = ("LT1*.tar.gz", "LT1*.tiff")
+S1_INPUT_GLOBS = ("S1*.zip",)
 DEFAULT_RANGE_LOOKS = 2
 DEFAULT_AZIMUTH_LOOKS = 2
 DEFAULT_DEM_RESOLUTION_M = 30.0
@@ -334,6 +336,15 @@ def build_project_name(pair_key: str, run_key: str) -> str:
     return slugify_text(f"{pair_key}_{run_key}", default="pyint_project", max_len=120)
 
 
+def build_profile_project_name(satellite_family: Any, pair_key: str, run_key: str) -> str:
+    family = str(normalize_satellite_family(satellite_family) or "").strip().upper()
+    if family == "S1":
+        return slugify_text(f"s1_{pair_key}_{run_key}", default="s1_pyint_project", max_len=120)
+    if family == "LT1":
+        return slugify_text(f"lt1_{pair_key}_{run_key}", default="lt1_pyint_project", max_len=120)
+    return build_project_name(pair_key, run_key)
+
+
 def windows_path_to_wsl_mount(path: str) -> str:
     text = str(path or "").strip().strip('"').strip("'")
     if not text:
@@ -377,6 +388,22 @@ def discover_lt1_archives(task_dir: str) -> Dict[str, List[str]]:
     return result
 
 
+def discover_s1_scene_sources(task_dir: str) -> Dict[str, List[str]]:
+    task_path = Path(os.path.normpath(os.path.abspath(str(task_dir or "").strip())))
+    pair_meta = find_json_sidecar(str(task_path), PAIR_META_FILENAME, max_levels=0) or {}
+    result: Dict[str, List[str]] = {"master": [], "slave": []}
+    for role in ("master", "slave"):
+        explicit_path = str(pair_meta.get(f"{role}_path") or "").strip()
+        role_dir = task_path / role
+        candidates: List[str] = []
+        if explicit_path:
+            candidates.append(str(Path(explicit_path).resolve()))
+        if not candidates and role_dir.is_dir() and (role_dir / "manifest.safe").is_file():
+            candidates.append(str(role_dir.resolve()))
+        result[role] = sorted(set(candidates))
+    return result
+
+
 def infer_scene_date_from_archives(paths: Iterable[str]) -> str:
     dates = {
         date_text
@@ -393,7 +420,14 @@ def infer_task_identity(task_dir: str) -> Dict[str, Any]:
     task_name = os.path.basename(os.path.normpath(task_dir))
     pair_meta = find_json_sidecar(task_dir, PAIR_META_FILENAME, max_levels=0) or {}
     task_alias = str(pair_meta.get("task_alias") or task_name).strip() or task_name
-    pair_key = str(pair_meta.get("pair_key") or "").strip() or build_fallback_pair_key(task_alias, task_dir)
+    master_satellite = str(pair_meta.get("master_satellite") or "").strip().upper()
+    slave_satellite = str(pair_meta.get("slave_satellite") or "").strip().upper()
+    satellite_family = normalize_satellite_family(master_satellite or slave_satellite)
+    pair_key = str(pair_meta.get("pair_key") or "").strip() or build_fallback_pair_key(
+        task_alias,
+        task_dir,
+        satellite_family=satellite_family,
+    )
     master_date = normalize_date_text(pair_meta.get("master_imaging_date"))
     slave_date = normalize_date_text(pair_meta.get("slave_imaging_date"))
     return {
@@ -403,6 +437,9 @@ def infer_task_identity(task_dir: str) -> Dict[str, Any]:
         "pair_meta": pair_meta,
         "master_date": master_date,
         "slave_date": slave_date,
+        "master_satellite": master_satellite,
+        "slave_satellite": slave_satellite,
+        "satellite_family": satellite_family,
     }
 
 

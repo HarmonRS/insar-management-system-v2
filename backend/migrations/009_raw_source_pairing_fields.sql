@@ -81,7 +81,7 @@ SET
                  ('LT1', 'LT1A', 'LT1B', 'LUTAN1', 'LUTAN1A', 'LUTAN1B')
                 THEN 'LT1'
             WHEN upper(replace(replace(replace(COALESCE(satellite, ''), '-', ''), '_', ''), ' ', '')) IN
-                 ('S1', 'S1A', 'S1B', 'SENTINEL1', 'SENTINEL1A', 'SENTINEL1B')
+                 ('S1', 'S1A', 'S1B', 'S1C', 'SENTINEL1', 'SENTINEL1A', 'SENTINEL1B', 'SENTINEL1C')
                 THEN 'S1'
             WHEN NULLIF(satellite, '') IS NOT NULL
                 THEN upper(satellite)

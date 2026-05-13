@@ -43,6 +43,7 @@ from ..services.pyint_service import (
     REFLATTEN_MODEL_CHOICES,
     TARGET_GRID_SIZE_MAX_M,
     TARGET_GRID_SIZE_MIN_M,
+    build_profile_project_name,
     build_project_name,
     calculate_dem_oversampling,
     calculate_looks_from_task_dir,
@@ -290,13 +291,13 @@ class PyintEngine(DinsarEngine):
         )
         return _windows_path_to_wsl_mount(str(local_script))
 
+    def _pipeline_script_for_profile(self, profile: str) -> str:
+        script_name = "run_s1_pyint_pipeline.py" if str(profile or "").strip() == "s1_gamma_dinsar" else "run_lt1_pyint_pipeline.py"
+        local_script = Path(__file__).resolve().parent.parent / "pyint_pipeline" / script_name
+        return _windows_path_to_wsl_mount(str(local_script))
+
     def get_profiles(self) -> List[EngineProfile]:
-        return [
-            EngineProfile(
-                code="lt1_gamma_dinsar",
-                label="LT-1 Gamma D-InSAR",
-                description="Use PyINT + Gamma in WSL for single-pair LT-1 D-InSAR processing.",
-                params_schema={
+        shared_schema = {
                     "force": {
                         "label": "强制重跑",
                         "type": "boolean",
@@ -459,7 +460,19 @@ class PyintEngine(DinsarEngine):
                         "section": "Execution",
                         "description": "关闭后不导出地理编码结果。",
                     },
-                },
+                }
+        return [
+            EngineProfile(
+                code="lt1_gamma_dinsar",
+                label="LT-1 Gamma D-InSAR",
+                description="Use PyINT + Gamma in WSL for single-pair LT-1 D-InSAR processing.",
+                params_schema=shared_schema,
+            ),
+            EngineProfile(
+                code="s1_gamma_dinsar",
+                label="Sentinel-1 Gamma D-InSAR",
+                description="Use PyINT + Gamma in WSL for single-pair Sentinel-1 D-InSAR processing.",
+                params_schema=shared_schema,
             ),
         ]
 
@@ -694,7 +707,7 @@ class PyintEngine(DinsarEngine):
                 error="PyINT is disabled.",
             )
 
-        if request.profile != "lt1_gamma_dinsar":
+        if request.profile not in {"lt1_gamma_dinsar", "s1_gamma_dinsar"}:
             return RunResult(
                 success=False,
                 engine_code=self.engine_code,
@@ -859,7 +872,11 @@ class PyintEngine(DinsarEngine):
                 else os.path.join(run_dir, "native")
             )
             template_root = os.path.normpath(os.path.join(self._template_root, pair_key, run_key))
-            project_name = build_project_name(pair_key, run_key)
+            project_name = build_profile_project_name(
+                task_identity.get("satellite_family"),
+                pair_key,
+                run_key,
+            )
             project_dir = os.path.join(work_run_root, project_name)
             # Keep input assets outside the run root because the WSL pipeline may delete run_root on --force.
             input_assets_dir = os.path.join(self._work_root, pair_key, "input_assets", run_key)
@@ -1103,7 +1120,7 @@ class PyintEngine(DinsarEngine):
             )
 
             cmd_parts = [
-                f"{quote_shell(self._python)} {quote_shell(self._pipeline_script)} {quote_shell(wsl_task_dir)}",
+                f"{quote_shell(self._python)} {quote_shell(self._pipeline_script_for_profile(request.profile))} {quote_shell(wsl_task_dir)}",
                 f"--project-dir {quote_shell(wsl_project_dir)}",
                 f"--template-root {quote_shell(wsl_template_root)}",
                 f"--output-dir {quote_shell(wsl_output_dir)}",
@@ -1486,6 +1503,9 @@ class PyintEngine(DinsarEngine):
 
     @staticmethod
     def _discover_archives(task_dir: str) -> Dict[str, List[str]]:
-        from ..services.pyint_service import discover_lt1_archives
+        from ..services.pyint_service import discover_lt1_archives, discover_s1_scene_sources, infer_task_identity
 
+        task_identity = infer_task_identity(task_dir)
+        if str(task_identity.get("satellite_family") or "").strip().upper() == "S1":
+            return discover_s1_scene_sources(task_dir)
         return discover_lt1_archives(task_dir)

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import database
 from ..config import settings, split_env_paths
-from ..models import ManagedRootORM, PathInventoryORM, ScanCursorORM
+from ..models import AssetInventoryStateORM, ManagedRootORM, PathInventoryORM, ScanCursorORM
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -85,6 +85,15 @@ def _cursor_type_for_scan_mode(scan_mode: str) -> str:
         "directory_walk": "directory_walk",
     }
     return mapping.get(str(scan_mode or "").strip().lower(), "directory_walk")
+
+
+def _asset_inventory_type_for_root_role(root_role: str) -> Optional[str]:
+    role = str(root_role or "").strip().lower()
+    if role == "source_product_pool":
+        return "source_product"
+    if role == "orbit_asset_pool":
+        return "orbit_asset"
+    return None
 
 
 def _iter_multi_root_specs(
@@ -169,6 +178,36 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
             scan_mode="archive_walk",
         )
     )
+    source_product_paths = split_env_paths(settings.SOURCE_PRODUCT_DIRS)
+    if not source_product_paths:
+        source_product_paths = (
+            split_env_paths(settings.INSAR_STORAGE_DIRS)
+            + split_env_paths(settings.MONITOR_RADAR_DIRS)
+        )
+    specs.extend(
+        _iter_multi_root_specs(
+            env_var="SOURCE_PRODUCT_DIRS",
+            paths=source_product_paths,
+            root_role="source_product_pool",
+            display_prefix="Source Product Pool",
+            scan_mode="file_pool",
+        )
+    )
+    source_product_path_set = {_normalize_root_path(path) for path in source_product_paths}
+    sentinel1_storage_paths = [
+        path
+        for path in split_env_paths(settings.SENTINEL1_STORAGE_DIRS)
+        if _normalize_root_path(path) not in source_product_path_set
+    ]
+    specs.extend(
+        _iter_multi_root_specs(
+            env_var="SENTINEL1_STORAGE_DIRS",
+            paths=sentinel1_storage_paths,
+            root_role="source_product_pool",
+            display_prefix="Sentinel-1 Storage Pool",
+            scan_mode="file_pool",
+        )
+    )
     specs.extend(
         _iter_multi_root_specs(
             env_var="INSAR_STORAGE_DIRS",
@@ -212,6 +251,18 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
             root_role="source_pool_gf3_output",
             display_prefix="GF3 Output Pool",
             scan_mode="scene_directory",
+        )
+    )
+    orbit_source_paths = split_env_paths(settings.ORBIT_SOURCE_DIRS)
+    if not orbit_source_paths:
+        orbit_source_paths = split_env_paths(settings.MONITOR_ORBIT_DIR)
+    specs.extend(
+        _iter_multi_root_specs(
+            env_var="ORBIT_SOURCE_DIRS",
+            paths=orbit_source_paths,
+            root_role="orbit_asset_pool",
+            display_prefix="Orbit Asset Pool",
+            scan_mode="file_pool",
         )
     )
     specs.extend(
@@ -374,6 +425,43 @@ class RootRegistryService:
             changed = True
         return "updated" if changed else None
 
+    async def _ensure_asset_inventory_state(self, db: AsyncSession, root: ManagedRootORM) -> Optional[str]:
+        inventory_type = _asset_inventory_type_for_root_role(root.root_role)
+        if not inventory_type:
+            return None
+
+        result = await db.execute(
+            select(AssetInventoryStateORM).where(
+                AssetInventoryStateORM.root_ref_id == root.id,
+                AssetInventoryStateORM.inventory_type == inventory_type,
+            )
+        )
+        state = result.scalar_one_or_none()
+        if state is None:
+            state = AssetInventoryStateORM(
+                root_ref_id=root.id,
+                inventory_type=inventory_type,
+                root_path=root.path,
+                scan_mode=root.scan_mode,
+                status="NEVER_SCANNED",
+                needs_rescan=True,
+                metadata_json={
+                    "root_role": root.root_role,
+                    "created_by": "root_registry_sync",
+                },
+            )
+            db.add(state)
+            return "created"
+
+        changed = False
+        if state.root_path != root.path:
+            state.root_path = root.path
+            changed = True
+        if state.scan_mode != root.scan_mode:
+            state.scan_mode = root.scan_mode
+            changed = True
+        return "updated" if changed else None
+
     async def sync_from_settings(self, db: Optional[AsyncSession] = None) -> Dict[str, Any]:
         generated_session = db is None
         if generated_session:
@@ -394,6 +482,8 @@ class RootRegistryService:
             disabled = 0
             cursor_created = 0
             cursor_updated = 0
+            inventory_state_created = 0
+            inventory_state_updated = 0
             synced_codes: set[str] = set()
 
             for spec in specs:
@@ -448,6 +538,12 @@ class RootRegistryService:
                 elif cursor_change == "updated":
                     cursor_updated += 1
 
+                inventory_state_change = await self._ensure_asset_inventory_state(db, row)
+                if inventory_state_change == "created":
+                    inventory_state_created += 1
+                elif inventory_state_change == "updated":
+                    inventory_state_updated += 1
+
             for row in existing_rows:
                 if row.root_code in synced_codes:
                     continue
@@ -464,6 +560,7 @@ class RootRegistryService:
                 "updated": updated,
                 "disabled": disabled,
                 "cursor_created_or_updated": cursor_created + cursor_updated,
+                "asset_inventory_state_created_or_updated": inventory_state_created + inventory_state_updated,
                 "summary": summary,
             }
         except Exception:

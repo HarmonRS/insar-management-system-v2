@@ -41,6 +41,32 @@ class RadarDataORM(Base):
     product_unique_id = Column(String, nullable=True)
     satellite_family = Column(String, index=True, nullable=True)
     look_direction = Column(String, index=True, nullable=True)
+    acquisition_start_time_utc = Column(DateTime, nullable=True, index=True)
+    acquisition_stop_time_utc = Column(DateTime, nullable=True)
+    absolute_orbit = Column(String, nullable=True, index=True)
+    relative_orbit = Column(String, nullable=True, index=True)
+    source_format = Column(String(32), nullable=True, index=True)
+    source_product_ref_id = Column(
+        Integer,
+        ForeignKey("source_product_assets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_archive_asset_id = Column(
+        Integer,
+        ForeignKey("source_product_assets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    selected_orbit_asset_id = Column(
+        Integer,
+        ForeignKey("orbit_assets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    orbit_binding_status = Column(String(32), nullable=False, default="UNBOUND", server_default="UNBOUND", index=True)
+    orbit_binding_reason = Column(Text, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
     geocoded_flag = Column(Boolean, nullable=True)
     insar_source_ready = Column(Boolean, nullable=False, default=False, server_default="false")
     insar_source_reason = Column(Text, nullable=True)
@@ -62,6 +88,10 @@ class RadarDataORM(Base):
     preview_cache_path = Column(String, nullable=True)
     preview_cache_updated_at = Column(DateTime, nullable=True)
     preview_cache_error = Column(Text, nullable=True)
+
+    source_product_asset = relationship("SourceProductAssetORM", foreign_keys=[source_product_ref_id])
+    source_archive_asset = relationship("SourceProductAssetORM", foreign_keys=[source_archive_asset_id])
+    selected_orbit_asset = relationship("OrbitAssetORM", foreign_keys=[selected_orbit_asset_id])
 
 
 class DinsarResultORM(Base):
@@ -742,6 +772,11 @@ class ManagedRootORM(Base):
         back_populates="root",
         cascade="all, delete-orphan",
     )
+    asset_inventory_states = relationship(
+        "AssetInventoryStateORM",
+        back_populates="root",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("idx_managed_roots_role_enabled", "root_role", "enabled"),
@@ -806,6 +841,215 @@ class PathInventoryORM(Base):
     __table_args__ = (
         UniqueConstraint("root_ref_id", "relative_path", name="uq_path_inventory_root_relpath"),
         Index("idx_path_inventory_root_status", "root_ref_id", "status"),
+    )
+
+
+class SourceProductAssetORM(Base):
+    __tablename__ = "source_product_assets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    asset_uid = Column(String(128), unique=True, index=True, nullable=False)
+    logical_product_uid = Column(String(128), index=True, nullable=True)
+    satellite_family = Column(String(32), index=True, nullable=True)
+    satellite = Column(String(32), index=True, nullable=True)
+    source_format = Column(String(32), index=True, nullable=False)
+    product_type = Column(String(64), nullable=True)
+    product_level = Column(String(64), nullable=True)
+    imaging_mode = Column(String(64), nullable=True)
+    polarization = Column(String(64), nullable=True)
+    absolute_orbit = Column(String(64), index=True, nullable=True)
+    relative_orbit = Column(String(64), index=True, nullable=True)
+    orbit_direction = Column(String(32), index=True, nullable=True)
+    acquisition_start_time_utc = Column(DateTime, index=True, nullable=True)
+    acquisition_stop_time_utc = Column(DateTime, nullable=True)
+    imaging_date = Column(String(8), index=True, nullable=True)
+    root_ref_id = Column(Integer, ForeignKey("managed_roots.id", ondelete="SET NULL"), index=True, nullable=True)
+    root_path = Column(String, nullable=True)
+    file_path = Column(String, unique=True, index=True, nullable=False)
+    archive_path = Column(String, nullable=True)
+    path_kind = Column(String(24), nullable=True)
+    file_name = Column(String(255), nullable=True)
+    file_stem = Column(String(255), nullable=True)
+    file_ext = Column(String(32), nullable=True)
+    size_bytes = Column(BigInteger, nullable=True)
+    mtime_epoch = Column(Float, nullable=True)
+    checksum_sha256 = Column(String(64), nullable=True)
+    checksum_status = Column(String(32), nullable=False, default="NOT_COMPUTED", server_default="NOT_COMPUTED")
+    parser_name = Column(String(64), nullable=True)
+    parser_version = Column(String(32), nullable=True)
+    parse_status = Column(String(32), nullable=False, default="PENDING", server_default="PENDING", index=True)
+    parse_error = Column(Text, nullable=True)
+    parsed_at = Column(DateTime, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true", index=True)
+    missing_since = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    root = relationship("ManagedRootORM")
+
+    __table_args__ = (
+        Index("idx_source_product_assets_family_date", "satellite_family", "imaging_date"),
+        Index("idx_source_product_assets_logical_product", "logical_product_uid"),
+        Index("idx_source_product_assets_root_active", "root_ref_id", "is_active"),
+    )
+
+
+class OrbitAssetORM(Base):
+    __tablename__ = "orbit_assets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    orbit_uid = Column(String(128), unique=True, index=True, nullable=False)
+    satellite_family = Column(String(32), index=True, nullable=True)
+    satellite = Column(String(32), index=True, nullable=True)
+    orbit_type = Column(String(64), index=True, nullable=False)
+    native_format = Column(String(32), index=True, nullable=False)
+    quality_class = Column(String(32), index=True, nullable=False, default="unknown", server_default="unknown")
+    root_ref_id = Column(Integer, ForeignKey("managed_roots.id", ondelete="SET NULL"), index=True, nullable=True)
+    root_path = Column(String, nullable=True)
+    file_path = Column(String, unique=True, index=True, nullable=False)
+    file_name = Column(String(255), nullable=True)
+    file_stem = Column(String(255), nullable=True)
+    file_ext = Column(String(32), nullable=True)
+    size_bytes = Column(BigInteger, nullable=True)
+    mtime_epoch = Column(Float, nullable=True)
+    checksum_sha256 = Column(String(64), nullable=True)
+    checksum_status = Column(String(32), nullable=False, default="NOT_COMPUTED", server_default="NOT_COMPUTED")
+    validity_start_time_utc = Column(DateTime, index=True, nullable=True)
+    validity_stop_time_utc = Column(DateTime, index=True, nullable=True)
+    generation_time_utc = Column(DateTime, nullable=True)
+    published_time_utc = Column(DateTime, nullable=True)
+    parser_name = Column(String(64), nullable=True)
+    parser_version = Column(String(32), nullable=True)
+    parse_status = Column(String(32), nullable=False, default="PENDING", server_default="PENDING", index=True)
+    parse_error = Column(Text, nullable=True)
+    parsed_at = Column(DateTime, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true", index=True)
+    missing_since = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    root = relationship("ManagedRootORM")
+
+    __table_args__ = (
+        Index("idx_orbit_assets_family_sat_window", "satellite_family", "satellite", "validity_start_time_utc", "validity_stop_time_utc"),
+        Index("idx_orbit_assets_root_active", "root_ref_id", "is_active"),
+    )
+
+
+class SceneOrbitBindingORM(Base):
+    __tablename__ = "scene_orbit_bindings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    radar_data_id = Column(Integer, ForeignKey("radar_data.id", ondelete="CASCADE"), index=True, nullable=False)
+    orbit_asset_id = Column(Integer, ForeignKey("orbit_assets.id", ondelete="CASCADE"), index=True, nullable=False)
+    binding_role = Column(String(32), nullable=False, default="primary_orbit", server_default="primary_orbit")
+    match_status = Column(String(32), nullable=False, default="CANDIDATE", server_default="CANDIDATE", index=True)
+    selection_status = Column(String(32), nullable=False, default="CANDIDATE", server_default="CANDIDATE", index=True)
+    selection_rank = Column(Integer, nullable=True)
+    priority_score = Column(Float, nullable=True)
+    coverage_margin_before_seconds = Column(Float, nullable=True)
+    coverage_margin_after_seconds = Column(Float, nullable=True)
+    match_rule_version = Column(String(64), nullable=True)
+    match_reason = Column(Text, nullable=True)
+    selected_at = Column(DateTime, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    radar_data = relationship("RadarDataORM")
+    orbit_asset = relationship("OrbitAssetORM")
+
+    __table_args__ = (
+        UniqueConstraint("radar_data_id", "orbit_asset_id", "binding_role", name="uq_scene_orbit_binding_role"),
+        Index("idx_scene_orbit_bindings_scene_selected", "radar_data_id", "selection_status"),
+    )
+
+
+class OrbitAssetDerivativeORM(Base):
+    __tablename__ = "orbit_asset_derivatives"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    orbit_asset_id = Column(Integer, ForeignKey("orbit_assets.id", ondelete="CASCADE"), index=True, nullable=False)
+    engine_code = Column(String(32), index=True, nullable=False)
+    derivative_format = Column(String(32), nullable=False)
+    derivative_role = Column(String(64), nullable=True)
+    pool_path = Column(String, index=True, nullable=False)
+    size_bytes = Column(BigInteger, nullable=True)
+    mtime_epoch = Column(Float, nullable=True)
+    checksum_sha256 = Column(String(64), nullable=True)
+    generation_status = Column(String(32), nullable=False, default="PENDING", server_default="PENDING", index=True)
+    generation_error = Column(Text, nullable=True)
+    generated_at = Column(DateTime, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    orbit_asset = relationship("OrbitAssetORM")
+
+    __table_args__ = (
+        UniqueConstraint("orbit_asset_id", "engine_code", "derivative_format", "pool_path", name="uq_orbit_asset_derivative_pool_path"),
+        Index("idx_orbit_asset_derivatives_asset_engine", "orbit_asset_id", "engine_code"),
+    )
+
+
+class AssetInventoryStateORM(Base):
+    __tablename__ = "asset_inventory_states"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    root_ref_id = Column(Integer, ForeignKey("managed_roots.id", ondelete="CASCADE"), index=True, nullable=False)
+    inventory_type = Column(String(32), index=True, nullable=False)
+    root_path = Column(String, nullable=False)
+    scan_mode = Column(String(32), nullable=False, default="file_pool", server_default="file_pool")
+    status = Column(String(32), nullable=False, default="NEVER_SCANNED", server_default="NEVER_SCANNED", index=True)
+    last_scan_started_at = Column(DateTime, nullable=True)
+    last_scan_finished_at = Column(DateTime, nullable=True)
+    last_seen_entry_count = Column(Integer, nullable=True)
+    last_asset_count = Column(Integer, nullable=True)
+    last_issue_count = Column(Integer, nullable=True)
+    parser_version = Column(String(32), nullable=True)
+    needs_rescan = Column(Boolean, nullable=False, default=True, server_default="true", index=True)
+    last_error = Column(Text, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    root = relationship("ManagedRootORM", back_populates="asset_inventory_states")
+
+    __table_args__ = (
+        UniqueConstraint("root_ref_id", "inventory_type", name="uq_asset_inventory_state_root_type"),
+        Index("idx_asset_inventory_states_type_status", "inventory_type", "status"),
+    )
+
+
+class AssetInventoryIssueORM(Base):
+    __tablename__ = "asset_inventory_issues"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    root_ref_id = Column(Integer, ForeignKey("managed_roots.id", ondelete="SET NULL"), index=True, nullable=True)
+    inventory_type = Column(String(32), index=True, nullable=False)
+    asset_ref_id = Column(Integer, ForeignKey("source_product_assets.id", ondelete="SET NULL"), index=True, nullable=True)
+    radar_data_id = Column(Integer, ForeignKey("radar_data.id", ondelete="SET NULL"), index=True, nullable=True)
+    orbit_asset_id = Column(Integer, ForeignKey("orbit_assets.id", ondelete="SET NULL"), index=True, nullable=True)
+    severity = Column(String(16), nullable=False, default="warning", server_default="warning", index=True)
+    issue_code = Column(String(64), index=True, nullable=False)
+    issue_message = Column(Text, nullable=True)
+    source_path = Column(String, nullable=True)
+    status = Column(String(16), nullable=False, default="OPEN", server_default="OPEN", index=True)
+    first_seen_at = Column(DateTime, server_default=func.now(), nullable=False)
+    last_seen_at = Column(DateTime, server_default=func.now(), nullable=False)
+    resolved_at = Column(DateTime, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+
+    root = relationship("ManagedRootORM")
+    source_asset = relationship("SourceProductAssetORM", foreign_keys=[asset_ref_id])
+    radar_data = relationship("RadarDataORM")
+    orbit_asset = relationship("OrbitAssetORM")
+
+    __table_args__ = (
+        Index("idx_asset_inventory_issues_open", "status", "severity"),
+        Index("idx_asset_inventory_issues_root_type", "root_ref_id", "inventory_type"),
     )
 
 

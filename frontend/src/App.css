@@ -2400,6 +2400,237 @@ input[type="checkbox"] {
   margin-top: 6px;
 }
 
+.asset-inventory-panel {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.asset-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.asset-toolbar h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.asset-toolbar p {
+  margin: 4px 0 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.asset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.asset-actions select,
+.asset-actions button {
+  height: 30px;
+  font-size: 12px;
+}
+
+.asset-message {
+  border: 1px solid var(--color-border);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.asset-message--error {
+  background: #fee2e2;
+  color: #991b1b;
+  border-color: #fecaca;
+}
+
+.asset-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.asset-metric {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px;
+  background: #f8fafc;
+}
+
+.asset-metric span,
+.asset-metric small {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.asset-metric strong {
+  display: block;
+  margin: 2px 0;
+  font-size: 20px;
+  color: var(--color-text-primary);
+}
+
+.asset-root-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.asset-root-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: #fff;
+}
+
+.asset-root-item strong,
+.asset-root-item span {
+  display: block;
+  min-width: 0;
+}
+
+.asset-root-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.asset-tabbar {
+  display: flex;
+  gap: 6px;
+}
+
+.asset-tabbar button {
+  flex: 1;
+  font-size: 12px;
+  padding: 7px 6px;
+}
+
+.asset-tabbar button.active-tab {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent-strong);
+}
+
+.asset-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.asset-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.asset-table th,
+.asset-table td {
+  border-bottom: 1px solid var(--color-border);
+  padding: 7px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.asset-table th {
+  background: #f8fafc;
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
+.asset-table td small {
+    display: block;
+    margin-top: 2px;
+    color: var(--color-text-muted);
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.asset-inline-action {
+    min-width: 46px;
+    height: 26px;
+    padding: 0 8px;
+    font-size: 12px;
+    line-height: 1;
+}
+
+.asset-action-placeholder {
+    color: var(--color-text-muted);
+    font-size: 12px;
+}
+
+.asset-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.asset-badge--ok {
+  background: #dcfce7;
+  color: #166534;
+  border-color: #bbf7d0;
+}
+
+.asset-badge--warn {
+  background: #fef3c7;
+  color: #92400e;
+  border-color: #fde68a;
+}
+
+.asset-badge--bad {
+  background: #fee2e2;
+  color: #991b1b;
+  border-color: #fecaca;
+}
+
+.asset-badge--neutral {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.asset-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.asset-pager button {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
 @media (max-width: 1200px) {
   .top-status-bar {
     grid-template-columns: 1fr;

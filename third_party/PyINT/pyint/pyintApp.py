@@ -210,7 +210,7 @@ def main(argv):
     if templateDict['raw2slc_all'] == '1':   # only for S1 data now
         print('Start to convert downloaded-raw data into SLC ...')
         print('Number of processor: %s' % str(templateDict['raw2slc_all_parallel']))
-        if satelite=='S1A':
+        if str(satelite).startswith('S1'):
             call_str = 'down2slc_sen_all.py ' + projectName + ' --parallel ' + templateDict['raw2slc_all_parallel']
             _run_or_raise(call_str, 'raw2slc_s1')
         elif satelite=='ALOS':

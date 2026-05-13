@@ -192,6 +192,17 @@ class RadarData(BaseModel):
     product_unique_id: Optional[str] = None
     satellite_family: Optional[str] = None
     look_direction: Optional[str] = None
+    acquisition_start_time_utc: Optional[datetime] = None
+    acquisition_stop_time_utc: Optional[datetime] = None
+    absolute_orbit: Optional[str] = None
+    relative_orbit: Optional[str] = None
+    source_format: Optional[str] = None
+    source_product_ref_id: Optional[int] = None
+    source_archive_asset_id: Optional[int] = None
+    selected_orbit_asset_id: Optional[int] = None
+    orbit_binding_status: str = "UNBOUND"
+    orbit_binding_reason: Optional[str] = None
+    metadata_json: Optional[Dict[str, Any]] = None
     geocoded_flag: Optional[bool] = None
     insar_source_ready: bool = False
     insar_source_reason: Optional[str] = None

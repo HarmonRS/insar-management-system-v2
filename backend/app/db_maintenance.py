@@ -36,6 +36,7 @@ MIGRATION_FILES = [
     "007_timeseries_stack_plan_trace.sql",
     "008_timeseries_stack_plan_edges.sql",
     "009_raw_source_pairing_fields.sql",
+    "010_source_orbit_asset_inventory.sql",
 ]
 
 

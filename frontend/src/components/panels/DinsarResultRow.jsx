@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import { parseDatesFromName, formatYmd } from '../../utils/appUiHelpers';
 import { getDinsarEngineMeta } from '../../utils/dinsarEngines';
+import { formatSatelliteFamilyLabel, inferSatelliteFamilyFromResultLike } from '../../utils/satelliteFamily';
 
 function truncateMiddle(value, maxLength = 28) {
     const text = String(value || '').trim();
@@ -23,6 +24,7 @@ function DinsarResultRow({
 }) {
     const dates = showDates ? parseDatesFromName(result.name, (value) => formatYmd(value, language)) : null;
     const engineMeta = getDinsarEngineMeta(result.engine_code);
+    const satelliteFamily = inferSatelliteFamilyFromResultLike(result);
     const hasTrace = !!(
         result.selection_strategy ||
         result.network_run_id ||
@@ -45,6 +47,14 @@ function DinsarResultRow({
                     >
                         {engineMeta.shortLabel}
                     </span>
+                    {satelliteFamily && (
+                        <span
+                            className="dinsar-engine-badge tone-unknown"
+                            title={language === 'en' ? 'Satellite family' : '卫星系列'}
+                        >
+                            {formatSatelliteFamilyLabel(satelliteFamily)}
+                        </span>
+                    )}
                     {result.ai_score !== null && (
                         <span
                             className={`ai-score ${result.ai_score > 0.7 ? 'good' : (result.ai_score < 0.4 ? 'bad' : 'medium')}`}

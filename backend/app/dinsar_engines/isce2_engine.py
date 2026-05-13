@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 
 from ..config import get_env_text, read_bool_env, settings
 from .base import DinsarEngine, EngineAvailability, EngineProfile, RunRequest, RunResult
+from ..utils import normalize_satellite_family
 from ..services.dinsar_naming import (
     PAIR_META_FILENAME,
     build_fallback_pair_key,
@@ -728,7 +729,14 @@ class Isce2Engine(DinsarEngine):
         task_name = os.path.basename(os.path.normpath(task_dir))
         pair_meta = find_json_sidecar(task_dir, PAIR_META_FILENAME, max_levels=0) or {}
         task_alias = str(pair_meta.get("task_alias") or task_name).strip() or task_name
-        pair_key = str(pair_meta.get("pair_key") or "").strip() or build_fallback_pair_key(task_alias, task_dir)
+        satellite_family = normalize_satellite_family(
+            pair_meta.get("master_satellite") or pair_meta.get("slave_satellite")
+        )
+        pair_key = str(pair_meta.get("pair_key") or "").strip() or build_fallback_pair_key(
+            task_alias,
+            task_dir,
+            satellite_family=satellite_family,
+        )
         pointer_path = os.path.join(
             settings.DINSAR_PRODUCT_DIR,
             pair_key,
@@ -1085,7 +1093,14 @@ class Isce2Engine(DinsarEngine):
             task_name = os.path.basename(os.path.normpath(task_dir))
             pair_meta = find_json_sidecar(task_dir, PAIR_META_FILENAME, max_levels=0) or {}
             task_alias = str(pair_meta.get("task_alias") or task_name).strip() or task_name
-            pair_key = str(pair_meta.get("pair_key") or "").strip() or build_fallback_pair_key(task_alias, task_dir)
+            satellite_family = normalize_satellite_family(
+                pair_meta.get("master_satellite") or pair_meta.get("slave_satellite")
+            )
+            pair_key = str(pair_meta.get("pair_key") or "").strip() or build_fallback_pair_key(
+                task_alias,
+                task_dir,
+                satellite_family=satellite_family,
+            )
             output_root = self._output_root or os.path.join(task_dir, "isce2_output")
             run_dir = managed_run_dir_override or os.path.normpath(
                 os.path.join(output_root, pair_key, "runs", run_key)

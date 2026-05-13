@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import and_, cast, func, or_
+from sqlalchemy import and_, case, cast, func, or_
 from sqlalchemy.orm import aliased
 
 from geoalchemy2 import Geography
@@ -43,9 +43,58 @@ from .dinsar_naming import build_pair_key, build_task_alias, ensure_unique_task_
 from .pairing_state_service import pairing_state_service
 
 
-PAIRING_POLICY_VERSION = "2026.05.raw-source.v1"
+PAIRING_POLICY_VERSION = "2026.05.raw-source.v2"
 PAIRING_WARNING_CANDIDATE_THRESHOLD = 3000
 logger = logging.getLogger(__name__)
+
+
+def _normalized_satellite_family_expr(alias):
+    compact_satellite = func.upper(
+        func.replace(
+            func.replace(
+                func.replace(func.coalesce(alias.satellite, ""), "-", ""),
+                "_",
+                "",
+            ),
+            " ",
+            "",
+        )
+    )
+    inferred_family = case(
+        (
+            compact_satellite.in_(
+                ["LT1", "LT1A", "LT1B", "LUTAN1", "LUTAN1A", "LUTAN1B"]
+            ),
+            "LT1",
+        ),
+        (
+            compact_satellite.in_(
+                [
+                    "S1",
+                    "S1A",
+                    "S1B",
+                    "S1C",
+                    "SENTINEL1",
+                    "SENTINEL1A",
+                    "SENTINEL1B",
+                    "SENTINEL1C",
+                ]
+            ),
+            "S1",
+        ),
+        else_=func.upper(alias.satellite),
+    )
+    return func.coalesce(func.nullif(func.upper(alias.satellite_family), ""), inferred_family)
+
+
+def _same_relative_orbit_expr(left_alias, right_alias):
+    left_relative_orbit = func.upper(func.trim(func.coalesce(left_alias.relative_orbit, "")))
+    right_relative_orbit = func.upper(func.trim(func.coalesce(right_alias.relative_orbit, "")))
+    return and_(
+        left_relative_orbit != "",
+        right_relative_orbit != "",
+        left_relative_orbit == right_relative_orbit,
+    )
 
 
 class SpatialService:
@@ -155,6 +204,8 @@ class SpatialService:
     ) -> List[dict]:
         master_alias = aliased(RadarDataORM)
         slave_alias = aliased(RadarDataORM)
+        master_family_expr = _normalized_satellite_family_expr(master_alias)
+        slave_family_expr = _normalized_satellite_family_expr(slave_alias)
         center_distance_expr = func.coalesce(
             PairingMetricCacheORM.scene_center_distance_meters,
             PairingMetricCacheORM.spatial_baseline_meters,
@@ -191,6 +242,14 @@ class SpatialService:
 
         if params.require_same_polarization:
             stmt = stmt.where(PairingMetricCacheORM.same_polarization.is_(True))
+
+        stmt = stmt.where(
+            or_(
+                master_family_expr != "S1",
+                slave_family_expr != "S1",
+                _same_relative_orbit_expr(master_alias, slave_alias),
+            )
+        )
 
         if params.allowed_satellites:
             allowed_satellites = [
@@ -284,6 +343,7 @@ class SpatialService:
                         slave.file_path,
                         master.imaging_date,
                         slave.imaging_date,
+                        master.satellite_family or slave.satellite_family or master.satellite or slave.satellite,
                     ),
                     pair_uid=candidate.get("pair_uid"),
                     metric_cache_ref_id=candidate.get("metric_cache_ref_id"),
@@ -1281,7 +1341,7 @@ class SpatialService:
         compact = raw_satellite.replace("-", "").replace("_", "").replace(" ", "")
         if compact in {"LT1", "LT1A", "LT1B", "LUTAN1", "LUTAN1A", "LUTAN1B"}:
             return "LT1"
-        if compact in {"S1", "S1A", "S1B", "SENTINEL1", "SENTINEL1A", "SENTINEL1B"}:
+        if compact in {"S1", "S1A", "S1B", "S1C", "SENTINEL1", "SENTINEL1A", "SENTINEL1B", "SENTINEL1C"}:
             return "S1"
         return raw_satellite or "UNKNOWN"
 

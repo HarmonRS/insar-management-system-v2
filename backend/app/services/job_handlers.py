@@ -22,6 +22,7 @@ from ..config import settings
 from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskItemORM, PsTaskItemORM, RadarDataORM, SARSceneGeoORM, FloodDetectionORM, WaterDetectionORM, GF3ProcessingORM, AiDiagnosisORM
 from ..scheduler import scan_data_job
 from .data_service import data_service
+from .asset_inventory_service import asset_inventory_service
 from .dinsar_compat_service import dinsar_compat_service
 from .dinsar_naming import build_run_key
 from .dinsar_production_service import dinsar_production_service
@@ -67,6 +68,7 @@ JOB_TYPE_SCAN_DATA = "SCAN_DATA"
 JOB_TYPE_SCAN_DINSAR = "SCAN_DINSAR"
 JOB_TYPE_COPY_DATA = "COPY_DATA"
 JOB_TYPE_UNPACK = "UNPACK_ARCHIVES"
+JOB_TYPE_UNPACK_SENTINEL1 = "UNPACK_SENTINEL1"
 JOB_TYPE_AI_TRAIN = "AI_TRAIN"
 JOB_TYPE_AI_PREDICT = "AI_PREDICT"
 JOB_TYPE_AI_ANALYZE = "AI_ANALYZE"
@@ -85,6 +87,7 @@ JOB_TYPE_PYINT_RUN = "PYINT_RUN"
 JOB_TYPE_PUBLISH_DINSAR_PRODUCTS = "PUBLISH_DINSAR_PRODUCTS"
 JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
+JOB_TYPE_SCAN_ASSET_INVENTORY = "SCAN_ASSET_INVENTORY"
 
 COPY_ALLOWED_STATUSES = {"PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"}
 
@@ -223,6 +226,34 @@ async def _handle_scan_data(job: SystemJobORM) -> None:
         if not job.task_id:
             raise ValueError("SCAN_DATA requires task_id for progress tracking.")
         await _run_scan_data_custom(job.task_id, payload)
+
+
+async def _handle_scan_asset_inventory(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("SCAN_ASSET_INVENTORY requires task_id for progress tracking.")
+    payload = job.payload or {}
+    await task_service.start_task(job.task_id, message="Source/orbit asset inventory scan started")
+    async with AsyncSessionLocal() as db:
+        result = await asset_inventory_service.scan_configured_roots(
+            db,
+            inventory_types=payload.get("inventory_types") or None,
+            root_ids=payload.get("root_ids") or None,
+            bind_orbits=bool(payload.get("bind_orbits", True)),
+            task_id=job.task_id,
+        )
+        await task_service.update_task(
+            job.task_id,
+            status="COMPLETED",
+            progress=100,
+            message=(
+                "Asset inventory scan completed: "
+                f"sources={result.get('source_assets', 0)}, "
+                f"orbits={result.get('orbit_assets', 0)}, "
+                f"matched={((result.get('binding') or {}).get('matched_count', 0))}, "
+                f"missing={((result.get('binding') or {}).get('missing_count', 0))}"
+            ),
+            db=db,
+        )
 
 
 def _resolve_hazard_shp_path() -> str:
@@ -416,6 +447,16 @@ async def _handle_copy_data(job: SystemJobORM) -> None:
 
 async def _handle_unpack_archives(job: SystemJobORM) -> None:
     await run_unpack_task(job.task_id)
+
+
+async def _handle_unpack_sentinel1(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("UNPACK_SENTINEL1 requires task_id for progress tracking.")
+    payload = job.payload or {}
+    if payload.get("asset_id"):
+        await asset_inventory_service.run_sentinel1_unpack_task(job.task_id, payload)
+        return
+    await asset_inventory_service.run_sentinel1_unpack_batch_task(job.task_id, payload)
 
 
 async def _handle_ai_train(job: SystemJobORM) -> None:
@@ -3849,6 +3890,7 @@ async def _handle_rebuild_psinsar_catalog(job: SystemJobORM) -> None:
 
 _HANDLERS = {
     JOB_TYPE_SCAN_DATA: _handle_scan_data,
+    JOB_TYPE_SCAN_ASSET_INVENTORY: _handle_scan_asset_inventory,
     JOB_TYPE_SCAN_DINSAR: _handle_scan_dinsar,
     JOB_TYPE_PUBLISH_DINSAR_PRODUCTS: _handle_publish_dinsar_products_clean,
     JOB_TYPE_REBUILD_DINSAR_CATALOG: _handle_rebuild_dinsar_catalog_clean,
@@ -3864,6 +3906,7 @@ _HANDLERS = {
     JOB_TYPE_REBUILD_PSINSAR_CATALOG: _handle_rebuild_psinsar_catalog,
     JOB_TYPE_COPY_DATA: _handle_copy_data,
     JOB_TYPE_UNPACK: _handle_unpack_archives,
+    JOB_TYPE_UNPACK_SENTINEL1: _handle_unpack_sentinel1,
     JOB_TYPE_AI_TRAIN: _handle_ai_train,
     JOB_TYPE_AI_PREDICT: _handle_ai_predict,
     JOB_TYPE_AI_ANALYZE: _handle_ai_analyze,

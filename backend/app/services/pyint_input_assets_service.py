@@ -10,11 +10,14 @@ from typing import Any, Dict, List
 from ..config import settings
 from .orbit_converter import get_source_orbit_inventory
 from .pyint_service import (
+    discover_s1_scene_sources,
     discover_lt1_archives,
     infer_scene_date_from_archives,
     infer_task_identity,
     validate_pyint_root_dir,
 )
+from .asset_inventory_service import _configured_sentinel1_archive_dirs, _parse_s1_source_name
+from ..utils import normalize_satellite_family
 
 
 VALID_DEM_MODES = {"local_fabdem", "opentopo", "prepared_file"}
@@ -60,6 +63,198 @@ def _infer_satellite_from_archives(paths: List[str]) -> str:
     if len(satellites) == 1:
         return next(iter(satellites))
     return ""
+
+
+def _normalize_s1_satellite(value: Any) -> str:
+    text = str(value or "").strip().upper().replace("-", "").replace("_", "")
+    if text in {"S1A", "S1B", "S1C"}:
+        return text
+    return ""
+
+
+def _find_s1_zip_by_logical_uid(logical_uid: str) -> str:
+    logical = str(logical_uid or "").strip()
+    if not logical:
+        return ""
+    expected_name = logical if logical.lower().endswith(".zip") else f"{logical}.zip"
+    for root in _configured_sentinel1_archive_dirs():
+        if not root or not os.path.isdir(root):
+            continue
+        direct_candidate = os.path.join(root, expected_name)
+        if os.path.isfile(direct_candidate):
+            return _normalize_path(direct_candidate)
+        for current_root, _, files in os.walk(root):
+            if expected_name in files:
+                return _normalize_path(os.path.join(current_root, expected_name))
+    return ""
+
+
+def _is_s1_safe_dir(path: str) -> bool:
+    normalized = _normalize_path(path)
+    if not normalized or not os.path.isdir(normalized):
+        return False
+    return os.path.isfile(os.path.join(normalized, "manifest.safe"))
+
+
+def _resolve_s1_scene_input(
+    *,
+    role: str,
+    scene_path: str,
+    pair_meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    normalized_scene = _normalize_path(scene_path)
+    scene_name = os.path.basename(normalized_scene.rstrip("\\/"))
+    parsed = _parse_s1_source_name(scene_name) or {}
+    logical_uid = str(parsed.get("logical_product_uid") or "").strip()
+    resolved_path = ""
+    input_kind = ""
+    resolution_method = ""
+
+    if normalized_scene.lower().endswith(".zip") and os.path.isfile(normalized_scene):
+        resolved_path = normalized_scene
+        input_kind = "zip"
+        resolution_method = "task_or_pair_meta"
+    elif _is_s1_safe_dir(normalized_scene):
+        resolved_path = normalized_scene
+        input_kind = "safe_dir"
+        resolution_method = "task_or_pair_meta"
+    elif normalized_scene.lower().endswith(".safe") and os.path.isdir(normalized_scene):
+        resolved_path = normalized_scene
+        input_kind = "safe_dir"
+        resolution_method = "task_or_pair_meta"
+    else:
+        sibling_zip = ""
+        if normalized_scene.lower().endswith(".safe"):
+            sibling_zip = normalized_scene[:-5] + ".zip"
+        if sibling_zip and os.path.isfile(sibling_zip):
+            resolved_path = _normalize_path(sibling_zip)
+            input_kind = "zip"
+            resolution_method = "safe_sibling_zip"
+        elif logical_uid:
+            looked_up_zip = _find_s1_zip_by_logical_uid(logical_uid)
+            if looked_up_zip:
+                resolved_path = looked_up_zip
+                input_kind = "zip"
+                resolution_method = "source_pool_lookup"
+
+    expected_name = scene_name
+    if input_kind == "zip":
+        if not expected_name.lower().endswith(".zip"):
+            expected_name = f"{logical_uid}.zip" if logical_uid else os.path.basename(resolved_path)
+    elif input_kind == "safe_dir":
+        if not expected_name.lower().endswith(".safe"):
+            expected_name = f"{logical_uid}.SAFE" if logical_uid else os.path.basename(resolved_path)
+
+    satellite = _normalize_s1_satellite(pair_meta.get(f"{role}_satellite")) or _normalize_s1_satellite(parsed.get("satellite"))
+    date_text = str(pair_meta.get(f"{role}_imaging_date") or parsed.get("imaging_date") or "").strip()
+    return {
+        "role": role,
+        "scene_path": normalized_scene,
+        "scene_name": scene_name,
+        "logical_product_uid": logical_uid,
+        "satellite": satellite,
+        "date": date_text,
+        "resolved": bool(resolved_path),
+        "path": resolved_path,
+        "input_kind": input_kind,
+        "resolution_method": resolution_method,
+        "expected_name": expected_name,
+        "staged_path": "",
+    }
+
+
+def _resolve_s1_zip_file(
+    *,
+    role: str,
+    scene_path: str,
+    pair_meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    normalized_scene = _normalize_path(scene_path)
+    scene_name = os.path.basename(normalized_scene)
+    parsed = _parse_s1_source_name(scene_name) or {}
+    logical_uid = str(parsed.get("logical_product_uid") or "").strip()
+    direct_zip = ""
+    if normalized_scene.lower().endswith(".zip") and os.path.isfile(normalized_scene):
+        direct_zip = normalized_scene
+    elif normalized_scene.lower().endswith(".safe"):
+        sibling_zip = normalized_scene[:-5] + ".zip"
+        if os.path.isfile(sibling_zip):
+            direct_zip = _normalize_path(sibling_zip)
+    if not direct_zip and logical_uid:
+        direct_zip = _find_s1_zip_by_logical_uid(logical_uid)
+
+    satellite = _normalize_s1_satellite(pair_meta.get(f"{role}_satellite")) or _normalize_s1_satellite(parsed.get("satellite"))
+    date_text = str(pair_meta.get(f"{role}_imaging_date") or parsed.get("imaging_date") or "").strip()
+    return {
+        "role": role,
+        "scene_path": normalized_scene,
+        "scene_name": scene_name,
+        "logical_product_uid": logical_uid,
+        "satellite": satellite,
+        "date": date_text,
+        "resolved": bool(direct_zip),
+        "path": direct_zip,
+        "resolution_method": "scene_or_source_pool_lookup" if direct_zip else "",
+        "expected_name": f"{logical_uid}.zip" if logical_uid else "",
+        "staged_path": "",
+    }
+
+
+def _resolve_s1_orbit_file(
+    *,
+    role: str,
+    pair_meta: Dict[str, Any],
+    task_dir: str,
+) -> Dict[str, Any]:
+    direct_path = _normalize_path(pair_meta.get(f"{role}_orbit_file_path"))
+    if direct_path and os.path.isfile(direct_path):
+        return {
+            "role": role,
+            "resolved": True,
+            "path": direct_path,
+            "resolution_method": "pair_meta",
+            "expected_name": os.path.basename(direct_path),
+            "satellite": _normalize_s1_satellite(pair_meta.get(f"{role}_satellite")),
+            "date": str(pair_meta.get(f"{role}_imaging_date") or "").strip(),
+            "staged_path": "",
+        }
+
+    role_orbit_dir = os.path.join(task_dir, "orbit")
+    satellite = _normalize_s1_satellite(pair_meta.get(f"{role}_satellite"))
+    date_text = str(pair_meta.get(f"{role}_imaging_date") or "").strip()
+    candidates: List[str] = []
+    if os.path.isdir(role_orbit_dir):
+        for entry in os.scandir(role_orbit_dir):
+            if not entry.is_file():
+                continue
+            if not entry.name.lower().endswith(".eof"):
+                continue
+            if satellite and satellite not in entry.name.upper():
+                continue
+            candidates.append(_normalize_path(entry.path))
+    candidates.sort()
+    if candidates:
+        return {
+            "role": role,
+            "resolved": True,
+            "path": candidates[0],
+            "resolution_method": "task_orbit_dir",
+            "expected_name": os.path.basename(candidates[0]),
+            "satellite": satellite,
+            "date": date_text,
+            "staged_path": "",
+        }
+    return {
+        "role": role,
+        "resolved": False,
+        "path": "",
+        "resolution_method": "",
+        "expected_name": "",
+        "satellite": satellite,
+        "date": date_text,
+        "staged_path": "",
+        "error": f"{role} Sentinel-1 EOF 缺失",
+    }
 
 
 def _get_dem_mode() -> str:
@@ -579,6 +774,427 @@ def build_pyint_input_preview(root_dir: str, num_to_process: int = 0) -> Dict[st
     task_summaries: List[Dict[str, Any]] = []
     resolved_task_count = 0
     missing_task_count = 0
+    effective_orbit_policy = _get_orbit_policy()
+
+    for task_dir in validation.get("task_dirs", []) or []:
+        task_summary = resolve_pyint_task_input_assets(
+            task_dir,
+            dem_summary=dem_summary,
+            orbit_context=orbit_context,
+        )
+        task_summaries.append(task_summary)
+        task_orbit_policy = str(((task_summary.get("input_assets") or {}).get("orbits") or {}).get("policy") or "").strip()
+        if task_orbit_policy:
+            effective_orbit_policy = task_orbit_policy
+        if task_summary.get("warnings"):
+            warnings.extend(
+                f"{task_summary['task_alias']}: {item}"
+                for item in task_summary["warnings"]
+            )
+        if task_summary.get("blockers"):
+            blockers.extend(
+                f"{task_summary['task_alias']}: {item}"
+                for item in task_summary["blockers"]
+            )
+        if task_summary["input_assets"]["orbits"]["missing_count"] == 0:
+            resolved_task_count += 1
+        else:
+            missing_task_count += 1
+
+    allow_submit = not blockers
+    precise_orbit_bridge = get_pyint_precise_orbit_bridge_summary()
+    return {
+        "root_dir": validation["root_dir"],
+        "mode": validation["mode"],
+        "task_count": len(task_summaries),
+        "selected_task_count": len(task_summaries),
+        "allow_submit": allow_submit,
+        "warnings": warnings,
+        "blockers": blockers,
+        "invalid_candidates": validation.get("invalid_candidates", []),
+        "dem": dem_summary,
+        "orbits": {
+            "policy": effective_orbit_policy,
+            "pool_root": orbit_context.get("pool_root", ""),
+            "pool_exists": bool(orbit_context.get("pool_exists")),
+            "resolved_task_count": resolved_task_count,
+            "missing_task_count": missing_task_count,
+            "duplicate_count": int(orbit_context.get("duplicate_count", 0) or 0),
+            "warnings": list(orbit_context.get("warnings") or []),
+        },
+        "precise_orbit_bridge": precise_orbit_bridge,
+        "tasks": task_summaries,
+    }
+
+
+def summarize_preview_blockers(preview: Dict[str, Any], limit: int = 8) -> str:
+    blockers = [str(item).strip() for item in (preview.get("blockers") or []) if str(item).strip()]
+    if not blockers:
+        return ""
+    if len(blockers) <= limit:
+        return "; ".join(blockers)
+    return "; ".join(blockers[:limit]) + f"; 其余 {len(blockers) - limit} 项已省略"
+
+
+def materialize_pyint_input_assets(
+    *,
+    task_summary: Dict[str, Any],
+    input_assets_dir: str,
+    project_name: str = "",
+) -> Dict[str, Any]:
+    input_assets_dir = _normalize_path(input_assets_dir)
+    os.makedirs(input_assets_dir, exist_ok=True)
+
+    record_enabled = bool(getattr(settings, "PYINT_RECORD_INPUT_ASSETS", True))
+    orbits_dir = os.path.join(input_assets_dir, "orbits")
+    dem_dir = os.path.join(input_assets_dir, "dem")
+    downloads_dir = os.path.join(input_assets_dir, "downloads")
+    if record_enabled:
+        os.makedirs(orbits_dir, exist_ok=True)
+        os.makedirs(dem_dir, exist_ok=True)
+        os.makedirs(downloads_dir, exist_ok=True)
+
+    manifest = _copy_json_safe(task_summary.get("input_assets") or {})
+    manifest["generated_at"] = _utc_now_text()
+    manifest["task_name"] = task_summary.get("task_name")
+    manifest["task_alias"] = task_summary.get("task_alias")
+    manifest["pair_key"] = task_summary.get("pair_key")
+    manifest["task_dir"] = task_summary.get("task_dir")
+    manifest["allow_submit"] = bool(task_summary.get("allow_submit"))
+    manifest["warnings"] = list(task_summary.get("warnings") or [])
+    manifest["blockers"] = list(task_summary.get("blockers") or [])
+
+    dem_summary = manifest.get("dem") or {}
+    if project_name:
+        dem_summary["resolved_output_dir"] = os.path.join(_normalize_path(settings.PYINT_DEM_ROOT), project_name)
+    manifest["dem"] = dem_summary
+
+    orbits_summary = manifest.get("orbits") or {}
+    staged_count = 0
+    precise_orbit_bridge = get_pyint_precise_orbit_bridge_summary()
+    should_stage_orbits = record_enabled and (
+        str(orbits_summary.get("policy") or "").strip().lower() == "stage_txt"
+        or precise_orbit_bridge.get("enabled")
+        or str((manifest.get("task_source") or {}).get("satellite_family") or "").strip().upper() == "S1"
+    )
+    if should_stage_orbits:
+        for role in ("master", "slave"):
+            orbit_item = orbits_summary.get(role) or {}
+            orbit_path = _normalize_path(orbit_item.get("path"))
+            expected_name = str(orbit_item.get("expected_name") or "").strip()
+            if not orbit_item.get("resolved") or not orbit_path or not expected_name:
+                continue
+            target_path = os.path.join(orbits_dir, expected_name)
+            if not os.path.exists(target_path):
+                shutil.copy2(orbit_path, target_path)
+            orbit_item["staged_path"] = target_path
+            orbit_item["stage_operation"] = "copied"
+            orbit_item["stage_reason"] = "precise_orbit_bridge" if precise_orbit_bridge.get("enabled") else "stage_txt_policy"
+            staged_count += 1
+            orbits_summary[role] = orbit_item
+    manifest["orbits"] = orbits_summary
+
+    download_staged_count = 0
+    task_source = manifest.get("task_source") or {}
+    if record_enabled and str(task_source.get("satellite_family") or "").strip().upper() == "S1":
+        production_inputs = task_source.get("production_inputs") or {}
+        for role_key in ("master_scene", "slave_scene", "master_zip", "slave_zip"):
+            scene_item = production_inputs.get(role_key) or {}
+            scene_path = _normalize_path(scene_item.get("path"))
+            expected_name = str(scene_item.get("expected_name") or os.path.basename(scene_path) or "").strip()
+            if not scene_item.get("resolved") or not scene_path or not expected_name:
+                continue
+            input_kind = str(scene_item.get("input_kind") or "").strip().lower()
+            if input_kind == "safe_dir" or os.path.isdir(scene_path):
+                scene_item["staged_path"] = scene_path
+                scene_item["stage_operation"] = "source_reference"
+                production_inputs[role_key] = scene_item
+                continue
+            target_path = os.path.join(downloads_dir, expected_name)
+            if not os.path.exists(target_path):
+                shutil.copy2(scene_path, target_path)
+            scene_item["staged_path"] = target_path
+            scene_item["stage_operation"] = "copied"
+            production_inputs[role_key] = scene_item
+            download_staged_count += 1
+        task_source["production_inputs"] = production_inputs
+        manifest["task_source"] = task_source
+
+    materialized = {
+        "input_assets_dir": input_assets_dir,
+        "record_enabled": record_enabled,
+        "orbits_dir": orbits_dir if record_enabled else "",
+        "dem_dir": dem_dir if record_enabled else "",
+        "downloads_dir": downloads_dir if record_enabled else "",
+        "orbits_staged_count": staged_count,
+        "downloads_staged_count": download_staged_count,
+        "task_manifest_path": "",
+        "dem_summary_path": "",
+        "orbit_summary_path": "",
+        "input_assets": manifest,
+    }
+
+    if not record_enabled:
+        return materialized
+
+    task_manifest_path = os.path.join(input_assets_dir, "task_manifest.json")
+    dem_summary_path = os.path.join(dem_dir, "dem_summary.json")
+    orbit_summary_path = os.path.join(orbits_dir, "orbit_summary.json")
+
+    with open(task_manifest_path, "w", encoding="utf-8") as fp:
+        json.dump(manifest, fp, ensure_ascii=False, indent=2)
+        fp.write("\n")
+    with open(dem_summary_path, "w", encoding="utf-8") as fp:
+        json.dump(dem_summary, fp, ensure_ascii=False, indent=2)
+        fp.write("\n")
+    with open(orbit_summary_path, "w", encoding="utf-8") as fp:
+        json.dump(orbits_summary, fp, ensure_ascii=False, indent=2)
+        fp.write("\n")
+
+    materialized.update(
+        {
+            "task_manifest_path": task_manifest_path,
+            "dem_summary_path": dem_summary_path,
+            "orbit_summary_path": orbit_summary_path,
+        }
+    )
+    return materialized
+
+
+def resolve_pyint_task_input_assets(
+    task_dir: str,
+    *,
+    dem_summary: Dict[str, Any] | None = None,
+    orbit_context: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    task_dir = _normalize_path(task_dir)
+    task_identity = infer_task_identity(task_dir)
+    pair_meta = task_identity["pair_meta"]
+    satellite_family = str(task_identity.get("satellite_family") or "").strip().upper()
+
+    warnings: List[str] = []
+    blockers: List[str] = []
+
+    if satellite_family == "S1":
+        scene_sources = discover_s1_scene_sources(task_dir)
+        master_archives = list(scene_sources.get("master", []) or [])
+        slave_archives = list(scene_sources.get("slave", []) or [])
+        master_date = task_identity["master_date"] or infer_scene_date_from_archives(master_archives)
+        slave_date = task_identity["slave_date"] or infer_scene_date_from_archives(slave_archives)
+        master_satellite = _normalize_s1_satellite(pair_meta.get("master_satellite")) or _normalize_s1_satellite(task_identity.get("master_satellite"))
+        slave_satellite = _normalize_s1_satellite(pair_meta.get("slave_satellite")) or _normalize_s1_satellite(task_identity.get("slave_satellite"))
+
+        if not master_archives:
+            blockers.append("master/ 未识别到 Sentinel-1 SAFE 源目录。")
+        if not slave_archives:
+            blockers.append("slave/ 未识别到 Sentinel-1 SAFE 源目录。")
+        if not master_date:
+            blockers.append("未能识别主影像日期。")
+        if not slave_date:
+            blockers.append("未能识别从影像日期。")
+
+        master_scene = _resolve_s1_scene_input(
+            role="master",
+            scene_path=master_archives[0] if master_archives else "",
+            pair_meta=pair_meta,
+        )
+        slave_scene = _resolve_s1_scene_input(
+            role="slave",
+            scene_path=slave_archives[0] if slave_archives else "",
+            pair_meta=pair_meta,
+        )
+        master_orbit = _resolve_s1_orbit_file(
+            role="master",
+            pair_meta=pair_meta,
+            task_dir=task_dir,
+        )
+        slave_orbit = _resolve_s1_orbit_file(
+            role="slave",
+            pair_meta=pair_meta,
+            task_dir=task_dir,
+        )
+
+        if not master_scene.get("resolved"):
+            blockers.append("master Sentinel-1 源场景缺失。")
+        if not slave_scene.get("resolved"):
+            blockers.append("slave Sentinel-1 源场景缺失。")
+        if not master_orbit.get("resolved"):
+            blockers.append(str(master_orbit.get("error") or "master Sentinel-1 EOF 缺失"))
+        if not slave_orbit.get("resolved"):
+            blockers.append(str(slave_orbit.get("error") or "slave Sentinel-1 EOF 缺失"))
+
+        task_source = {
+            "task_dir": task_dir,
+            "task_name": task_identity["task_name"],
+            "task_alias": task_identity["task_alias"],
+            "pair_key": task_identity["pair_key"],
+            "satellite_family": "S1",
+            "master_date": master_date,
+            "slave_date": slave_date,
+            "master_satellite": master_satellite,
+            "slave_satellite": slave_satellite,
+            "archives": {
+                "master": master_archives,
+                "slave": slave_archives,
+            },
+            "production_inputs": {
+                "master_scene": master_scene,
+                "slave_scene": slave_scene,
+            },
+        }
+        orbits_summary = {
+            "policy": "require_eof",
+            "pool_root": "",
+            "pool_exists": True,
+            "master": master_orbit,
+            "slave": slave_orbit,
+            "resolved_count": int(bool(master_orbit.get("resolved"))) + int(bool(slave_orbit.get("resolved"))),
+            "missing_count": int(not master_orbit.get("resolved")) + int(not slave_orbit.get("resolved")),
+            "warnings": [],
+            "stage_mode": "copy",
+            "precise_orbit_bridge": {
+                "enabled": False,
+                "mode": "not_applicable",
+                "strict": True,
+            },
+        }
+    else:
+        archives = discover_lt1_archives(task_dir)
+        master_archives = list(archives.get("master", []) or [])
+        slave_archives = list(archives.get("slave", []) or [])
+        master_date = task_identity["master_date"] or infer_scene_date_from_archives(master_archives)
+        slave_date = task_identity["slave_date"] or infer_scene_date_from_archives(slave_archives)
+        master_satellite = _normalize_lt1_satellite(pair_meta.get("master_satellite")) or _infer_satellite_from_archives(master_archives)
+        slave_satellite = _normalize_lt1_satellite(pair_meta.get("slave_satellite")) or _infer_satellite_from_archives(slave_archives)
+
+        if not master_archives:
+            blockers.append("master/ 未发现 LT-1 原始输入（LT1*.tar.gz 或 LT1*.tiff）。")
+        if not slave_archives:
+            blockers.append("slave/ 未发现 LT-1 原始输入（LT1*.tar.gz 或 LT1*.tiff）。")
+        if not master_date:
+            blockers.append("未能识别主影像日期。")
+        if not slave_date:
+            blockers.append("未能识别从影像日期。")
+
+        orbit_policy = _get_orbit_policy()
+        orbit_context = orbit_context or get_pyint_orbit_context()
+        orbit_pool_root = orbit_context.get("pool_root", "")
+        orbit_pool_exists = bool(orbit_context.get("pool_exists"))
+        orbit_files = orbit_context.get("files", {}) or {}
+
+        orbit_warnings: List[str] = []
+        if orbit_context.get("warnings"):
+            orbit_warnings.extend(str(item) for item in orbit_context["warnings"] if item)
+
+        master_orbit = _resolve_orbit_file(
+            role="master",
+            satellite=master_satellite,
+            date_text=master_date,
+            pool_root=orbit_pool_root,
+            orbit_files=orbit_files,
+        )
+        slave_orbit = _resolve_orbit_file(
+            role="slave",
+            satellite=slave_satellite,
+            date_text=slave_date,
+            pool_root=orbit_pool_root,
+            orbit_files=orbit_files,
+        )
+
+        for orbit_item in (master_orbit, slave_orbit):
+            if orbit_item.get("resolved"):
+                continue
+            message = str(orbit_item.get("error") or f"{orbit_item.get('role')} orbit missing").strip()
+            if orbit_policy == "validate_only":
+                orbit_warnings.append(message)
+            else:
+                blockers.append(message)
+
+        if not orbit_pool_root:
+            if orbit_policy == "validate_only":
+                orbit_warnings.append("轨道池未配置，当前仅记录警告。")
+            else:
+                blockers.append("轨道池未配置。")
+        elif not orbit_pool_exists:
+            if orbit_policy == "validate_only":
+                orbit_warnings.append(f"轨道池目录不可用: {orbit_pool_root}")
+            else:
+                blockers.append(f"轨道池目录不可用: {orbit_pool_root}")
+
+        warnings.extend(orbit_warnings)
+
+        precise_orbit_bridge = get_pyint_precise_orbit_bridge_summary()
+        task_source = {
+            "task_dir": task_dir,
+            "task_name": task_identity["task_name"],
+            "task_alias": task_identity["task_alias"],
+            "pair_key": task_identity["pair_key"],
+            "satellite_family": "LT1",
+            "master_date": master_date,
+            "slave_date": slave_date,
+            "master_satellite": master_satellite,
+            "slave_satellite": slave_satellite,
+            "archives": {
+                "master": master_archives,
+                "slave": slave_archives,
+            },
+        }
+        orbits_summary = {
+            "policy": orbit_policy,
+            "pool_root": orbit_pool_root,
+            "pool_exists": orbit_pool_exists,
+            "master": master_orbit,
+            "slave": slave_orbit,
+            "resolved_count": int(bool(master_orbit.get("resolved"))) + int(bool(slave_orbit.get("resolved"))),
+            "missing_count": int(not master_orbit.get("resolved")) + int(not slave_orbit.get("resolved")),
+            "warnings": orbit_warnings,
+            "stage_mode": "copy" if orbit_policy == "stage_txt" or precise_orbit_bridge.get("enabled") else "none",
+            "precise_orbit_bridge": precise_orbit_bridge,
+        }
+
+    dem_payload = _copy_json_safe(dem_summary or get_pyint_dem_summary())
+    allow_submit = not blockers and bool(dem_payload.get("allow_submit", True))
+    return {
+        "task_name": task_identity["task_name"],
+        "task_alias": task_identity["task_alias"],
+        "pair_key": task_identity["pair_key"],
+        "task_dir": task_dir,
+        "master_date": master_date,
+        "slave_date": slave_date,
+        "master_satellite": master_satellite,
+        "slave_satellite": slave_satellite,
+        "satellite_family": satellite_family or normalize_satellite_family(master_satellite or slave_satellite),
+        "archive_counts": {
+            "master": len(master_archives),
+            "slave": len(slave_archives),
+        },
+        "warnings": warnings,
+        "blockers": blockers,
+        "allow_submit": allow_submit,
+        "task_source": task_source,
+        "dem": dem_payload,
+        "orbit_resolution": {
+            "master": master_orbit,
+            "slave": slave_orbit,
+        },
+        "input_assets": {
+            "task_source": task_source,
+            "dem": dem_payload,
+            "orbits": orbits_summary,
+        },
+    }
+
+
+def build_pyint_input_preview(root_dir: str, num_to_process: int = 0) -> Dict[str, Any]:
+    validation = validate_pyint_root_dir(root_dir, num_to_process)
+    dem_summary = get_pyint_dem_summary()
+    orbit_context = get_pyint_orbit_context()
+
+    warnings: List[str] = list(dem_summary.get("warnings") or [])
+    blockers: List[str] = list(dem_summary.get("blockers") or [])
+    task_summaries: List[Dict[str, Any]] = []
+    resolved_task_count = 0
+    missing_task_count = 0
 
     for task_dir in validation.get("task_dirs", []) or []:
         task_summary = resolve_pyint_task_input_assets(
@@ -626,106 +1242,3 @@ def build_pyint_input_preview(root_dir: str, num_to_process: int = 0) -> Dict[st
         "precise_orbit_bridge": precise_orbit_bridge,
         "tasks": task_summaries,
     }
-
-
-def summarize_preview_blockers(preview: Dict[str, Any], limit: int = 8) -> str:
-    blockers = [str(item).strip() for item in (preview.get("blockers") or []) if str(item).strip()]
-    if not blockers:
-        return ""
-    if len(blockers) <= limit:
-        return "; ".join(blockers)
-    return "; ".join(blockers[:limit]) + f"; 其余 {len(blockers) - limit} 项已省略"
-
-
-def materialize_pyint_input_assets(
-    *,
-    task_summary: Dict[str, Any],
-    input_assets_dir: str,
-    project_name: str = "",
-) -> Dict[str, Any]:
-    input_assets_dir = _normalize_path(input_assets_dir)
-    os.makedirs(input_assets_dir, exist_ok=True)
-
-    record_enabled = bool(getattr(settings, "PYINT_RECORD_INPUT_ASSETS", True))
-    orbits_dir = os.path.join(input_assets_dir, "orbits")
-    dem_dir = os.path.join(input_assets_dir, "dem")
-    if record_enabled:
-        os.makedirs(orbits_dir, exist_ok=True)
-        os.makedirs(dem_dir, exist_ok=True)
-
-    manifest = _copy_json_safe(task_summary.get("input_assets") or {})
-    manifest["generated_at"] = _utc_now_text()
-    manifest["task_name"] = task_summary.get("task_name")
-    manifest["task_alias"] = task_summary.get("task_alias")
-    manifest["pair_key"] = task_summary.get("pair_key")
-    manifest["task_dir"] = task_summary.get("task_dir")
-    manifest["allow_submit"] = bool(task_summary.get("allow_submit"))
-    manifest["warnings"] = list(task_summary.get("warnings") or [])
-    manifest["blockers"] = list(task_summary.get("blockers") or [])
-
-    dem_summary = manifest.get("dem") or {}
-    if project_name:
-        dem_summary["resolved_output_dir"] = os.path.join(_normalize_path(settings.PYINT_DEM_ROOT), project_name)
-    manifest["dem"] = dem_summary
-
-    orbits_summary = manifest.get("orbits") or {}
-    staged_count = 0
-    precise_orbit_bridge = get_pyint_precise_orbit_bridge_summary()
-    should_stage_orbits = record_enabled and (
-        str(orbits_summary.get("policy") or "").strip().lower() == "stage_txt"
-        or precise_orbit_bridge.get("enabled")
-    )
-    if should_stage_orbits:
-        for role in ("master", "slave"):
-            orbit_item = orbits_summary.get(role) or {}
-            orbit_path = _normalize_path(orbit_item.get("path"))
-            expected_name = str(orbit_item.get("expected_name") or "").strip()
-            if not orbit_item.get("resolved") or not orbit_path or not expected_name:
-                continue
-            target_path = os.path.join(orbits_dir, expected_name)
-            if not os.path.exists(target_path):
-                shutil.copy2(orbit_path, target_path)
-            orbit_item["staged_path"] = target_path
-            orbit_item["stage_operation"] = "copied"
-            orbit_item["stage_reason"] = "precise_orbit_bridge" if precise_orbit_bridge.get("enabled") else "stage_txt_policy"
-            staged_count += 1
-            orbits_summary[role] = orbit_item
-    manifest["orbits"] = orbits_summary
-
-    materialized = {
-        "input_assets_dir": input_assets_dir,
-        "record_enabled": record_enabled,
-        "orbits_dir": orbits_dir if record_enabled else "",
-        "dem_dir": dem_dir if record_enabled else "",
-        "orbits_staged_count": staged_count,
-        "task_manifest_path": "",
-        "dem_summary_path": "",
-        "orbit_summary_path": "",
-        "input_assets": manifest,
-    }
-
-    if not record_enabled:
-        return materialized
-
-    task_manifest_path = os.path.join(input_assets_dir, "task_manifest.json")
-    dem_summary_path = os.path.join(dem_dir, "dem_summary.json")
-    orbit_summary_path = os.path.join(orbits_dir, "orbit_summary.json")
-
-    with open(task_manifest_path, "w", encoding="utf-8") as fp:
-        json.dump(manifest, fp, ensure_ascii=False, indent=2)
-        fp.write("\n")
-    with open(dem_summary_path, "w", encoding="utf-8") as fp:
-        json.dump(dem_summary, fp, ensure_ascii=False, indent=2)
-        fp.write("\n")
-    with open(orbit_summary_path, "w", encoding="utf-8") as fp:
-        json.dump(orbits_summary, fp, ensure_ascii=False, indent=2)
-        fp.write("\n")
-
-    materialized.update(
-        {
-            "task_manifest_path": task_manifest_path,
-            "dem_summary_path": dem_summary_path,
-            "orbit_summary_path": orbit_summary_path,
-        }
-    )
-    return materialized

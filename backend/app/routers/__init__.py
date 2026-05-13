@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from . import (
     ai,
     aoi,
+    assets,
     auth,
     dinsar,
     dinsar_products,
@@ -43,6 +44,7 @@ def include_all_routers(router: APIRouter) -> None:
     router.include_router(unpack.router)
     router.include_router(monitor.router)
     router.include_router(orbit.router)
+    router.include_router(assets.router)
     router.include_router(root_registry.router)
     router.include_router(radar.router)
     router.include_router(aoi.router)

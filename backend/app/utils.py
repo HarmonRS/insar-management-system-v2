@@ -1,4 +1,6 @@
 import os
+import re
+from datetime import datetime
 from typing import Optional, Tuple, List, Callable, Dict, Any
 from lxml import etree
 
@@ -18,7 +20,7 @@ def _create_secure_xml_parser() -> etree.XMLParser:
         recover=False,
     )
 
-# --- Sentinel-1 (S1A/S1B) Parsers ---
+# --- Sentinel-1 (S1A/S1B/S1C) Parsers ---
 
 def _radar_meta_base() -> Dict[str, Any]:
     return {
@@ -83,7 +85,7 @@ def normalize_satellite_family(value: Optional[str]) -> Optional[str]:
     compact = raw.replace("-", "").replace("_", "").replace(" ", "")
     if compact in {"LT1", "LT1A", "LT1B", "LUTAN1", "LUTAN1A", "LUTAN1B"}:
         return "LT1"
-    if compact in {"S1", "S1A", "S1B", "SENTINEL1", "SENTINEL1A", "SENTINEL1B"}:
+    if compact in {"S1", "S1A", "S1B", "S1C", "SENTINEL1", "SENTINEL1A", "SENTINEL1B", "SENTINEL1C"}:
         return "S1"
     if compact in {"GF3", "GAOFEN3"}:
         return "GF3"
@@ -96,19 +98,44 @@ def parse_s1_radar_filename(folder_name: str) -> Optional[Dict[str, Any]]:
     Example: S1A_IW_SLC__1SDV_20250101T104105_...
     Returns a metadata dict.
     """
-    parts = folder_name.split('_')
-    if len(parts) < 5 or not parts[0].startswith('S1'):
+    name = os.path.basename(str(folder_name or "").strip())
+    if name.lower().endswith(".zip"):
+        name = name[:-4]
+    if name.lower().endswith(".safe"):
+        name = name[:-5]
+    match = re.match(
+        r"^(?P<satellite>S1[A-Z])_"
+        r"(?P<mode>[A-Z0-9]+)_"
+        r"(?P<product>[A-Z0-9]+)_+"
+        r"(?P<class>[0-9A-Z]{4})_"
+        r"(?P<start>\d{8}T\d{6}(?:\.\d+)?)_"
+        r"(?P<stop>\d{8}T\d{6}(?:\.\d+)?)_"
+        r"(?P<absolute_orbit>\d+)_"
+        r"(?P<datatake>[0-9A-F]+)_"
+        r"(?P<product_uid>[0-9A-F]+)$",
+        name,
+        flags=re.IGNORECASE,
+    )
+    if not match:
         return None
-    
+
     meta = _radar_meta_base()
-    meta["satellite"] = parts[0]
-    meta["satellite_family"] = normalize_satellite_family(parts[0])
-    meta["imaging_date"] = parts[4].split('T')[0]
-    meta["imaging_mode"] = parts[1]
-    meta["source_product_token"] = parts[2]
-    meta["product_type"] = parts[2]
-    polarization = parts[3]  # e.g., '1SDV' -> 'DV' is dual-pol VV/VH
-    meta["polarization"] = polarization[2:] if len(polarization) > 2 else polarization
+    meta["satellite"] = match.group("satellite").upper()
+    meta["satellite_family"] = normalize_satellite_family(meta["satellite"])
+    meta["imaging_date"] = match.group("start")[:8]
+    meta["imaging_mode"] = match.group("mode").upper()
+    meta["source_product_token"] = match.group("class").upper()
+    meta["product_type"] = match.group("product").upper()
+    meta["product_level"] = "L1"
+    polarization = match.group("class").upper()  # e.g. 1SDV -> DV
+    meta["polarization"] = polarization[-2:] if len(polarization) > 2 else polarization
+    meta["orbit_circle"] = match.group("absolute_orbit").lstrip("0") or match.group("absolute_orbit")
+    meta["product_unique_id"] = name
+    try:
+        start_time = datetime.strptime(match.group("start").split(".")[0], "%Y%m%dT%H%M%S")
+        meta["acquisition_time_utc"] = start_time.isoformat()
+    except ValueError:
+        meta["acquisition_time_utc"] = match.group("start")
     return meta
 
 

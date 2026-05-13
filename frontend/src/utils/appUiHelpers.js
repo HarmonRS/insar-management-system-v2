@@ -33,6 +33,8 @@ export const getLeftTabLabel = (tabKey, metrics = {}) => {
   switch (tabKey) {
     case 'ingest':
       return '入库监控';
+    case 'asset_inventory':
+      return '资产库存';
     case 'data':
       return '数据列表';
     case 'hazard':
