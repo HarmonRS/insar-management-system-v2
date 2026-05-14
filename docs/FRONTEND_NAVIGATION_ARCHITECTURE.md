@@ -23,7 +23,7 @@ The current first-level menu groups are:
 - `production_management`: 生产管理
 - `insar_analysis`: InSAR形变分析
 - `ai_analysis`: AI分析
-- `water`: 水体监测
+- `flood_analysis`: 洪涝灾害分析
 - `ops`: 运行维护
 
 Definition files:
@@ -125,8 +125,8 @@ The following groups do not define second-level sections:
 
 - `data`
   leaf tabs: `ingest`, `data`, `hazard`
-- `water`
-  leaf tabs: `water`
+- `flood_analysis`
+  leaf tabs: `flood_analysis`
 - `ops`
   leaf tabs: `health`, `users`, `audit`
 
@@ -197,6 +197,7 @@ These aliases exist for compatibility, but they are not first-class left-nav ent
 
 Recommended future additions:
 
+- Use `flood_analysis` as the combined first-level group for water extraction, flood detection, overlay analysis, and flood results. The legacy `water` route may remain in code for compatibility, but it is no longer a first-class left-nav entry.
 - Put new production execution or product-governance capability under `production_management` as an internal workspace view unless a separate first-level domain is clearly required.
 - Put planning, batching, pairing, and dispatch preparation capability under `production_planning`.
 - Put result browsing and analyst-facing deformation interpretation under `insar_analysis`.

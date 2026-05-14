@@ -10,6 +10,7 @@ from . import (
     dinsar,
     dinsar_products,
     dinsar_production,
+    flood,
     hazard,
     health,
     idl,
@@ -58,5 +59,6 @@ def include_all_routers(router: APIRouter) -> None:
     router.include_router(stats.router)
     router.include_router(idl.router)
     router.include_router(hazard.router)
+    router.include_router(flood.router)
     router.include_router(water.router)
     router.include_router(logs.router)

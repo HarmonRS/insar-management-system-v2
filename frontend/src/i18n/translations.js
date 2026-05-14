@@ -17,7 +17,7 @@
   { zh: '数据管理', en: 'Data' },
   { zh: '生产规划', en: 'Production' },
   { zh: 'D-InSAR 分析', en: 'D-InSAR Analysis' },
-  { zh: '水体监测', en: 'Water Monitoring' },
+  { zh: '水体监测（旧）', en: 'Water Monitoring (Legacy)' },
   { zh: '运行维护', en: 'Operations' },
 
   { zh: '入库监控', en: 'Ingest Monitor' },

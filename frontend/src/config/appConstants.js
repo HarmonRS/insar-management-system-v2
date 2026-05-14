@@ -101,7 +101,7 @@ export const LEFT_GROUP_LABELS = {
   production_management: '生产管理',
   insar_analysis: 'InSAR形变分析',
   ai_analysis: 'AI分析',
-  water: '水体监测',
+  flood_analysis: '洪涝灾害分析',
   ops: '运行维护',
 };
 
@@ -150,7 +150,7 @@ export const LEFT_GROUP_TABS = {
   production_management: [PRODUCTION_WORKSPACE_TAB],
   insar_analysis: LEFT_GROUP_SECTIONS.insar_analysis.flatMap(section => section.tabs),
   ai_analysis: LEFT_GROUP_SECTIONS.ai_analysis.flatMap(section => section.tabs),
-  water: ['water'],
+  flood_analysis: ['flood_analysis'],
   ops: ['health', 'users', 'audit'],
 };
 
@@ -188,7 +188,6 @@ export const ADMIN_ONLY_TABS = new Set([
   'copier',
   PRODUCTION_WORKSPACE_TAB,
   ...PRODUCTION_WORKSPACE_LEGACY_TABS,
-  'water',
   'users',
   'audit',
 ]);

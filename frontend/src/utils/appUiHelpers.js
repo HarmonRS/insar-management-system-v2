@@ -78,7 +78,9 @@ export const getLeftTabLabel = (tabKey, metrics = {}) => {
     case 'uav_image_analysis':
       return '无人机影像分析';
     case 'water':
-      return '水体监测';
+      return '水体监测（旧）';
+    case 'flood_analysis':
+      return '洪涝灾害分析';
     case 'health':
       return '运维自检';
     case 'users':

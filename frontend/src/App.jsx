@@ -1642,9 +1642,12 @@ function App() {
         onToggleVisibility: setShowHazardPoints,
         onScanComplete: fetchHazardPoints,
     };
-    const waterPanel = {
+    const floodPanel = {
+        onShowSourceSceneOnMap: handleWaterSceneOnMap,
+        onShowReadyProductOnMap: handleWaterSceneOnMap,
         onShowOnMap: handleWaterSceneOnMap,
         onShowFloodOnMap: handleFloodEventOnMap,
+        onShowFloodRunOnMap: handleFloodEventOnMap,
         onToggleFloodLayer: toggleFloodEventLayer,
     };
     const dinsarPanel = {
@@ -1736,7 +1739,7 @@ function App() {
                     pairingPanel={pairingPanel}
                     taskPanel={taskPanel}
                     hazardPanel={hazardPanel}
-                    waterPanel={waterPanel}
+                    floodPanel={floodPanel}
                     dinsarPanel={dinsarPanel}
                     aiPanel={aiPanel}
                     pairsPanel={pairsPanel}

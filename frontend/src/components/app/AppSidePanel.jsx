@@ -19,7 +19,7 @@ const LazyDataCopierPanel = lazy(() => import('../../DataCopierPanel'));
 const LazyIDLAutomationPanel = lazy(() => import('../../IDLAutomationPanel'));
 const LazyHazardPointPanel = lazy(() => import('../../HazardPointPanel'));
 const LazyHealthCheckPanel = lazy(() => import('../../HealthCheckPanel'));
-const LazyWaterMonitorPanel = lazy(() => import('../../WaterMonitorPanel'));
+const LazyFloodAnalysisWorkspace = lazy(() => import('../../FloodAnalysisWorkspace'));
 const LazyUserAdminPanel = lazy(() => import('../../UserAdminPanel'));
 const LazyAuditLogPanel = lazy(() => import('../../AuditLogPanel'));
 const LazyAiQualityPanel = lazy(() => import('../../panels/AiQualityPanel'));
@@ -57,7 +57,7 @@ export default function AppSidePanel({
     pairingPanel,
     taskPanel,
     hazardPanel,
-    waterPanel,
+    floodPanel,
     dinsarPanel,
     aiPanel,
     pairsPanel,
@@ -327,16 +327,13 @@ export default function AppSidePanel({
                 </div>
             )}
 
-            {leftPanelTab === 'water' && (
+            {leftPanelTab === 'flood_analysis' && (
                 <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <Suspense fallback={<PanelLoadingBody message="正在加载水体监测面板..." />}>
-                        <LazyWaterMonitorPanel
+                    <Suspense fallback={<PanelLoadingBody message="正在加载洪涝灾害分析工作台..." />}>
+                        <LazyFloodAnalysisWorkspace
                             readOnly={isReadOnlyUser}
-                            onShowOnMap={waterPanel.onShowOnMap}
-                            onShowFloodOnMap={waterPanel.onShowFloodOnMap}
-                            onToggleFloodLayer={waterPanel.onToggleFloodLayer}
                             onTaskStart={taskPanel.onTaskStart}
-                            language={language}
+                            floodPanel={floodPanel}
                         />
                     </Suspense>
                 </div>
