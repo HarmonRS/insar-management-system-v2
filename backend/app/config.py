@@ -195,9 +195,17 @@ class Settings(BaseSettings):
     RADAR_PREVIEW_BUILD_ON_DEMAND: bool = True
 
     WATER_RESULTS_DIR: str = ""
+    SAR_ANALYSIS_READY_ROOT: str = ""
+    SAR_ANALYSIS_WORK_ROOT: str = ""
+    SAR_ANALYSIS_PREVIEW_ROOT: str = ""
+    SAR_ANALYSIS_NODATA_VALUE: float = -9999.0
+    SAR_ANALYSIS_OUTPUT_COG: bool = True
 
     SRTM_DEM_DIR: str = ""
     GF3_GEO_DEM_PATH: str = ""
+    GF3_ARCHIVE_SOURCE_DIRS: str = ""
+    GF3_ARCHIVE_EXTS: str = ".zip,.tar,.tar.gz,.tgz"
+    GF3_UNPACK_DELETE_ARCHIVE: bool = True
     GF3_SOURCE_DIRS: str = ""
     GF3_STORAGE_DIRS: str = ""
 
@@ -306,7 +314,7 @@ class Settings(BaseSettings):
     JOB_WORKER_STALE_RUNNING_SECONDS: int = 300
     JOB_WORKER_HEARTBEAT_INTERVAL: float = 5.0
 
-    TIMESERIES_ENABLED: bool = True
+    TIMESERIES_ENABLED: bool = False
     TIMESERIES_WSL_DISTRO: str = ""
     TIMESERIES_PYTHON: str = ""
     TIMESERIES_ENV_NAME: str = ""
@@ -354,6 +362,29 @@ class Settings(BaseSettings):
                 "WATER_RESULTS_DIR",
                 os.path.join(backend_dir, "water_results"),
             )
+        if not self.SAR_ANALYSIS_READY_ROOT:
+            object.__setattr__(
+                self,
+                "SAR_ANALYSIS_READY_ROOT",
+                os.path.join(backend_dir, "runtime", "sar_analysis_ready"),
+            )
+        if not self.SAR_ANALYSIS_WORK_ROOT:
+            object.__setattr__(
+                self,
+                "SAR_ANALYSIS_WORK_ROOT",
+                os.path.join(backend_dir, "runtime", "sar_analysis_work"),
+            )
+        if not self.SAR_ANALYSIS_PREVIEW_ROOT:
+            object.__setattr__(
+                self,
+                "SAR_ANALYSIS_PREVIEW_ROOT",
+                os.path.join(backend_dir, "runtime", "sar_analysis_preview"),
+            )
+        object.__setattr__(
+            self,
+            "SAR_ANALYSIS_NODATA_VALUE",
+            float(self.SAR_ANALYSIS_NODATA_VALUE if self.SAR_ANALYSIS_NODATA_VALUE is not None else -9999.0),
+        )
         if not self.SRTM_DEM_DIR:
             object.__setattr__(self, "SRTM_DEM_DIR", os.path.join(backend_dir, "dem_data"))
         if not self.GF3_STORAGE_DIRS:
@@ -592,104 +623,105 @@ class Settings(BaseSettings):
         )
         if not self.PYINT_ORBIT_POOL_TXT:
             object.__setattr__(self, "PYINT_ORBIT_POOL_TXT", self.ORBIT_POOL_ENVI)
-        if not self.TIMESERIES_WSL_DISTRO:
-            object.__setattr__(self, "TIMESERIES_WSL_DISTRO", self.WSL_DISTRO or self.ISCE2_WSL_DISTRO)
-        if not self.TIMESERIES_ENV_NAME:
-            object.__setattr__(
-                self,
-                "TIMESERIES_ENV_NAME",
-                str(self.WSL_SHARED_CONDA_ENV or "insar_wsl_v1").strip() or "insar_wsl_v1",
-            )
-        if not self.TIMESERIES_PYTHON:
-            shared_python = str(self.WSL_SHARED_PYTHON or "").strip()
-            if shared_python:
-                object.__setattr__(self, "TIMESERIES_PYTHON", shared_python)
-            else:
-                env_name = (
-                    str(self.TIMESERIES_ENV_NAME or "insar_wsl_v1").strip()
-                    or "insar_wsl_v1"
-                )
+        if self.TIMESERIES_ENABLED:
+            if not self.TIMESERIES_WSL_DISTRO:
+                object.__setattr__(self, "TIMESERIES_WSL_DISTRO", self.WSL_DISTRO or self.ISCE2_WSL_DISTRO)
+            if not self.TIMESERIES_ENV_NAME:
                 object.__setattr__(
                     self,
-                    "TIMESERIES_PYTHON",
-                    f"/home/administrator/miniconda3/envs/{env_name}/bin/python",
+                    "TIMESERIES_ENV_NAME",
+                    str(self.WSL_SHARED_CONDA_ENV or "insar_wsl_v1").strip() or "insar_wsl_v1",
                 )
-        if not self.TIMESERIES_WORK_ROOT:
-            object.__setattr__(
-                self,
-                "TIMESERIES_WORK_ROOT",
-                os.path.join(backend_dir, "runtime", "timeseries_work"),
-            )
-        if not self.TIMESERIES_DEM_PATH:
-            object.__setattr__(self, "TIMESERIES_DEM_PATH", self.ISCE2_DEM_PATH)
-        if not self.TIMESERIES_ORBIT_POOL_ISCE2:
-            object.__setattr__(self, "TIMESERIES_ORBIT_POOL_ISCE2", self.ORBIT_POOL_ISCE2)
-        if not self.TIMESERIES_EXPERIMENT_ROOT:
-            object.__setattr__(
-                self,
-                "TIMESERIES_EXPERIMENT_ROOT",
-                os.path.join(project_root, "experiments", "isce2_sbas_timeseries"),
-            )
-        if not self.TIMESERIES_STACK_PREP_SCRIPT:
-            object.__setattr__(
-                self,
-                "TIMESERIES_STACK_PREP_SCRIPT",
-                os.path.join(
-                    self.TIMESERIES_EXPERIMENT_ROOT,
-                    "scripts",
-                    "build_lt1_stack_prep.py",
-                ),
-            )
-        if not self.TIMESERIES_MATERIALIZE_SCRIPT:
-            object.__setattr__(
-                self,
-                "TIMESERIES_MATERIALIZE_SCRIPT",
-                os.path.join(
-                    self.TIMESERIES_EXPERIMENT_ROOT,
-                    "scripts",
-                    "materialize_lt1_stack_scenes.py",
-                ),
-            )
-        if not self.TIMESERIES_PREPARE_DEM_SCRIPT:
-            object.__setattr__(
-                self,
-                "TIMESERIES_PREPARE_DEM_SCRIPT",
-                os.path.join(
-                    self.TIMESERIES_EXPERIMENT_ROOT,
-                    "scripts",
-                    "prepare_lt1_stack_dem.py",
-                ),
-            )
-        if not self.TIMESERIES_STACK_RUNNER_SCRIPT:
-            object.__setattr__(
-                self,
-                "TIMESERIES_STACK_RUNNER_SCRIPT",
-                os.path.join(
-                    self.TIMESERIES_EXPERIMENT_ROOT,
-                    "scripts",
-                    "run_generated_stack_runfile_ubuntu2404.sh",
-                ),
-            )
-        if not self.TIMESERIES_MINTPY_SBAS_SCRIPT:
-            object.__setattr__(
-                self,
-                "TIMESERIES_MINTPY_SBAS_SCRIPT",
-                os.path.join(
-                    self.TIMESERIES_EXPERIMENT_ROOT,
-                    "scripts",
-                    "run_mintpy_sbas_unified_env_smoketest_ubuntu2404.sh",
-                ),
-            )
-        if not self.TIMESERIES_EXPORT_PUBLISH_SCRIPT:
-            object.__setattr__(
-                self,
-                "TIMESERIES_EXPORT_PUBLISH_SCRIPT",
-                os.path.join(
-                    self.TIMESERIES_EXPERIMENT_ROOT,
-                    "scripts",
-                    "export_mintpy_publish_products_unified_env_ubuntu2404.sh",
-                ),
-            )
+            if not self.TIMESERIES_PYTHON:
+                shared_python = str(self.WSL_SHARED_PYTHON or "").strip()
+                if shared_python:
+                    object.__setattr__(self, "TIMESERIES_PYTHON", shared_python)
+                else:
+                    env_name = (
+                        str(self.TIMESERIES_ENV_NAME or "insar_wsl_v1").strip()
+                        or "insar_wsl_v1"
+                    )
+                    object.__setattr__(
+                        self,
+                        "TIMESERIES_PYTHON",
+                        f"/home/administrator/miniconda3/envs/{env_name}/bin/python",
+                    )
+            if not self.TIMESERIES_WORK_ROOT:
+                object.__setattr__(
+                    self,
+                    "TIMESERIES_WORK_ROOT",
+                    os.path.join(backend_dir, "runtime", "timeseries_work"),
+                )
+            if not self.TIMESERIES_DEM_PATH:
+                object.__setattr__(self, "TIMESERIES_DEM_PATH", self.ISCE2_DEM_PATH)
+            if not self.TIMESERIES_ORBIT_POOL_ISCE2:
+                object.__setattr__(self, "TIMESERIES_ORBIT_POOL_ISCE2", self.ORBIT_POOL_ISCE2)
+            if not self.TIMESERIES_EXPERIMENT_ROOT:
+                object.__setattr__(
+                    self,
+                    "TIMESERIES_EXPERIMENT_ROOT",
+                    os.path.join(project_root, "experiments", "isce2_sbas_timeseries"),
+                )
+            if not self.TIMESERIES_STACK_PREP_SCRIPT:
+                object.__setattr__(
+                    self,
+                    "TIMESERIES_STACK_PREP_SCRIPT",
+                    os.path.join(
+                        self.TIMESERIES_EXPERIMENT_ROOT,
+                        "scripts",
+                        "build_lt1_stack_prep.py",
+                    ),
+                )
+            if not self.TIMESERIES_MATERIALIZE_SCRIPT:
+                object.__setattr__(
+                    self,
+                    "TIMESERIES_MATERIALIZE_SCRIPT",
+                    os.path.join(
+                        self.TIMESERIES_EXPERIMENT_ROOT,
+                        "scripts",
+                        "materialize_lt1_stack_scenes.py",
+                    ),
+                )
+            if not self.TIMESERIES_PREPARE_DEM_SCRIPT:
+                object.__setattr__(
+                    self,
+                    "TIMESERIES_PREPARE_DEM_SCRIPT",
+                    os.path.join(
+                        self.TIMESERIES_EXPERIMENT_ROOT,
+                        "scripts",
+                        "prepare_lt1_stack_dem.py",
+                    ),
+                )
+            if not self.TIMESERIES_STACK_RUNNER_SCRIPT:
+                object.__setattr__(
+                    self,
+                    "TIMESERIES_STACK_RUNNER_SCRIPT",
+                    os.path.join(
+                        self.TIMESERIES_EXPERIMENT_ROOT,
+                        "scripts",
+                        "run_generated_stack_runfile_ubuntu2404.sh",
+                    ),
+                )
+            if not self.TIMESERIES_MINTPY_SBAS_SCRIPT:
+                object.__setattr__(
+                    self,
+                    "TIMESERIES_MINTPY_SBAS_SCRIPT",
+                    os.path.join(
+                        self.TIMESERIES_EXPERIMENT_ROOT,
+                        "scripts",
+                        "run_mintpy_sbas_unified_env_smoketest_ubuntu2404.sh",
+                    ),
+                )
+            if not self.TIMESERIES_EXPORT_PUBLISH_SCRIPT:
+                object.__setattr__(
+                    self,
+                    "TIMESERIES_EXPORT_PUBLISH_SCRIPT",
+                    os.path.join(
+                        self.TIMESERIES_EXPERIMENT_ROOT,
+                        "scripts",
+                        "export_mintpy_publish_products_unified_env_ubuntu2404.sh",
+                    ),
+                )
         if not self.SARSCAPE_SBAS_PARAMETER_TEMPLATE_PATH:
             object.__setattr__(
                 self,
@@ -715,12 +747,16 @@ class Settings(BaseSettings):
         os.makedirs(settings.TIMESERIES_PRODUCT_DIR, exist_ok=True)
         os.makedirs(settings.PSINSAR_PRODUCT_DIR, exist_ok=True)
         os.makedirs(settings.RESULT_QUARANTINE_ROOT, exist_ok=True)
+        os.makedirs(settings.SAR_ANALYSIS_READY_ROOT, exist_ok=True)
+        os.makedirs(settings.SAR_ANALYSIS_WORK_ROOT, exist_ok=True)
+        os.makedirs(settings.SAR_ANALYSIS_PREVIEW_ROOT, exist_ok=True)
         os.makedirs(settings.WSL_BROKER_JOB_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_TEMPLATE_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_WORK_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_OUTPUT_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_DEM_ROOT, exist_ok=True)
-        os.makedirs(settings.TIMESERIES_WORK_ROOT, exist_ok=True)
+        if settings.TIMESERIES_ENABLED and settings.TIMESERIES_WORK_ROOT:
+            os.makedirs(settings.TIMESERIES_WORK_ROOT, exist_ok=True)
 
 
 settings = Settings()
@@ -861,6 +897,9 @@ def validate_runtime_config() -> dict[str, Any]:
     _check_path(label="GF3_GEO_DEM_PATH", value=settings.GF3_GEO_DEM_PATH, errors=errors, warnings=warnings, expect_file=True)
     _check_path(label="SRTM_DEM_DIR", value=settings.SRTM_DEM_DIR, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="WATER_RESULTS_DIR", value=settings.WATER_RESULTS_DIR, errors=errors, warnings=warnings, expect_file=False)
+    _check_path(label="SAR_ANALYSIS_READY_ROOT", value=settings.SAR_ANALYSIS_READY_ROOT, errors=errors, warnings=warnings, expect_file=False)
+    _check_path(label="SAR_ANALYSIS_WORK_ROOT", value=settings.SAR_ANALYSIS_WORK_ROOT, errors=errors, warnings=warnings, expect_file=False)
+    _check_path(label="SAR_ANALYSIS_PREVIEW_ROOT", value=settings.SAR_ANALYSIS_PREVIEW_ROOT, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="MONITOR_ORBIT_DIR", value=settings.MONITOR_ORBIT_DIR, errors=errors, warnings=warnings, expect_file=False)
     for label, value in (
         ("SOURCE_PRODUCT_DIRS", settings.SOURCE_PRODUCT_DIRS),
@@ -887,6 +926,7 @@ def validate_runtime_config() -> dict[str, Any]:
         ("INSAR_STORAGE_DIRS", settings.INSAR_STORAGE_DIRS),
         ("MONITOR_RADAR_DIRS", settings.MONITOR_RADAR_DIRS),
         ("MONITOR_DINSAR_DIRS", settings.MONITOR_DINSAR_DIRS),
+        ("GF3_ARCHIVE_SOURCE_DIRS", settings.GF3_ARCHIVE_SOURCE_DIRS),
         ("GF3_SOURCE_DIRS", settings.GF3_SOURCE_DIRS),
         ("GF3_STORAGE_DIRS", settings.GF3_STORAGE_DIRS),
     ):
@@ -1029,6 +1069,11 @@ def validate_runtime_config() -> dict[str, Any]:
                 "PYINT_GAMMA_ENV_SCRIPT is still configured. "
                 "Gamma runtime has not been fully migrated to the fixed profile model."
             )
+
+    if not settings.TIMESERIES_ENABLED:
+        info.append(
+            "Legacy ISCE2/MintPy timeseries pipeline is disabled; current SBAS-InSAR production uses the Gamma /sbas-insar-production workflow."
+        )
 
     if settings.TIMESERIES_ENABLED:
         _check_path(

@@ -7,6 +7,7 @@ const DEFAULT_MONITOR_CONFIG = {
   radar_dirs: [],
   orbit_dir: '',
   dinsar_dirs: [],
+  gf3_archive_source_dirs: [],
   gf3_source_dirs: [],
   gf3_storage_dirs: [],
   s1_source_dirs: [],
@@ -65,8 +66,9 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const [s1Loading, setS1Loading] = useState(false);
   const [s1ScanLoading, setS1ScanLoading] = useState(false);
   const [s1Message, setS1Message] = useState('');
-  const [gf3Loading, setGf3Loading] = useState(false);
+  const [gf3UnpackLoading, setGf3UnpackLoading] = useState(false);
   const [gf3ProcessLoading, setGf3ProcessLoading] = useState(false);
+  const [gf3ScanLoading, setGf3ScanLoading] = useState(false);
   const [gf3Message, setGf3Message] = useState('');
   const logEndRef = useRef(null);
 
@@ -84,6 +86,9 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
     task.task_id === unpackTaskId || task.task_type === 'UNPACK_ARCHIVES'
   );
   const s1ActiveTask = displayActiveTasks.find((task) => task.task_type === 'UNPACK_SENTINEL1');
+  const gf3ActiveTask = displayActiveTasks.find((task) =>
+    ['GF3_UNPACK', 'GF3_BATCH_PROCESS'].includes(task.task_type)
+  );
 
   useEffect(() => {
     if (!enabled) {
@@ -113,6 +118,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
           s1_source_dirs: toArray(data?.s1_source_dirs),
           s1_storage_dirs: toArray(data?.s1_storage_dirs),
           s1_orbit_dirs: toArray(data?.s1_orbit_dirs),
+          gf3_archive_source_dirs: toArray(data?.gf3_archive_source_dirs),
           gf3_source_dirs: toArray(data?.gf3_source_dirs),
           gf3_storage_dirs: toArray(data?.gf3_storage_dirs),
         });
@@ -281,6 +287,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const hasS1SourceDirs = config.s1_source_dirs.length > 0;
   const hasS1StorageDirs = config.s1_storage_dirs.length > 0;
   const hasS1OrbitDirs = config.s1_orbit_dirs.length > 0;
+  const hasGf3ArchiveSourceDirs = config.gf3_archive_source_dirs.length > 0;
   const hasGf3SourceDirs = config.gf3_source_dirs.length > 0;
   const hasGf3StorageDirs = config.gf3_storage_dirs.length > 0;
 
@@ -290,6 +297,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const canRunS1Scan = !readOnly && configLoaded && hasS1SourceDirs;
   const canRunS1OrbitScan = !readOnly && configLoaded && hasS1OrbitDirs;
   const canRunGf3Scan = !readOnly && configLoaded && hasGf3StorageDirs;
+  const canRunGf3Unpack = !readOnly && configLoaded && hasGf3ArchiveSourceDirs && hasGf3SourceDirs;
   const canRunGf3Process = !readOnly && configLoaded && hasGf3SourceDirs;
   const canOpenUnpackDialog = !readOnly && unpackConfig.source_dirs.length > 0;
 
@@ -406,6 +414,41 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
       setGf3Message(`失败：${err.message || '未知错误'}`);
     } finally {
       setGf3ProcessLoading(false);
+    }
+  };
+
+  const handleGf3Unpack = async () => {
+    if (readOnly) {
+      setGf3Message('当前账户为只读模式，无法触发 GF3 解包。');
+      return;
+    }
+    setGf3UnpackLoading(true);
+    setGf3Message('GF3 解包启动中...');
+    try {
+      const res = await fetch(`${apiEndpoint}/monitor/gf3-unpack`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      });
+      const data = await parseJsonSafe(res, {});
+      if (res.ok) {
+        setGf3Message(data.message || 'GF3 解包任务已启动');
+        if (onTaskStart) {
+          onTaskStart(data.task_id, 'GF3 解包任务已启动。', {
+            nonBlocking: true,
+            taskType: 'GF3_UNPACK',
+          });
+        }
+      } else {
+        setGf3Message(`失败：${data.detail || '未知错误'}`);
+      }
+    } catch (err) {
+      setGf3Message(`失败：${err.message || '未知错误'}`);
+    } finally {
+      setGf3UnpackLoading(false);
     }
   };
 
@@ -546,7 +589,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
       setGf3Message('当前账户为只读模式，无法触发扫描。');
       return;
     }
-    setGf3Loading(true);
+    setGf3ScanLoading(true);
     setGf3Message('GF3 扫描启动中...');
     try {
       const res = await fetch(`${apiEndpoint}/monitor/run-now?target=gf3`, {
@@ -565,7 +608,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
     } catch (err) {
       setGf3Message(`失败：${err.message || '未知错误'}`);
     } finally {
-      setGf3Loading(false);
+      setGf3ScanLoading(false);
     }
   };
 
@@ -631,6 +674,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
             <div style={rowStyle}><span style={labelStyle}>S1 源数据</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>S1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_storage_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>S1 精轨</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_orbit_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>GF3 压缩包</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_archive_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>GF3 来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>GF3 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>D-InSAR 结果</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.dinsar_dirs)}</span></div>
@@ -723,10 +767,18 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
         <div style={sectionStyle}>
           <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>GF3 归档预处理</div>
           <div style={{ ...gridStyle, marginBottom: '8px' }}>
+            <div style={rowStyle}><span style={labelStyle}>压缩包来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_archive_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>L1A 来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>L2 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
           </div>
-          <div style={{ display: 'flex', gap: '10px' }}>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <button
+              onClick={handleGf3Unpack}
+              disabled={gf3UnpackLoading || readOnly || !canRunGf3Unpack}
+              style={actionBtnStyle(gf3UnpackLoading, readOnly || !canRunGf3Unpack)}
+            >
+              {gf3UnpackLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 解包')}
+            </button>
             <button
               onClick={handleGf3BatchProcess}
               disabled={gf3ProcessLoading || readOnly || !canRunGf3Process}
@@ -736,10 +788,10 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
             </button>
             <button
               onClick={handleGf3Scan}
-              disabled={gf3Loading || readOnly || !canRunGf3Scan}
-              style={actionBtnStyle(gf3Loading, readOnly || !canRunGf3Scan)}
+              disabled={gf3ScanLoading || readOnly || !canRunGf3Scan}
+              style={actionBtnStyle(gf3ScanLoading, readOnly || !canRunGf3Scan)}
             >
-              {gf3Loading ? '运行中...' : (readOnly ? '只读模式' : '扫描 GF3')}
+              {gf3ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描 GF3')}
             </button>
             <div
               style={{
@@ -748,7 +800,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
                 alignSelf: 'center',
               }}
             >
-              {gf3Message}
+              {gf3ActiveTask ? (gf3ActiveTask.message || 'GF3 任务运行中...') : gf3Message}
             </div>
           </div>
         </div>

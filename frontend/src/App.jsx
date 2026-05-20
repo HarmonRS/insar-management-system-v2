@@ -282,6 +282,8 @@ function App() {
     const aoeLayerRef = useRef(null);
     const waterSceneLayersRef = useRef({});
     const floodEventLayersRef = useRef({});  // { eventId: { pre, post, classified } }
+    const floodPairPreviewLayerRef = useRef(null);
+    const floodVectorLayersRef = useRef({});
     const mapRegionLayerRef = useRef(null);
     const prevLicenseOkRef = useRef(false);
     const initializeAppDataRef = useRef(null);
@@ -327,6 +329,7 @@ function App() {
         pairLayersRef: pairLayersRef.current,
         aoeLayerRef: aoeLayerRef.current,
         floodEventLayersRef: floodEventLayersRef.current,
+        floodVectorLayersRef: floodVectorLayersRef.current,
     }), []);
 
     const mapExport = useMapExport({ mapRef, getVisibleLayerRefs, addLog, language });
@@ -1468,8 +1471,11 @@ function App() {
 
     const handleWaterSceneOnMap = (scene) => {
         if (!mapRef.current || !scene.coverage_polygon) return;
-        if (waterSceneLayersRef.current[scene.id]) {
-            waterSceneLayersRef.current[scene.id].remove();
+        const layerKey = scene.radar_data_id ? `scene_${scene.id}` : `radar_${scene.id}`;
+        if (waterSceneLayersRef.current[layerKey]) {
+            waterSceneLayersRef.current[layerKey].remove();
+            delete waterSceneLayersRef.current[layerKey];
+            return false;
         }
         const latLngs = scene.coverage_polygon.map(p => [p[1], p[0]]);
         const polygon = L.polygon(latLngs, {
@@ -1484,10 +1490,35 @@ function App() {
             `${scene.satellite || ''} · ${scene.imaging_date || ''}<br>` +
             `<span style="color:#888;font-size:11px">${(scene.geo_path || '').split(/[\\/]/).pop()}</span>`
         );
-        waterSceneLayersRef.current[scene.id] = polygon;
+        waterSceneLayersRef.current[layerKey] = polygon;
         polygon.addTo(mapRef.current);
         mapRef.current.flyToBounds(L.latLngBounds(latLngs), { padding: [50, 50], maxZoom: 10 });
         polygon.openPopup();
+        return true;
+    };
+
+    const handleFloodSourcePreviewOnMap = (item) => {
+        if (!mapRef.current || !item) return;
+        const enriched = {
+            ...item,
+            displayName: item.displayName || item.file_path?.split(/[\\/]/).pop() || `${item.satellite || 'SAR'} #${item.id}`,
+            previewCacheKey: item.previewCacheKey || item.preview_cache_updated_at || `${Date.now()}-${item.id}`,
+        };
+        if (radarPreviewLayersRef.current[enriched.id]) {
+            updateRadarPreviewVisibility(enriched, false);
+            return false;
+        }
+        updateRadarPreviewVisibility(enriched, true);
+        if (
+            enriched.min_lat != null && enriched.max_lat != null
+            && enriched.min_lon != null && enriched.max_lon != null
+        ) {
+            mapRef.current.flyToBounds(
+                L.latLngBounds([[enriched.min_lat, enriched.min_lon], [enriched.max_lat, enriched.max_lon]]),
+                { padding: [50, 50], maxZoom: 10 },
+            );
+        }
+        return true;
     };
 
     // 洪涝事件三图层叠加（灾前/灾后/分类结果），每层可独立开关
@@ -1532,6 +1563,66 @@ function App() {
         if (!layers || !layers[key]) return;
         if (visible) layers[key].addTo(mapRef.current);
         else layers[key].remove();
+    };
+
+    const handleFloodPairPreviewOnMap = (pair) => {
+        if (!mapRef.current || !pair?.pre?.coverage_polygon || !pair?.post?.coverage_polygon) return;
+        if (floodPairPreviewLayerRef.current) {
+            floodPairPreviewLayerRef.current.remove();
+            floodPairPreviewLayerRef.current = null;
+        }
+        const makePolygon = (scene, color, label) => {
+            const latLngs = scene.coverage_polygon.map(p => [p[1], p[0]]);
+            const polygon = L.polygon(latLngs, {
+                color,
+                weight: 2,
+                fillColor: color,
+                fillOpacity: 0.14,
+            });
+            polygon.bindPopup(
+                `<strong>${escapeHtml(label)}</strong><br>` +
+                `场景 #${escapeHtml(scene.id)} · ${escapeHtml(scene.satellite || '')}<br>` +
+                `${escapeHtml(formatYmd(scene.imaging_date, language))} · ${escapeHtml(scene.polarization || '')}`
+            );
+            return polygon;
+        };
+
+        const prePolygon = makePolygon(pair.pre, '#2563eb', '灾前覆盖');
+        const postPolygon = makePolygon(pair.post, '#16a34a', '灾后覆盖');
+        const group = L.featureGroup([prePolygon, postPolygon]);
+        floodPairPreviewLayerRef.current = group;
+        group.addTo(mapRef.current);
+        mapRef.current.flyToBounds(group.getBounds(), { padding: [50, 50], maxZoom: 10 });
+    };
+
+    const handleFloodVectorOnMap = (impact) => {
+        if (!mapRef.current || !impact?.flood_vector_geojson) return;
+        const layerId = impact.overlay_id || impact.detection_id || 'current';
+        const existing = floodVectorLayersRef.current[layerId];
+        if (existing) existing.remove();
+
+        const layer = L.geoJSON(impact.flood_vector_geojson, {
+            style: {
+                color: '#dc2626',
+                weight: 2,
+                fillColor: '#ef4444',
+                fillOpacity: 0.26,
+            },
+            onEachFeature: (feature, featureLayer) => {
+                const props = feature?.properties || {};
+                featureLayer.bindPopup(
+                    `<strong>洪涝矢量</strong><br>` +
+                    `Overlay #${escapeHtml(layerId)}<br>` +
+                    `${escapeHtml(props.name || props.class || '')}`
+                );
+            },
+        });
+        floodVectorLayersRef.current[layerId] = layer;
+        layer.addTo(mapRef.current);
+        const bounds = layer.getBounds();
+        if (bounds.isValid()) {
+            mapRef.current.flyToBounds(bounds, { padding: [50, 50], maxZoom: 12 });
+        }
     };
 
     const visualizePair = useCallback((pair) => {
@@ -1644,11 +1735,14 @@ function App() {
     };
     const floodPanel = {
         onShowSourceSceneOnMap: handleWaterSceneOnMap,
+        onShowSourcePreviewOnMap: handleFloodSourcePreviewOnMap,
         onShowReadyProductOnMap: handleWaterSceneOnMap,
         onShowOnMap: handleWaterSceneOnMap,
         onShowFloodOnMap: handleFloodEventOnMap,
         onShowFloodRunOnMap: handleFloodEventOnMap,
         onToggleFloodLayer: toggleFloodEventLayer,
+        onShowFloodPairOnMap: handleFloodPairPreviewOnMap,
+        onShowFloodVectorOnMap: handleFloodVectorOnMap,
     };
     const dinsarPanel = {
         dinsarCurrentPage,

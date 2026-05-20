@@ -52,6 +52,9 @@ from .orm import (
     SARSceneGeoORM,
     FloodDetectionORM,
     WaterDetectionORM,
+    WaterExtractionORM,
+    FloodOverlayORM,
+    FloodProductORM,
     GF3ProcessingORM,
     AiDiagnosisORM,
 )
@@ -110,7 +113,8 @@ __all__ = [
     "PsTimeseriesRunORM",
     "AuthUserORM", "AuthSessionORM", "AuthAuditLogORM", "AuthRateLimitORM",
     "SARSceneGeoORM", "FloodDetectionORM",
-    "WaterDetectionORM", "GF3ProcessingORM", "AiDiagnosisORM",
+    "WaterDetectionORM", "WaterExtractionORM", "FloodOverlayORM", "FloodProductORM",
+    "GF3ProcessingORM", "AiDiagnosisORM",
     # Schemas
     "HazardPoint", "DinsarResult", "ScanRequest", "ManagedRootInfo", "ScanCursorInfo",
     "RadarData", "RadarDataPage", "DinsarResultPage",

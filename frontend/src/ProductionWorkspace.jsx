@@ -8,9 +8,8 @@ import {
 import { PanelLoadingBody } from './components/app/AppLoadingFallbacks';
 
 const LazyDinsarProductionPanel = lazy(() => import('./DinsarProductionPanel'));
-const LazyTimeseriesProductionPanel = lazy(() => import('./TimeseriesProductionPanel'));
+const LazySbasInsarProductionPanel = lazy(() => import('./SbasInsarProductionPanel'));
 const LazyDinsarProductsPanel = lazy(() => import('./DinsarProductsPanel'));
-const LazyPsinsarCatalogPanel = lazy(() => import('./components/PsinsarCatalogPanel'));
 
 const shellStyle = {
   minHeight: '100%',
@@ -64,16 +63,8 @@ export default function ProductionWorkspace({
     onTaskStart?.(taskId, 'D-InSAR 任务已入队，等待处理...');
   };
 
-  const handleTimeseriesRunQueued = taskId => {
-    onTaskStart?.(taskId, '时序InSAR 运行已入队，当前默认执行 SBAS 流程...');
-  };
-
   const handleDinsarProductQueued = taskId => {
     onTaskStart?.(taskId, 'D-InSAR 产物任务已入队，等待处理...');
-  };
-
-  const handleTimeseriesProductQueued = taskId => {
-    onTaskStart?.(taskId, '时序InSAR 产物目录任务已入队，等待处理...');
   };
 
   return (
@@ -85,8 +76,8 @@ export default function ProductionWorkspace({
           </div>
           <h2 style={{ margin: '10px 0 12px', fontSize: 32, lineHeight: 1.1, color: '#0f172a' }}>生产管理</h2>
           <p style={{ margin: 0, maxWidth: 900, fontSize: 14, lineHeight: 1.8, color: '#475569' }}>
-            这里统一承载 D-InSAR 与时序InSAR的运行和产物工作台。当前时序入口默认接入 SBAS 实现，
-            后续可在同一界面继续扩展 PS-InSAR、SBAS-InSAR 以及更多 WSL2 引擎实例。
+            这里统一承载 D-InSAR 与 Gamma SBAS-InSAR 生产工作台。旧 ISCE2/MintPy 时序入口已停用，
+            SBAS 生产、速率图、质量指标与监测点曲线统一进入独立 SBAS-InSAR 页面。
           </p>
         </section>
 
@@ -107,17 +98,17 @@ export default function ProductionWorkspace({
             </div>
           </div>
           <div style={summaryCardStyle}>
-            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>时序当前实现</div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: '#0f172a' }}>SBAS 默认接入</div>
+            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>SBAS 当前实现</div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#0f172a' }}>Gamma 独立入口</div>
             <div style={{ fontSize: 12, lineHeight: 1.6, color: '#475569', marginTop: 4 }}>
-              现阶段实际运行链路为 SBAS，界面命名已统一为时序InSAR。
+              生产链路绕开旧时序配对层，由 SBAS 页面管理栈发现、基线审核、配准与产物发布。
             </div>
           </div>
           <div style={summaryCardStyle}>
-            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>引擎预留</div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: '#0f172a' }}>ISCE / Gamma 可扩</div>
+            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>旧链路状态</div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#0f172a' }}>ISCE2/MintPy 停用</div>
             <div style={{ fontSize: 12, lineHeight: 1.6, color: '#475569', marginTop: 4 }}>
-              现有 WSL2 嵌入保持不变，后续增加 Gamma 时可直接挂入当前工作台。
+              历史代码暂时保留兼容，生产管理不再暴露旧“时序运行/产物”页面。
             </div>
           </div>
         </section>
@@ -182,23 +173,15 @@ export default function ProductionWorkspace({
               onJobQueued={handleDinsarRunQueued}
             />
           )}
-          {activeView === 'timeseries_runs' && (
-            <LazyTimeseriesProductionPanel
+          {activeView === 'sbas_insar_production' && (
+            <LazySbasInsarProductionPanel
               readOnly={readOnly}
-              onJobQueued={handleTimeseriesRunQueued}
             />
           )}
           {activeView === 'dinsar_products' && (
             <LazyDinsarProductsPanel
               readOnly={readOnly}
               onJobQueued={handleDinsarProductQueued}
-            />
-          )}
-          {activeView === 'timeseries_products' && (
-            <LazyPsinsarCatalogPanel
-              readOnly={readOnly}
-              showActions
-              onTaskQueued={handleTimeseriesProductQueued}
             />
           )}
         </Suspense>

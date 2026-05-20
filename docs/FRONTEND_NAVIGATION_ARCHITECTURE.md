@@ -68,9 +68,8 @@ This is a workspace group, not a multi-tab planning tree.
 生产管理
 └─ 生产管理 (`production_management`)
    ├─ D-InSAR运行 (`dinsar_runs`)
-   ├─ 时序InSAR运行 (`timeseries_runs`)
-   ├─ D-InSAR产物 (`dinsar_products`)
-   └─ 时序InSAR产物 (`timeseries_products`)
+   ├─ SBAS-InSAR Production (`sbas_insar_production`)
+   └─ D-InSAR产物 (`dinsar_products`)
 ```
 
 Notes:
@@ -78,7 +77,8 @@ Notes:
 - The left navigation contains only one tab for this group: `production_management`.
 - Internal workspace views are controlled by `PRODUCTION_WORKSPACE_VIEWS`.
 - Route alias mapping is controlled by `PRODUCTION_WORKSPACE_ENTRY_TO_VIEW`.
-- Legacy route tabs such as `dinsar_production` and `ps_products` map into this workspace and should not be treated as standalone left-nav entries.
+- Legacy route tabs such as `dinsar_production`, `ps_production`, and `ps_products` map into this workspace and should not be treated as standalone left-nav entries.
+- The old ISCE2/MintPy `timeseries_runs` and `timeseries_products` workspace views are deprecated and hidden; SBAS production is handled by the Gamma `sbas_insar_production` view.
 
 ### 3.3 InSAR形变分析
 

@@ -1478,6 +1478,15 @@ class SARSceneGeoORM(Base):
     radar_data_id = Column(Integer, ForeignKey("radar_data.id"), index=True, nullable=False)
     geo_path = Column(String, nullable=True)       # 地理编码 dB 文件路径（ENVI 格式，无扩展名）
     pixel_size_m = Column(Float, nullable=True)    # 输出像素大小（m）
+    analysis_tif_path = Column(String, nullable=True, index=True)
+    analysis_dir = Column(String, nullable=True)
+    analysis_preview_path = Column(String, nullable=True)
+    analysis_engine = Column(String(32), nullable=True, index=True)
+    analysis_profile = Column(String(64), nullable=True, index=True)
+    analysis_backscatter_unit = Column(String(32), nullable=True)
+    analysis_nodata_value = Column(Float, nullable=True)
+    analysis_metadata_json = Column(JSON, nullable=True)
+    analysis_quality_json = Column(JSON, nullable=True)
     status = Column(String, nullable=False, default="PENDING", index=True)
     error_msg = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
@@ -1514,6 +1523,8 @@ class FloodDetectionORM(Base):
 
     pre_scene = relationship("SARSceneGeoORM", foreign_keys=[pre_scene_id], back_populates="pre_flood_detections")
     post_scene = relationship("SARSceneGeoORM", foreign_keys=[post_scene_id], back_populates="post_flood_detections")
+    overlays = relationship("FloodOverlayORM", back_populates="detection")
+    products = relationship("FloodProductORM", back_populates="detection", foreign_keys="FloodProductORM.detection_id")
 
     __table_args__ = (
         UniqueConstraint("pre_scene_id", "post_scene_id", name="uq_flood_detection_pair"),
@@ -1535,6 +1546,69 @@ class WaterDetectionORM(Base):
     error_msg = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class WaterExtractionORM(Base):
+    """Water extraction result used by the flood-analysis pipeline."""
+    __tablename__ = "water_extractions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scene_id = Column(Integer, ForeignKey("sar_scene_geo.id"), nullable=True, index=True)
+    processor = Column(String(32), nullable=False, default="otsu", index=True)
+    task_id = Column(String(64), nullable=True, index=True)
+    input_path = Column(String, nullable=True)
+    output_path = Column(String, nullable=True)
+    preview_path = Column(String, nullable=True)
+    vector_path = Column(String, nullable=True)
+    water_area_km2 = Column(Float, nullable=True)
+    water_pixel_count = Column(Integer, nullable=True)
+    threshold_value = Column(Float, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    status = Column(String(16), nullable=False, default="PENDING", index=True)
+    error_msg = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    scene = relationship("SARSceneGeoORM", foreign_keys=[scene_id])
+
+
+class FloodOverlayORM(Base):
+    """Spatial overlay result for a flood detection."""
+    __tablename__ = "flood_overlays"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    detection_id = Column(Integer, ForeignKey("flood_detections.id"), nullable=False, index=True)
+    flood_vector_path = Column(String, nullable=True)
+    hazard_points_hit = Column(Integer, nullable=False, default=0)
+    hazard_points_near = Column(Integer, nullable=False, default=0)
+    hazard_points_total = Column(Integer, nullable=False, default=0)
+    dinsar_products_intersecting = Column(Integer, nullable=False, default=0)
+    affected_area_km2 = Column(Float, nullable=True)
+    summary_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    detection = relationship("FloodDetectionORM", back_populates="overlays")
+    products = relationship("FloodProductORM", back_populates="overlay", foreign_keys="FloodProductORM.overlay_id")
+
+
+class FloodProductORM(Base):
+    """Published flood-analysis product package."""
+    __tablename__ = "flood_products"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    product_id = Column(String(64), unique=True, index=True, nullable=False)
+    detection_id = Column(Integer, ForeignKey("flood_detections.id"), nullable=True, index=True)
+    overlay_id = Column(Integer, ForeignKey("flood_overlays.id"), nullable=True, index=True)
+    display_name = Column(String(255), nullable=False)
+    status = Column(String(16), nullable=False, default="READY", index=True)
+    publish_dir = Column(String, unique=True, nullable=True)
+    manifest_path = Column(String, unique=True, nullable=True)
+    geom = Column(Geometry("POLYGON", srid=4326), nullable=True)
+    summary_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    detection = relationship("FloodDetectionORM", back_populates="products", foreign_keys=[detection_id])
+    overlay = relationship("FloodOverlayORM", back_populates="products", foreign_keys=[overlay_id])
 
 
 class GF3ProcessingORM(Base):

@@ -108,6 +108,11 @@ async def lifespan(app: FastAPI):
     )
     if maintenance_result.get("added_columns"):
         print(f">>> [DB] Added columns: {maintenance_result['added_columns']}")
+    if maintenance_result.get("created_indexes"):
+        print(f">>> [DB] Created indexes: {maintenance_result['created_indexes']}")
+    if maintenance_result.get("alembic_version"):
+        alembic_status = maintenance_result["alembic_version"]
+        print(f">>> [DB] Alembic version marker: {alembic_status.get('revision')}")
     if maintenance_result.get("admin", {}).get("message"):
         print(f">>> [DB] {maintenance_result['admin']['message']}")
     if maintenance_result.get("hazard_seed", {}).get("message"):

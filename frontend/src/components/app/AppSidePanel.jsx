@@ -110,7 +110,7 @@ export default function AppSidePanel({
         ? '生产管理'
         : getLeftTabLabel(leftPanelTab, leftTabLabelContext);
     const standaloneDescription = isProductionWorkspace
-        ? '这里统一承载 D-InSAR 与时序InSAR的运行和产物页面，当前时序流程默认接入 SBAS，后续可继续扩展 PS-InSAR / SBAS-InSAR。'
+        ? '这里统一承载 D-InSAR 与 Gamma SBAS-InSAR 生产；旧 ISCE2/MintPy 时序入口已停用。'
         : '当前模块已切换为独立工作区模式。';
 
     return (

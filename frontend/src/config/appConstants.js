@@ -66,19 +66,14 @@ export const PRODUCTION_WORKSPACE_VIEWS = [
     description: '运行任务编排、引擎切换与过程监控',
   },
   {
-    key: 'timeseries_runs',
-    label: '时序InSAR 运行',
-    description: '当前默认接入 SBAS 流程，后续可扩展 PS-InSAR / SBAS-InSAR',
+    key: 'sbas_insar_production',
+    label: 'SBAS-InSAR Production',
+    description: 'Gamma IPTA SBAS stack production, velocity maps, quality metrics, and monitor-point curves',
   },
   {
     key: 'dinsar_products',
     label: 'D-InSAR 产物',
     description: '结果提取、标准目录发布与产物编目',
-  },
-  {
-    key: 'timeseries_products',
-    label: '时序InSAR 产物',
-    description: '当前统一登记时序产物，后续兼容多类型时序成果',
   },
 ];
 
@@ -86,8 +81,8 @@ export const PRODUCTION_WORKSPACE_ENTRY_TO_VIEW = Object.freeze({
   [PRODUCTION_WORKSPACE_TAB]: 'dinsar_runs',
   dinsar_production: 'dinsar_runs',
   dinsar_products: 'dinsar_products',
-  ps_production: 'timeseries_runs',
-  ps_products: 'timeseries_products',
+  ps_production: 'sbas_insar_production',
+  ps_products: 'sbas_insar_production',
 });
 
 export const PRODUCTION_WORKSPACE_ROUTE_TABS = new Set([

@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from .. import database
 from ..config import settings
-from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskItemORM, PsTaskItemORM, RadarDataORM, SARSceneGeoORM, FloodDetectionORM, WaterDetectionORM, GF3ProcessingORM, AiDiagnosisORM
+from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskItemORM, PsTaskItemORM, RadarDataORM, SARSceneGeoORM, FloodDetectionORM, WaterDetectionORM, WaterExtractionORM, GF3ProcessingORM, AiDiagnosisORM
 from ..scheduler import scan_data_job
 from .data_service import data_service
 from .asset_inventory_service import asset_inventory_service
@@ -80,7 +80,10 @@ JOB_TYPE_IDL_RUN_DINSAR = "IDL_RUN_DINSAR"
 JOB_TYPE_WATER_GEOCODE = "WATER_GEOCODE"
 JOB_TYPE_WATER_FLOOD = "WATER_FLOOD"
 JOB_TYPE_WATER_DETECT = "WATER_DETECT"
+JOB_TYPE_SAR_SCENE_PREPROCESS = "SAR_SCENE_PREPROCESS"
+JOB_TYPE_FLOOD_DETECTION = "FLOOD_DETECTION"
 JOB_TYPE_GF3_PROCESS = "GF3_PROCESS"
+JOB_TYPE_GF3_UNPACK = "GF3_UNPACK"
 JOB_TYPE_GF3_BATCH_PROCESS = "GF3_BATCH_PROCESS"
 JOB_TYPE_ISCE2_RUN = "ISCE2_RUN"
 JOB_TYPE_PYINT_RUN = "PYINT_RUN"
@@ -88,6 +91,7 @@ JOB_TYPE_PUBLISH_DINSAR_PRODUCTS = "PUBLISH_DINSAR_PRODUCTS"
 JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
 JOB_TYPE_SCAN_ASSET_INVENTORY = "SCAN_ASSET_INVENTORY"
+JOB_TYPE_SBAS_COREGISTRATION = "SBAS_COREGISTRATION"
 
 COPY_ALLOWED_STATUSES = {"PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"}
 
@@ -3149,6 +3153,106 @@ async def _handle_water_geocode(job: SystemJobORM) -> None:
     )
 
 
+async def _handle_sar_scene_preprocess(job: SystemJobORM) -> None:
+    """Build one analysis-ready GeoTIFF for flood/water algorithms."""
+    payload = job.payload or {}
+    scene_id = payload.get("scene_id")
+    radar_data_id = payload.get("radar_data_id")
+    engine = str(payload.get("engine") or "").strip().lower()
+    if not scene_id and not radar_data_id:
+        raise ValueError("SAR_SCENE_PREPROCESS requires scene_id or radar_data_id")
+    if engine not in {"gf3_gdal", "lt_gamma"}:
+        raise ValueError(f"Unsupported SAR scene preprocessing engine: {engine}")
+
+    await task_service.start_task(job.task_id, message="Preparing analysis-ready SAR GeoTIFF...")
+
+    async with AsyncSessionLocal() as db:
+        scene: SARSceneGeoORM | None = None
+        if scene_id:
+            scene = await db.get(SARSceneGeoORM, int(scene_id))
+        if not scene and radar_data_id:
+            result = await db.execute(
+                select(SARSceneGeoORM).where(SARSceneGeoORM.radar_data_id == int(radar_data_id))
+            )
+            scene = result.scalar_one_or_none()
+        if not scene:
+            scene = SARSceneGeoORM(radar_data_id=int(radar_data_id), status="PENDING")
+            db.add(scene)
+            await db.flush()
+        radar = await db.get(RadarDataORM, int(scene.radar_data_id))
+        if not radar:
+            raise ValueError(f"RadarDataORM id={scene.radar_data_id} does not exist")
+        scene.status = "RUNNING"
+        scene.error_msg = None
+        await db.commit()
+        scene_id = int(scene.id)
+        radar_data_id = int(radar.id)
+
+    try:
+        if engine == "gf3_gdal":
+            await task_service.update_task(job.task_id, progress=20, message="Standardizing GF3 L2 GeoTIFF...")
+            from .sar_analysis_ready_service import standardize_gf3_l2_for_radar
+
+            async with AsyncSessionLocal() as db:
+                manifest = await standardize_gf3_l2_for_radar(
+                    db=db,
+                    radar_id=int(radar_data_id),
+                    l2_path=payload.get("l2_path"),
+                    polarization=payload.get("polarization"),
+                )
+        else:
+            await task_service.update_task(job.task_id, progress=15, message="Running LT Gamma single-scene preprocessing...")
+            from .lt_gamma_scene_service import run_lt_gamma_scene_preprocess
+            from .sar_analysis_ready_service import register_analysis_ready_tif
+
+            async with AsyncSessionLocal() as db:
+                scene = await db.get(SARSceneGeoORM, int(scene_id))
+                radar = await db.get(RadarDataORM, int(radar_data_id))
+                if not scene or not radar:
+                    raise ValueError("Scene or radar record disappeared before LT Gamma preprocessing")
+
+            def _run_lt() -> Dict[str, Any]:
+                return run_lt_gamma_scene_preprocess(radar=radar, scene=scene, job_id=job.job_id)
+
+            lt_manifest = await asyncio.to_thread(_run_lt)
+            await task_service.update_task(job.task_id, progress=85, message="Registering LT analysis-ready GeoTIFF...")
+            analysis_tif_path = str(lt_manifest.get("analysis_tif_path") or "").strip()
+            if not analysis_tif_path:
+                raise RuntimeError("LT Gamma preprocessing returned no analysis_tif_path")
+            async with AsyncSessionLocal() as db:
+                scene = await db.get(SARSceneGeoORM, int(scene_id))
+                radar = await db.get(RadarDataORM, int(radar_data_id))
+                if not scene or not radar:
+                    raise ValueError("Scene or radar record disappeared before analysis-ready registration")
+                manifest = await register_analysis_ready_tif(
+                    db=db,
+                    scene=scene,
+                    radar=radar,
+                    source_tif_path=analysis_tif_path,
+                    engine="lt_gamma",
+                    profile="lt1_gamma_geocoded_mli",
+                    backscatter_unit=str(lt_manifest.get("backscatter_unit") or "gamma_mli_db"),
+                    polarization=radar.polarization,
+                    metadata=lt_manifest,
+                )
+                await db.commit()
+    except Exception as exc:
+        async with AsyncSessionLocal() as db:
+            scene = await db.get(SARSceneGeoORM, int(scene_id))
+            if scene:
+                scene.status = "FAILED"
+                scene.error_msg = str(exc)
+                await db.commit()
+        raise
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=f"Analysis-ready GeoTIFF ready: {manifest.get('analysis_tif_path')}",
+    )
+
+
 async def _handle_water_flood(job: SystemJobORM) -> None:
     """洪涝检测 job handler（灾前 + 灾后配对分类）。"""
     from .water_service import run_flood_detection, WATER_RESULTS_DIR
@@ -3171,8 +3275,10 @@ async def _handle_water_flood(job: SystemJobORM) -> None:
             raise ValueError("灾前或灾后场景记录不存在")
         if pre_scene.status != "DONE" or post_scene.status != "DONE":
             raise ValueError("灾前或灾后场景尚未完成地理编码")
-        pre_geo = pre_scene.geo_path
-        post_geo = post_scene.geo_path
+        pre_geo = pre_scene.analysis_tif_path or pre_scene.geo_path
+        post_geo = post_scene.analysis_tif_path or post_scene.geo_path
+        if not pre_geo or not post_geo:
+            raise ValueError("Pre/post scenes must have analysis-ready GeoTIFF paths")
 
     output_dir = os.path.join(WATER_RESULTS_DIR, f"flood_{detection_id}")
     os.makedirs(output_dir, exist_ok=True)
@@ -3228,36 +3334,129 @@ async def _handle_water_flood(job: SystemJobORM) -> None:
     )
 
 
-async def _handle_water_detect(job: SystemJobORM) -> None:
-    """水体检测 job handler（Otsu + DEM + 形态学 + 连通分量）。"""
-    from .water_detect_service import run_water_detection
+async def _handle_flood_detection(job: SystemJobORM) -> None:
+    """Flood-analysis detection job: pure Python GeoTIFF change classification."""
+    from .flood_detection_service import run_geotiff_flood_detection
 
     payload = job.payload or {}
     detection_id = payload.get("detection_id")
     if not detection_id:
-        raise ValueError("WATER_DETECT job 缺少 detection_id")
+        raise ValueError("FLOOD_DETECTION job requires detection_id")
+    refine = bool(payload.get("refine", False))
+
+    await task_service.start_task(job.task_id, message="Reading flood-detection scene pair...")
+
+    async with AsyncSessionLocal() as db:
+        det = await db.get(FloodDetectionORM, int(detection_id))
+        if not det:
+            raise ValueError(f"FloodDetectionORM id={detection_id} does not exist")
+        pre_scene = await db.get(SARSceneGeoORM, det.pre_scene_id)
+        post_scene = await db.get(SARSceneGeoORM, det.post_scene_id)
+        if not pre_scene or not post_scene:
+            raise ValueError("Pre/post scene records do not exist")
+        if pre_scene.status != "DONE" or post_scene.status != "DONE":
+            raise ValueError("Pre/post scenes are not DONE")
+        pre_tif = pre_scene.analysis_tif_path
+        post_tif = post_scene.analysis_tif_path
+        if not pre_tif or not post_tif:
+            raise ValueError("Flood detection requires analysis-ready GeoTIFF paths for both scenes")
+
+    output_dir = os.path.join(settings.WATER_RESULTS_DIR, f"flood_{detection_id}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    await task_service.update_task(job.task_id, progress=10, message="Running GeoTIFF flood classification...")
+
+    def _run() -> Dict[str, Any]:
+        return run_geotiff_flood_detection(
+            pre_tif_path=pre_tif,
+            post_tif_path=post_tif,
+            output_dir=output_dir,
+            job_id=job.job_id,
+            refine=refine,
+        )
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except Exception as exc:
+        async with AsyncSessionLocal() as db:
+            det = await db.get(FloodDetectionORM, int(detection_id))
+            if det:
+                det.status = "FAILED"
+                det.error_msg = str(exc)
+                await db.commit()
+        raise
+
+    async with AsyncSessionLocal() as db:
+        det = await db.get(FloodDetectionORM, int(detection_id))
+        if det:
+            if result.get("ok"):
+                det.classified_path = result.get("classified_path")
+                det.flood_area_km2 = result.get("flood_area_km2")
+                det.stable_water_area_km2 = result.get("stable_water_area_km2")
+                det.output_dir = output_dir
+                det.status = "DONE"
+                det.error_msg = None
+            else:
+                det.status = "FAILED"
+                det.error_msg = result.get("error", "Unknown error")
+            await db.commit()
+
+    if not result.get("ok"):
+        raise RuntimeError(f"Flood detection failed: {result.get('error')}")
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            f"GeoTIFF flood detection completed: flood_area={result.get('flood_area_km2')} km2, "
+            f"stable_water={result.get('stable_water_area_km2')} km2"
+        ),
+    )
+
+
+async def _handle_water_detect(job: SystemJobORM) -> None:
+    """水体检测 job handler（Otsu + DEM + 形态学 + 连通分量）。"""
+    from .water_extraction_service import run_otsu_water_extraction
+
+    payload = job.payload or {}
+    extraction_id = payload.get("extraction_id")
+    detection_id = payload.get("detection_id")
+    record_id = extraction_id or detection_id
+    if not record_id:
+        raise ValueError("WATER_DETECT job 缺少 extraction_id/detection_id")
+    use_extraction_table = extraction_id is not None
 
     await task_service.start_task(job.task_id, message="读取检测任务信息...")
 
     async with AsyncSessionLocal() as db:
-        det = await db.get(WaterDetectionORM, int(detection_id))
+        det = await db.get(WaterExtractionORM if use_extraction_table else WaterDetectionORM, int(record_id))
         if not det:
-            raise ValueError(f"WaterDetectionORM id={detection_id} 不存在")
+            model_name = "WaterExtractionORM" if use_extraction_table else "WaterDetectionORM"
+            raise ValueError(f"{model_name} id={record_id} 不存在")
         input_path = det.input_path
         det.status = "RUNNING"
+        if use_extraction_table and hasattr(det, "task_id"):
+            det.task_id = job.task_id
+        if not use_extraction_table:
+            mirror = await db.get(WaterExtractionORM, int(record_id))
+            if mirror:
+                mirror.status = "RUNNING"
+                mirror.task_id = job.task_id
         await db.commit()
 
     if not input_path:
         raise ValueError("水体检测缺少输入路径 input_path")
 
-    output_dir = os.path.join(os.path.dirname(input_path), f"water_detect_{detection_id}")
+    output_name = f"water_extraction_{record_id}" if use_extraction_table else f"water_detect_{record_id}"
+    output_dir = os.path.join(os.path.dirname(input_path), output_name)
     os.makedirs(output_dir, exist_ok=True)
 
     await task_service.update_task(job.task_id, progress=10, message="启动水体检测算法...")
 
     def _run() -> Dict[str, Any]:
-        return run_water_detection(
-            geo_tiff_path=input_path,
+        return run_otsu_water_extraction(
+            input_path=input_path,
             output_dir=output_dir,
             job_id=job.job_id,
         )
@@ -3266,26 +3465,56 @@ async def _handle_water_detect(job: SystemJobORM) -> None:
         result = await asyncio.to_thread(_run)
     except Exception as exc:
         async with AsyncSessionLocal() as db:
-            det = await db.get(WaterDetectionORM, int(detection_id))
+            det = await db.get(WaterExtractionORM if use_extraction_table else WaterDetectionORM, int(record_id))
             if det:
                 det.status = "FAILED"
                 det.error_msg = str(exc)
-                await db.commit()
+            if not use_extraction_table:
+                mirror = await db.get(WaterExtractionORM, int(record_id))
+                if mirror:
+                    mirror.status = "FAILED"
+                    mirror.error_msg = str(exc)
+                    mirror.task_id = job.task_id
+            await db.commit()
         raise
 
     async with AsyncSessionLocal() as db:
-        det = await db.get(WaterDetectionORM, int(detection_id))
+        det = await db.get(WaterExtractionORM if use_extraction_table else WaterDetectionORM, int(record_id))
         if det:
             if result.get("ok"):
                 det.output_path = result.get("output_path")
                 det.water_area_km2 = result.get("water_area_km2")
                 det.water_pixel_count = result.get("water_pixel_count")
-                det.otsu_threshold_db = result.get("otsu_threshold_db")
+                if use_extraction_table:
+                    det.processor = result.get("processor") or det.processor or "otsu"
+                    det.threshold_value = result.get("threshold_value")
+                    det.metadata_json = {
+                        "legacy_otsu_threshold_db": result.get("otsu_threshold_db"),
+                        "job_id": job.job_id,
+                    }
+                else:
+                    det.otsu_threshold_db = result.get("otsu_threshold_db")
                 det.status = "DONE"
                 det.error_msg = None
             else:
                 det.status = "FAILED"
                 det.error_msg = result.get("error", "Unknown error")
+            if not use_extraction_table:
+                mirror = await db.get(WaterExtractionORM, int(record_id))
+                if mirror:
+                    mirror.output_path = det.output_path
+                    mirror.water_area_km2 = det.water_area_km2
+                    mirror.water_pixel_count = det.water_pixel_count
+                    mirror.threshold_value = result.get("threshold_value") or result.get("otsu_threshold_db")
+                    mirror.processor = result.get("processor") or mirror.processor or "otsu"
+                    mirror.status = det.status
+                    mirror.error_msg = det.error_msg
+                    mirror.task_id = job.task_id
+                    mirror.metadata_json = {
+                        "legacy_otsu_threshold_db": result.get("otsu_threshold_db"),
+                        "legacy_detection_id": int(record_id),
+                        "job_id": job.job_id,
+                    }
             await db.commit()
 
     if not result.get("ok"):
@@ -3376,9 +3605,70 @@ async def _handle_gf3_process(job: SystemJobORM) -> None:
     )
 
 
+async def _handle_gf3_unpack(job: SystemJobORM) -> None:
+    """GF3 archive inbox -> persistent L1A source pool."""
+    from .gf3_unpack_service import run_gf3_archive_unpack
+
+    if not job.task_id:
+        raise ValueError("GF3_UNPACK requires task_id for progress tracking.")
+
+    payload = job.payload or {}
+    await task_service.start_task(job.task_id, message="扫描 GF3 压缩包来源目录...")
+
+    loop = asyncio.get_running_loop()
+
+    def _submit(coro):
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError:
+            return
+
+        def _swallow_errors(fut):
+            try:
+                fut.result()
+            except Exception as exc:
+                logger.warning("[GF3 Unpack] task callback failed: %s", exc)
+
+        future.add_done_callback(_swallow_errors)
+
+    def _log_cb(level: str, message: str) -> None:
+        _submit(task_service.add_log(job.task_id, level, message))
+
+    def _progress_cb(progress: int, message: str) -> None:
+        _submit(task_service.update_task(job.task_id, progress=progress, message=message))
+
+    try:
+        result = await asyncio.to_thread(
+            run_gf3_archive_unpack,
+            source_dirs=payload.get("source_dirs"),
+            target_dirs=payload.get("target_dirs"),
+            archive_exts=payload.get("archive_exts"),
+            max_files_per_run=payload.get("max_files_per_run"),
+            delete_archive=payload.get("delete_archive") if "delete_archive" in payload else None,
+            min_disk_space_gb=payload.get("min_disk_space_gb"),
+            tmp_suffix=payload.get("tmp_suffix"),
+            log_callback=_log_cb,
+            progress_callback=_progress_cb,
+        )
+    except Exception as exc:
+        await task_service.update_task(job.task_id, status="FAILED", progress=100, message=f"GF3 解包失败: {exc}")
+        raise
+
+    message = (
+        f"GF3 解包完成: 成功 {int(result.get('processed') or 0)}, "
+        f"跳过 {int(result.get('skipped') or 0)}, "
+        f"失败 {int(result.get('failed') or 0)}"
+    )
+    remaining = int(result.get("remaining") or 0)
+    if remaining > 0:
+        message += f", 剩余 {remaining}"
+    await task_service.update_task(job.task_id, status="COMPLETED", progress=100, message=message)
+
+
 async def _handle_gf3_batch_process(job: SystemJobORM) -> None:
     """批量 GF3 L1A→L2：扫描来源目录，逐个处理并自动入库到 radar_data。"""
     from .gf3_service import run_gf3_l1a_to_l2, register_l2_to_radar_data
+    from .sar_analysis_ready_service import standardize_gf3_l2_for_radar
 
     payload = job.payload or {}
     source_dirs = payload.get("source_dirs") or []
@@ -3458,12 +3748,18 @@ async def _handle_gf3_batch_process(job: SystemJobORM) -> None:
                 # Auto-register to radar_data
                 try:
                     async with AsyncSessionLocal() as db:
-                        await register_l2_to_radar_data(
+                        radar_id = await register_l2_to_radar_data(
                             l2_dir=result.get("output_dir", output_dir),
                             input_dir_name=dir_name,
                             polarizations=result.get("polarizations", []),
                             db=db,
                         )
+                        if radar_id:
+                            await standardize_gf3_l2_for_radar(
+                                db=db,
+                                radar_id=int(radar_id),
+                                l2_path=result.get("output_dir", output_dir),
+                            )
                 except Exception as reg_err:
                     logger.warning("[GF3 Batch] Auto-register failed for %s: %s", dir_name, reg_err)
             else:
@@ -3888,6 +4184,85 @@ async def _handle_rebuild_psinsar_catalog(job: SystemJobORM) -> None:
         )
 
 
+async def _handle_sbas_coregistration(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("SBAS_COREGISTRATION requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("SBAS_COREGISTRATION requires run_id payload.")
+
+    rlks = _normalize_positive_int(payload.get("rlks")) or 8
+    azlks = _normalize_positive_int(payload.get("azlks")) or 8
+    timeout_seconds = _normalize_positive_int(payload.get("timeout_seconds")) or 43200
+
+    await task_service.start_task(job.task_id, message="正在执行 SBAS-InSAR Gamma 共参考配准...")
+    await task_service.update_task(
+        job.task_id,
+        progress=5,
+        message=f"准备运行 Gamma SLC_coreg.py: run_id={run_id}",
+    )
+    await task_service.add_log(
+        job.task_id,
+        "INFO",
+        f"SBAS coregistration queued: run_id={run_id}, rlks={rlks}, azlks={azlks}, timeout={timeout_seconds}s",
+    )
+
+    from .sbas_insar_production_service import sbas_insar_production_service
+
+    async def _task_keepalive() -> None:
+        progress = 12
+        while True:
+            await asyncio.sleep(60)
+            progress = min(88, progress + 2)
+            await task_service.update_task(
+                job.task_id,
+                progress=progress,
+                message=f"Gamma 共参考配准仍在运行: run_id={run_id}",
+            )
+
+    runner_task = asyncio.create_task(
+        asyncio.to_thread(
+            sbas_insar_production_service.execute_coregistration,
+            run_id,
+            rlks=rlks,
+            azlks=azlks,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    keepalive_task = asyncio.create_task(_task_keepalive())
+    try:
+        result = await runner_task
+    finally:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+
+    manifest = result.get("manifest") or {}
+    run = result.get("run") or {}
+    summary = (manifest.get("coregistration") or {}).get("summary") or {}
+    status = str(run.get("status") or manifest.get("status") or "").strip()
+    if status != "COREGISTRATION_READY":
+        raise RuntimeError(
+            "SBAS coregistration failed: "
+            f"status={status or 'UNKNOWN'}, "
+            f"missing_dates={summary.get('missing_dates') or []}, "
+            f"missing_tabs={summary.get('missing_tabs') or []}"
+        )
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            "SBAS-InSAR 共参考配准完成: "
+            f"{summary.get('ready_secondary_count', 0)}/{summary.get('expected_secondary_count', 0)} secondary scenes ready"
+        ),
+    )
+
+
 _HANDLERS = {
     JOB_TYPE_SCAN_DATA: _handle_scan_data,
     JOB_TYPE_SCAN_ASSET_INVENTORY: _handle_scan_asset_inventory,
@@ -3918,10 +4293,14 @@ _HANDLERS = {
     JOB_TYPE_ISCE2_RUN: _handle_isce2_run,
     JOB_TYPE_PYINT_RUN: _handle_pyint_run,
     JOB_TYPE_WATER_GEOCODE: _handle_water_geocode,
+    JOB_TYPE_SAR_SCENE_PREPROCESS: _handle_sar_scene_preprocess,
     JOB_TYPE_WATER_FLOOD: _handle_water_flood,
+    JOB_TYPE_FLOOD_DETECTION: _handle_flood_detection,
     JOB_TYPE_WATER_DETECT: _handle_water_detect,
     JOB_TYPE_GF3_PROCESS: _handle_gf3_process,
+    JOB_TYPE_GF3_UNPACK: _handle_gf3_unpack,
     JOB_TYPE_GF3_BATCH_PROCESS: _handle_gf3_batch_process,
+    JOB_TYPE_SBAS_COREGISTRATION: _handle_sbas_coregistration,
 }
 
 

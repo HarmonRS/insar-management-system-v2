@@ -19,6 +19,7 @@ MONITOR_CONFIG = {
     "s1_storage_dirs": split_env_paths(settings.SENTINEL1_STORAGE_DIRS),
     "s1_orbit_dirs": split_env_paths(settings.ORBIT_SOURCE_DIRS),
     # GF3 链路
+    "gf3_archive_source_dirs": split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS),
     "gf3_source_dirs": split_env_paths(settings.GF3_SOURCE_DIRS),
     "gf3_storage_dirs": split_env_paths(settings.GF3_STORAGE_DIRS),
     "mode": "manual",

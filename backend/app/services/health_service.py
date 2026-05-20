@@ -17,6 +17,7 @@ from ..models import (
     OrbitAssetORM,
     ResultCatalogStateORM,
     ResultProductORM,
+    SARSceneGeoORM,
     SceneOrbitBindingORM,
     SourceProductAssetORM,
     SystemWorkerHeartbeatORM,
@@ -362,6 +363,19 @@ def _sanitize_source_roots_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _sanitize_sar_analysis_ready_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    scenes = payload.get("scenes", {}) or {}
+    roots = payload.get("roots", {}) or {}
+    return {
+        "ok": bool(payload.get("ok")),
+        "configured_root_count": len(roots),
+        "accessible_root_count": sum(1 for item in roots.values() if item.get("accessible")),
+        "scene_count": int(scenes.get("scene_count") or 0),
+        "analysis_scene_count": int(scenes.get("analysis_scene_count") or 0),
+        "missing_file_count": int(scenes.get("missing_file_count") or 0),
+    }
+
+
 def _sanitize_product_package_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "ok": bool(payload.get("ok")),
@@ -460,6 +474,7 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     psinsar_result_catalog = timeseries_result_catalog
     dinsar_bridge = payload.get("dinsar_bridge", {}) or {}
     source_roots = payload.get("source_roots", {}) or {}
+    sar_analysis_ready = payload.get("sar_analysis_ready", {}) or {}
     product_packages = payload.get("product_packages", {}) or {}
     asset_inventory = payload.get("asset_inventory", {}) or {}
     wsl_runtime = payload.get("wsl_runtime", {}) or {}
@@ -473,6 +488,7 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     sanitized_psinsar_catalog = sanitized_timeseries_catalog
     sanitized_dinsar_bridge = _sanitize_bridge_status(dinsar_bridge)
     sanitized_source_roots = _sanitize_source_roots_status(source_roots)
+    sanitized_sar_analysis_ready = _sanitize_sar_analysis_ready_status(sar_analysis_ready)
     sanitized_product_packages = _sanitize_product_package_status(product_packages)
     sanitized_asset_inventory = _sanitize_asset_inventory_status(asset_inventory)
     sanitized_wsl_runtime = _sanitize_wsl_runtime_status(wsl_runtime)
@@ -502,6 +518,7 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         },
         "dinsar_bridge": sanitized_dinsar_bridge,
         "source_roots": sanitized_source_roots,
+        "sar_analysis_ready": sanitized_sar_analysis_ready,
         "product_packages": sanitized_product_packages,
         "asset_inventory": sanitized_asset_inventory,
         "wsl_runtime": sanitized_wsl_runtime,
@@ -869,6 +886,21 @@ async def _check_source_roots() -> Dict[str, Any]:
         status["role"] = "dinsar_source"
         items.append(status)
 
+    for path in split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS):
+        status = _probe_directory_status(path)
+        status["role"] = "gf3_archive_source"
+        items.append(status)
+
+    for path in split_env_paths(settings.GF3_SOURCE_DIRS):
+        status = _probe_directory_status(path)
+        status["role"] = "gf3_l1a_source"
+        items.append(status)
+
+    for path in split_env_paths(settings.GF3_STORAGE_DIRS):
+        status = _probe_directory_status(path)
+        status["role"] = "gf3_l2_storage"
+        items.append(status)
+
     configured_count = len(items)
     accessible_count = sum(1 for item in items if item.get("accessible"))
     inaccessible_count = configured_count - accessible_count
@@ -880,6 +912,56 @@ async def _check_source_roots() -> Dict[str, Any]:
         "inaccessible_count": inaccessible_count,
         "items": items,
     }
+
+
+async def _check_sar_analysis_ready() -> Dict[str, Any]:
+    roots = {
+        "ready": _probe_directory_status(settings.SAR_ANALYSIS_READY_ROOT),
+        "work": _probe_directory_status(settings.SAR_ANALYSIS_WORK_ROOT),
+        "preview": _probe_directory_status(settings.SAR_ANALYSIS_PREVIEW_ROOT),
+    }
+    for role, payload in roots.items():
+        payload["role"] = role
+
+    status: Dict[str, Any] = {
+        "ok": False,
+        "roots": roots,
+        "scenes": {
+            "scene_count": 0,
+            "analysis_scene_count": 0,
+            "missing_file_count": 0,
+            "missing_files": [],
+        },
+        "error": None,
+    }
+    try:
+        session_factory = _get_session_factory()
+        async with session_factory() as db:
+            scene_count_result = await db.execute(select(func.count(SARSceneGeoORM.id)))
+            status["scenes"]["scene_count"] = int(scene_count_result.scalar_one() or 0)
+            analysis_rows_result = await db.execute(
+                select(SARSceneGeoORM.id, SARSceneGeoORM.analysis_tif_path)
+                .where(SARSceneGeoORM.analysis_tif_path.is_not(None))
+                .order_by(SARSceneGeoORM.id.desc())
+            )
+            analysis_rows = analysis_rows_result.all()
+            status["scenes"]["analysis_scene_count"] = len(analysis_rows)
+
+        missing_files = []
+        for scene_id, tif_path in analysis_rows:
+            path_text = str(tif_path or "").strip()
+            if path_text and not os.path.isfile(path_text):
+                missing_files.append({"scene_id": scene_id, "path": path_text})
+        status["scenes"]["missing_file_count"] = len(missing_files)
+        status["scenes"]["missing_files"] = missing_files[:20]
+
+        status["ok"] = (
+            all(item.get("accessible") for item in roots.values())
+            and status["scenes"]["missing_file_count"] == 0
+        )
+    except Exception as exc:
+        status["error"] = str(exc)
+    return status
 
 
 async def _check_product_packages() -> Dict[str, Any]:
@@ -1256,6 +1338,7 @@ async def get_health_status(
     psinsar_result_catalog_status = timeseries_result_catalog_status
     dinsar_bridge_status = await _check_dinsar_bridge()
     source_roots_status = await _check_source_roots()
+    sar_analysis_ready_status = await _check_sar_analysis_ready()
     product_packages_status = await _check_product_packages()
     asset_inventory_status = await _check_asset_inventory()
     wsl_runtime_status = await _check_wsl_runtime()
@@ -1273,6 +1356,7 @@ async def get_health_status(
             result_catalog_status.get("ok"),
             dinsar_bridge_status.get("ok"),
             source_roots_status.get("ok"),
+            sar_analysis_ready_status.get("ok"),
             product_packages_status.get("ok"),
             asset_inventory_status.get("ok"),
             wsl_runtime_status.get("ok"),
@@ -1297,6 +1381,7 @@ async def get_health_status(
         },
         "dinsar_bridge": dinsar_bridge_status,
         "source_roots": source_roots_status,
+        "sar_analysis_ready": sar_analysis_ready_status,
         "product_packages": product_packages_status,
         "asset_inventory": asset_inventory_status,
         "wsl_runtime": wsl_runtime_status,

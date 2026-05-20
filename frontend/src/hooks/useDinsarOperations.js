@@ -11,7 +11,7 @@ import { normalizePagePayload } from '../utils/appHelpers';
 import { normalizeTaskStatus } from '../utils/appUiHelpers';
 import { DEFAULT_LIST_PAGE_SIZE } from '../config/appConstants';
 
-const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES', 'UNPACK_SENTINEL1', 'SCAN_ASSET_INVENTORY', 'COPY_DATA']);
+const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES', 'UNPACK_SENTINEL1', 'GF3_UNPACK', 'SCAN_ASSET_INVENTORY', 'COPY_DATA']);
 
 export default function useDinsarOperations({
     onCleanupDinsarLayers,
@@ -228,6 +228,12 @@ export default function useDinsarOperations({
                 void syncRadarViewsAfterUnpack();
             } else if (taskStatus === 'FAILED') {
                 addLog('error', `LT-1 解包失败: ${taskInfo.message || '未知错误'}`);
+            }
+        } else if (taskInfo.task_type === 'GF3_UNPACK') {
+            if (taskStatus === 'COMPLETED') {
+                addLog('success', taskInfo.message || 'GF3 解包完成。');
+            } else if (taskStatus === 'FAILED') {
+                addLog('error', `GF3 解包失败: ${taskInfo.message || '未知错误'}`);
             }
         }
     };

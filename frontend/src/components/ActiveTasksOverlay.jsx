@@ -22,6 +22,10 @@ const getTaskTypeLabel = (taskType) => {
       return 'LT-1 解包';
     case 'UNPACK_SENTINEL1':
       return 'Sentinel-1 解包';
+    case 'GF3_UNPACK':
+      return 'GF3 解包';
+    case 'GF3_BATCH_PROCESS':
+      return 'GF3 预处理';
     case 'SCAN_ASSET_INVENTORY':
       return '资产库存扫描';
     case 'IDL_IMPORT':

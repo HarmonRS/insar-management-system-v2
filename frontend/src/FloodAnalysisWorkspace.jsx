@@ -3,19 +3,25 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import UnifiedDatePicker from './components/UnifiedDatePicker';
 import { getSearchOptions, searchRadarData } from './api/radar';
 import {
+  createFloodProduct,
   getFloodActiveRadarIds,
   getFloodDetectionPreview,
   getFloodDetections,
+  getFloodImpact,
   getFloodDoneRadarIds,
+  getFloodProductManifest,
   getFloodScenes,
+  getFloodProducts,
   getFloodWaterExtractionPreview,
   getFloodWaterExtractions,
   resetFloodScene,
-  searchFloodPairs,
+  runFloodOverlay,
+  searchFloodDisasterPairs,
   submitFloodDetection,
   submitFloodPreprocess,
   submitFloodWaterExtraction,
 } from './api/flood';
+import { getRegionChildren } from './api/aoi';
 import {
   buildRadarSearchFormData,
   formatYmd,
@@ -119,6 +125,11 @@ function isActiveStatus(value) {
 
 function compactDate(value) {
   return String(value || '').replaceAll('-', '').trim();
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return `${(Number(value) * 100).toFixed(1)}%`;
 }
 
 function formatArea(value) {
@@ -225,6 +236,37 @@ function KeyValue({ label, value, strong = false }) {
   );
 }
 
+function RegionSelector({ options, selection, onProvinceChange, onCityChange, disabled = false }) {
+  const provinces = options?.provinces || [];
+  const cities = options?.cities || [];
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+      <select
+        value={selection?.province || ''}
+        onChange={event => onProvinceChange(event.target.value)}
+        style={inputStyle}
+        disabled={disabled}
+      >
+        <option value="">省/自治区</option>
+        {provinces.map(item => (
+          <option key={item.tree_id} value={item.tree_id}>{item.name}</option>
+        ))}
+      </select>
+      <select
+        value={selection?.city || ''}
+        onChange={event => onCityChange(event.target.value)}
+        style={inputStyle}
+        disabled={disabled || !selection?.province}
+      >
+        <option value="">市/州（可选）</option>
+        {cities.map(item => (
+          <option key={item.tree_id} value={item.tree_id}>{item.name}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 function normalizeMapPreview(preview) {
   if (!preview) return null;
   const image = preview.image_b64 || preview.png_base64;
@@ -239,6 +281,11 @@ function normalizeMapPreview(preview) {
 function SceneRow({ scene, readOnly, onShowMap, onExtractWater, onReset }) {
   const status = asStatus(scene.status);
   const canExtract = status === 'DONE';
+  const [coverageVisible, setCoverageVisible] = useState(false);
+  const handleToggleCoverage = () => {
+    const visible = onShowMap(scene);
+    if (typeof visible === 'boolean') setCoverageVisible(visible);
+  };
   return (
     <div style={rowStyle}>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'start' }}>
@@ -248,13 +295,16 @@ function SceneRow({ scene, readOnly, onShowMap, onExtractWater, onReset }) {
             <StatusBadge status={scene.status} />
             <span style={{ color: palette.muted }}>{scene.satellite || '-'}</span>
             <span style={{ color: palette.muted }}>{formatYmd(scene.imaging_date, 'zh')}</span>
+            {scene.polarization && <span style={{ color: palette.subtle }}>{scene.polarization}</span>}
           </div>
           <div style={{ color: palette.subtle, fontSize: 11, marginTop: 5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={scene.geo_path || scene.error_msg || ''}>
-            {scene.geo_path ? scene.geo_path.split(/[\\/]/).pop() : scene.error_msg || `Radar ID ${scene.radar_data_id}`}
+            {[scene.imaging_mode, scene.product_level, scene.geo_path ? scene.geo_path.split(/[\\/]/).pop() : scene.error_msg || `Radar ID ${scene.radar_data_id}`].filter(Boolean).join(' · ')}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          <button type="button" style={buttonStyle('quiet', !scene.coverage_polygon)} disabled={!scene.coverage_polygon} onClick={() => onShowMap(scene)}>覆盖</button>
+          <button type="button" style={buttonStyle(coverageVisible ? 'success' : 'quiet', !scene.coverage_polygon)} disabled={!scene.coverage_polygon} onClick={handleToggleCoverage}>
+            {coverageVisible ? '清除范围' : '显示范围'}
+          </button>
           <button type="button" style={buttonStyle('primary', readOnly || !canExtract)} disabled={readOnly || !canExtract} onClick={() => onExtractWater(scene)}>提取水体</button>
           {isActiveStatus(scene.status) && (
             <button type="button" style={buttonStyle('danger', readOnly)} disabled={readOnly} onClick={() => onReset(scene)}>重置</button>
@@ -274,6 +324,9 @@ function WaterResultRow({ item, onShowMap }) {
             <strong>水体 #{item.id}</strong>
             <StatusBadge status={item.status} />
             {item.scene_id && <span style={{ color: palette.muted }}>场景 #{item.scene_id}</span>}
+            {item.satellite && <span style={{ color: palette.muted }}>{item.satellite}</span>}
+            {item.imaging_date && <span style={{ color: palette.muted }}>{formatYmd(item.imaging_date, 'zh')}</span>}
+            {item.polarization && <span style={{ color: palette.subtle }}>{item.polarization}</span>}
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, marginTop: 8 }}>
             <KeyValue label="面积" value={formatArea(item.water_area_km2)} strong />
@@ -288,7 +341,29 @@ function WaterResultRow({ item, onShowMap }) {
   );
 }
 
-function FloodEventRow({ event, mapLayerVis, mapLoading, onShowMap, onToggleLayer, onSelectImpact }) {
+function FloodProductRow({ product, onOpenManifest }) {
+  return (
+    <div style={rowStyle}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'center' }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <strong>{product.product_id || `产品 #${product.id}`}</strong>
+            <StatusBadge status={product.status} />
+            {product.detection_id && <span style={{ color: palette.muted }}>洪涝 #{product.detection_id}</span>}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, marginTop: 8 }}>
+            <KeyValue label="洪涝面积" value={formatArea(product.flood_area_km2 || product.summary?.flood_area_km2)} strong />
+            <KeyValue label="影响面积" value={formatArea(product.affected_area_km2)} />
+            <KeyValue label="生成时间" value={formatYmd(product.created_at, 'zh')} />
+          </div>
+        </div>
+        <button type="button" style={buttonStyle('secondary')} onClick={() => onOpenManifest(product)}>Manifest</button>
+      </div>
+    </div>
+  );
+}
+
+function FloodEventRow({ event, mapLayerVis, mapLoading, productBusy, onShowMap, onToggleLayer, onSelectImpact, onCreateProduct }) {
   const done = asStatus(event.status) === 'DONE';
   const preDate = formatYmd(event.pre_imaging_date, 'zh');
   const postDate = formatYmd(event.post_imaging_date, 'zh');
@@ -312,9 +387,9 @@ function FloodEventRow({ event, mapLayerVis, mapLoading, onShowMap, onToggleLaye
         <KeyValue label="稳定水体" value={formatArea(event.stable_water_area_km2)} />
       </div>
       {event.error_msg && <div style={{ color: palette.red, fontSize: 11, marginTop: 8 }}>{event.error_msg}</div>}
-      {layers && (
+      {(layers || onSelectImpact || onCreateProduct) && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 9 }}>
-          {[
+          {layers && [
             ['pre', '灾前影像'],
             ['post', '灾后影像'],
             ['classified', '分类结果'],
@@ -331,6 +406,11 @@ function FloodEventRow({ event, mapLayerVis, mapLoading, onShowMap, onToggleLaye
           {onSelectImpact && (
             <button type="button" style={buttonStyle('secondary', false, { padding: '3px 8px', fontSize: 11 })} onClick={() => onSelectImpact(event)}>
               套合分析
+            </button>
+          )}
+          {onCreateProduct && (
+            <button type="button" style={buttonStyle('primary', productBusy, { padding: '3px 8px', fontSize: 11 })} disabled={productBusy} onClick={() => onCreateProduct(event)}>
+              {productBusy ? '生成中' : '生成产品'}
             </button>
           )}
         </div>
@@ -357,6 +437,8 @@ export default function FloodAnalysisWorkspace({
   const [radarLoading, setRadarLoading] = useState(false);
   const [radarSearched, setRadarSearched] = useState(false);
   const [selectedRadars, setSelectedRadars] = useState([]);
+  const [sourceCoverageVisibleIds, setSourceCoverageVisibleIds] = useState(() => new Set());
+  const [sourcePreviewVisibleIds, setSourcePreviewVisibleIds] = useState(() => new Set());
 
   const [scenes, setScenes] = useState([]);
   const [scenesTotal, setScenesTotal] = useState(0);
@@ -370,10 +452,21 @@ export default function FloodAnalysisWorkspace({
   const [waterPage, setWaterPage] = useState(0);
   const [waterLoading, setWaterLoading] = useState(false);
 
-  const [pairPreStart, setPairPreStart] = useState('');
-  const [pairPreEnd, setPairPreEnd] = useState('');
-  const [pairPostStart, setPairPostStart] = useState('');
-  const [pairPostEnd, setPairPostEnd] = useState('');
+  const [sourceAoiMode, setSourceAoiMode] = useState('none');
+  const [sourceRegionOptions, setSourceRegionOptions] = useState({ provinces: [], cities: [] });
+  const [sourceRegionSelection, setSourceRegionSelection] = useState({ province: '', city: '' });
+  const [regionLoading, setRegionLoading] = useState(false);
+  const [regionError, setRegionError] = useState('');
+
+  const [disasterName, setDisasterName] = useState('');
+  const [disasterDate, setDisasterDate] = useState('');
+  const [preWindowDays, setPreWindowDays] = useState(30);
+  const [postWindowDays, setPostWindowDays] = useState(30);
+  const [minAoiCoverage, setMinAoiCoverage] = useState(0.2);
+  const [pairRegionOptions, setPairRegionOptions] = useState({ provinces: [], cities: [] });
+  const [pairRegionSelection, setPairRegionSelection] = useState({ province: '', city: '' });
+  const [pairSearchSummary, setPairSearchSummary] = useState(null);
+
   const [overlapThreshold, setOverlapThreshold] = useState(0.3);
   const [refine, setRefine] = useState(false);
   const [pairSearching, setPairSearching] = useState(false);
@@ -382,9 +475,15 @@ export default function FloodAnalysisWorkspace({
 
   const [floodEvents, setFloodEvents] = useState([]);
   const [floodLoading, setFloodLoading] = useState(false);
+  const [floodProducts, setFloodProducts] = useState([]);
+  const [productLoading, setProductLoading] = useState(false);
+  const [productBusyId, setProductBusyId] = useState(null);
   const [mapLoadingId, setMapLoadingId] = useState(null);
   const [mapLayerVis, setMapLayerVis] = useState({});
   const [selectedImpactEventId, setSelectedImpactEventId] = useState('');
+  const [impactLoading, setImpactLoading] = useState(false);
+  const [overlayRunning, setOverlayRunning] = useState(false);
+  const [impactResult, setImpactResult] = useState(null);
   const [resultMode, setResultMode] = useState('flood');
 
   const readyScenes = useMemo(() => scenes.filter(item => asStatus(item.status) === 'DONE'), [scenes]);
@@ -400,9 +499,50 @@ export default function FloodAnalysisWorkspace({
     () => doneFloodEvents.find(item => String(item.id) === String(selectedImpactEventId)) || doneFloodEvents[0] || null,
     [doneFloodEvents, selectedImpactEventId],
   );
+  const selectedSourceRegionTreeId = sourceRegionSelection.city || sourceRegionSelection.province || '';
+  const selectedPairRegionTreeId = pairRegionSelection.city || pairRegionSelection.province || '';
 
   const showMessage = useCallback((type, text) => {
     setMessage({ type, text });
+  }, []);
+
+  const loadRegionProvinces = useCallback(async () => {
+    setRegionLoading(true);
+    setRegionError('');
+    try {
+      const data = await getRegionChildren('1');
+      const provinces = data.children || [];
+      setSourceRegionOptions(prev => ({ ...prev, provinces }));
+      setPairRegionOptions(prev => ({ ...prev, provinces }));
+    } catch (error) {
+      setRegionError(getErrorText(error, '行政区加载失败'));
+    } finally {
+      setRegionLoading(false);
+    }
+  }, []);
+
+  const updateRegionProvince = useCallback(async (target, provinceTreeId) => {
+    const setSelection = target === 'source' ? setSourceRegionSelection : setPairRegionSelection;
+    const setOptions = target === 'source' ? setSourceRegionOptions : setPairRegionOptions;
+    setSelection({ province: provinceTreeId, city: '' });
+    setOptions(prev => ({ ...prev, cities: [] }));
+    if (!provinceTreeId) return;
+
+    setRegionLoading(true);
+    setRegionError('');
+    try {
+      const data = await getRegionChildren(provinceTreeId);
+      setOptions(prev => ({ ...prev, cities: data.children || [] }));
+    } catch (error) {
+      setRegionError(getErrorText(error, '行政区加载失败'));
+    } finally {
+      setRegionLoading(false);
+    }
+  }, []);
+
+  const updateRegionCity = useCallback((target, cityTreeId) => {
+    const setSelection = target === 'source' ? setSourceRegionSelection : setPairRegionSelection;
+    setSelection(prev => ({ ...prev, city: cityTreeId }));
   }, []);
 
   const loadStatusIds = useCallback(async () => {
@@ -461,14 +601,28 @@ export default function FloodAnalysisWorkspace({
     }
   }, [showMessage]);
 
+  const loadFloodProducts = useCallback(async () => {
+    setProductLoading(true);
+    try {
+      const res = (await getFloodProducts({ limit: LIST_PAGE_SIZE, offset: 0 })).data;
+      setFloodProducts(res.items || []);
+    } catch (error) {
+      setFloodProducts([]);
+      showMessage('error', `洪涝产品加载失败：${getErrorText(error)}`);
+    } finally {
+      setProductLoading(false);
+    }
+  }, [showMessage]);
+
   const refreshAll = useCallback(async () => {
     await Promise.all([
       loadStatusIds(),
       loadScenes(scenesPage),
       loadWaterResults(waterPage),
       loadFloodEvents(),
+      loadFloodProducts(),
     ]);
-  }, [loadFloodEvents, loadScenes, loadStatusIds, loadWaterResults, scenesPage, waterPage]);
+  }, [loadFloodEvents, loadFloodProducts, loadScenes, loadStatusIds, loadWaterResults, scenesPage, waterPage]);
 
   useEffect(() => {
     getSearchOptions()
@@ -479,8 +633,9 @@ export default function FloodAnalysisWorkspace({
         polarization: data.polarization || [],
       }))
       .catch(() => {});
+    loadRegionProvinces();
     refreshAll();
-  }, [refreshAll]);
+  }, [loadRegionProvinces, refreshAll]);
 
   useEffect(() => {
     if (!runningCount) return undefined;
@@ -504,12 +659,16 @@ export default function FloodAnalysisWorkspace({
     setRadarLoading(true);
     setRadarSearched(true);
     try {
+      if (sourceAoiMode === 'region' && !selectedSourceRegionTreeId) {
+        throw new Error('请选择用于筛选的行政区。');
+      }
       const criteria = normalizeRadarSearchCriteria(radarDraft, RADAR_SEARCH_DEFAULTS);
       const formData = buildRadarSearchFormData({
         limit: SEARCH_PAGE_SIZE,
         offset: page * SEARCH_PAGE_SIZE,
         criteria,
-        aoiMode: 'none',
+        aoiMode: sourceAoiMode,
+        regionTreeId: sourceAoiMode === 'region' ? selectedSourceRegionTreeId : '',
       });
       const data = await searchRadarData(formData);
       setRadarResults(data.items || []);
@@ -526,6 +685,9 @@ export default function FloodAnalysisWorkspace({
 
   const resetRadarSearch = () => {
     setRadarDraft({ ...RADAR_SEARCH_DEFAULTS });
+    setSourceAoiMode('none');
+    setSourceRegionSelection({ province: '', city: '' });
+    setSourceRegionOptions(prev => ({ ...prev, cities: [] }));
     setRadarResults([]);
     setRadarTotal(0);
     setRadarPage(0);
@@ -539,6 +701,35 @@ export default function FloodAnalysisWorkspace({
         ? prev.filter(row => row.id !== item.id)
         : [...prev, item]
     ));
+  };
+
+  const updateVisibleIdSet = (setter, itemId, visible) => {
+    setter(prev => {
+      const next = new Set(prev);
+      if (visible) next.add(String(itemId));
+      else next.delete(String(itemId));
+      return next;
+    });
+  };
+
+  const handleToggleSourceCoverage = (item) => {
+    const handler = floodPanel.onShowSourceSceneOnMap || floodPanel.onShowOnMap;
+    if (!handler) return;
+    const visible = handler(item);
+    if (typeof visible === 'boolean') {
+      updateVisibleIdSet(setSourceCoverageVisibleIds, item.id, visible);
+      showMessage(visible ? 'success' : 'info', visible ? `范围框 #${item.id} 已显示。` : `范围框 #${item.id} 已清除。`);
+    }
+  };
+
+  const handleToggleSourcePreview = (item) => {
+    const handler = floodPanel.onShowSourcePreviewOnMap || floodPanel.onShowSourceSceneOnMap || floodPanel.onShowOnMap;
+    if (!handler) return;
+    const visible = handler(item);
+    if (typeof visible === 'boolean') {
+      updateVisibleIdSet(setSourcePreviewVisibleIds, item.id, visible);
+      showMessage(visible ? 'success' : 'info', visible ? `源影像 #${item.id} 已显示。` : `源影像 #${item.id} 已清除。`);
+    }
   };
 
   const handleSubmitPreprocess = async () => {
@@ -615,17 +806,36 @@ export default function FloodAnalysisWorkspace({
     setPairSearching(true);
     setCandidatePairs([]);
     setSelectedPairIdx(null);
+    setPairSearchSummary(null);
     try {
-      const data = await searchFloodPairs({
-        pre_start: compactDate(pairPreStart),
-        pre_end: compactDate(pairPreEnd),
-        post_start: compactDate(pairPostStart),
-        post_end: compactDate(pairPostEnd),
-        overlap_threshold: Number(overlapThreshold) || 0,
+      if (!compactDate(disasterDate)) {
+        throw new Error('请选择灾害发生日期。');
+      }
+      if (!selectedPairRegionTreeId) {
+        throw new Error('请选择灾害影响位置。');
+      }
+      const data = await searchFloodDisasterPairs({
+        disaster_name: disasterName || undefined,
+        disaster_date: compactDate(disasterDate),
+        region_tree_id: selectedPairRegionTreeId,
+        pre_window_days: Number(preWindowDays) || 30,
+        post_window_days: Number(postWindowDays) || 30,
+        min_aoi_coverage_ratio: Number(minAoiCoverage) || 0,
+        min_pair_overlap_ratio: Number(overlapThreshold) || 0,
+        polarization: radarDraft.polarization || undefined,
+        imaging_mode: radarDraft.imaging_mode || undefined,
+        product_level: radarDraft.product_level || undefined,
+        require_same_polarization: true,
+        require_same_imaging_mode: false,
       });
-      setCandidatePairs(data.pairs || []);
-      setSelectedPairIdx(data.pairs?.length ? 0 : null);
-      showMessage(data.pairs?.length ? 'success' : 'warn', data.pairs?.length ? `找到 ${data.pairs.length} 组候选配对。` : '没有找到满足条件的配对。');
+      const pairs = data.candidate_pairs || data.pairs || [];
+      setPairSearchSummary(data.summary || null);
+      setCandidatePairs(pairs);
+      setSelectedPairIdx(pairs.length ? 0 : null);
+      showMessage(
+        pairs.length ? 'success' : 'warn',
+        pairs.length ? `找到 ${pairs.length} 组候选配对。` : (data.warnings?.[0] || '没有找到满足条件的配对。'),
+      );
     } catch (error) {
       showMessage('error', `配对推荐失败：${getErrorText(error)}`);
     } finally {
@@ -685,6 +895,80 @@ export default function FloodAnalysisWorkspace({
     }
   };
 
+  const handleShowPairCoverage = (pair) => {
+    if (!pair?.pre?.coverage_polygon || !pair?.post?.coverage_polygon) {
+      showMessage('warn', '该候选配对缺少覆盖范围，无法上图。');
+      return;
+    }
+    floodPanel.onShowFloodPairOnMap?.(pair);
+    showMessage('success', '候选配对覆盖范围已加载到地图。');
+  };
+
+  const handleShowFloodVector = () => {
+    if (!impactResult?.flood_vector_geojson) {
+      showMessage('warn', '该套合结果没有可用洪涝矢量。');
+      return;
+    }
+    floodPanel.onShowFloodVectorOnMap?.(impactResult);
+    showMessage('success', '洪涝矢量已加载到地图。');
+  };
+
+  const loadImpactResult = useCallback(async (detectionId, { silent = false } = {}) => {
+    if (!detectionId) return;
+    setImpactLoading(true);
+    try {
+      const data = await getFloodImpact(detectionId);
+      setImpactResult(data);
+      if (!silent && data?.warnings?.includes?.('overlay has not been run')) {
+        showMessage('warn', '该洪涝结果尚未运行套合分析。');
+      }
+    } catch (error) {
+      setImpactResult(null);
+      if (!silent) showMessage('error', `套合结果加载失败：${getErrorText(error)}`);
+    } finally {
+      setImpactLoading(false);
+    }
+  }, [showMessage]);
+
+  const handleRunOverlay = async () => {
+    if (readOnly || !selectedImpactEvent) return;
+    setOverlayRunning(true);
+    try {
+      await runFloodOverlay(selectedImpactEvent.id, { near_threshold_m: 500 });
+      await loadImpactResult(selectedImpactEvent.id, { silent: true });
+      await loadFloodEvents();
+      showMessage('success', `洪涝结果 #${selectedImpactEvent.id} 套合分析已完成。`);
+    } catch (error) {
+      showMessage('error', `套合分析失败：${getErrorText(error)}`);
+    } finally {
+      setOverlayRunning(false);
+    }
+  };
+
+  const handleCreateFloodProduct = async (event) => {
+    if (readOnly || !event) return;
+    setProductBusyId(event.id);
+    try {
+      await createFloodProduct(event.id);
+      await loadFloodProducts();
+      showMessage('success', `洪涝结果 #${event.id} 产品已生成。`);
+      setResultMode('products');
+    } catch (error) {
+      showMessage('error', `产品生成失败：${getErrorText(error)}`);
+    } finally {
+      setProductBusyId(null);
+    }
+  };
+
+  const handleOpenProductManifest = async (product) => {
+    try {
+      const manifest = await getFloodProductManifest(product.id || product.product_id);
+      showMessage('success', `Manifest 已读取：${manifest?.schema || product.product_id || product.id}`);
+    } catch (error) {
+      showMessage('error', `Manifest 读取失败：${getErrorText(error)}`);
+    }
+  };
+
   const handleToggleFloodLayer = (eventId, key, visible) => {
     setMapLayerVis(prev => ({ ...prev, [eventId]: { ...prev[eventId], [key]: visible } }));
     floodPanel.onToggleFloodLayer?.(eventId, key, visible);
@@ -692,8 +976,14 @@ export default function FloodAnalysisWorkspace({
 
   const handleSelectImpact = (event) => {
     setSelectedImpactEventId(String(event.id));
+    setImpactResult(null);
     setActiveView('impact');
   };
+
+  useEffect(() => {
+    if (activeView !== 'impact' || !selectedImpactEvent) return;
+    loadImpactResult(selectedImpactEvent.id, { silent: true });
+  }, [activeView, loadImpactResult, selectedImpactEvent]);
 
   const radarTotalPages = Math.ceil(radarTotal / SEARCH_PAGE_SIZE);
   const scenesTotalPages = Math.ceil(scenesTotal / LIST_PAGE_SIZE);
@@ -799,6 +1089,23 @@ export default function FloodAnalysisWorkspace({
                 {searchOptions.polarization.map(item => <option key={item} value={item}>{item}</option>)}
               </select>
             </div>
+            <div style={{ display: 'grid', gap: 6, marginBottom: 10 }}>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                <span style={{ color: palette.muted, fontSize: 12 }}>位置过滤</span>
+                <button type="button" style={buttonStyle(sourceAoiMode === 'none' ? 'primary' : 'quiet')} onClick={() => setSourceAoiMode('none')}>不限</button>
+                <button type="button" style={buttonStyle(sourceAoiMode === 'region' ? 'primary' : 'quiet', regionLoading)} disabled={regionLoading} onClick={() => setSourceAoiMode('region')}>行政区</button>
+              </div>
+              {sourceAoiMode === 'region' && (
+                <RegionSelector
+                  options={sourceRegionOptions}
+                  selection={sourceRegionSelection}
+                  onProvinceChange={value => updateRegionProvince('source', value)}
+                  onCityChange={value => updateRegionCity('source', value)}
+                  disabled={regionLoading}
+                />
+              )}
+              {regionError && <div style={{ color: palette.red, fontSize: 11 }}>{regionError}</div>}
+            </div>
 
             <div style={{ display: 'grid', gap: 6 }}>
               {!radarSearched && <EmptyState>输入条件后查询入库雷达数据。</EmptyState>}
@@ -807,6 +1114,8 @@ export default function FloodAnalysisWorkspace({
                 const selected = selectedRadars.some(row => row.id === item.id);
                 const done = doneRadarIds.includes(item.id);
                 const active = activeRadarIds.includes(item.id);
+                const coverageVisible = sourceCoverageVisibleIds.has(String(item.id));
+                const previewVisible = sourcePreviewVisibleIds.has(String(item.id));
                 return (
                   <div key={item.id} style={{ ...rowStyle, background: selected ? '#eff6ff' : palette.panel }}>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'center' }}>
@@ -822,14 +1131,32 @@ export default function FloodAnalysisWorkspace({
                           {[item.imaging_mode, item.product_level, item.polarization].filter(Boolean).join(' · ') || '-'}
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        style={buttonStyle(selected ? 'success' : 'primary', done || active)}
-                        disabled={done || active}
-                        onClick={() => toggleRadarSelection(item)}
-                      >
-                        {selected ? '已选' : '选择'}
-                      </button>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                        <button
+                          type="button"
+                          style={buttonStyle(coverageVisible ? 'success' : 'quiet', !item.coverage_polygon)}
+                          disabled={!item.coverage_polygon}
+                          onClick={() => handleToggleSourceCoverage(item)}
+                        >
+                          {coverageVisible ? '清除范围' : '显示范围'}
+                        </button>
+                        <button
+                          type="button"
+                          style={buttonStyle(previewVisible ? 'success' : 'secondary', !(item.min_lat != null && item.max_lat != null && item.min_lon != null && item.max_lon != null))}
+                          disabled={!(item.min_lat != null && item.max_lat != null && item.min_lon != null && item.max_lon != null)}
+                          onClick={() => handleToggleSourcePreview(item)}
+                        >
+                          {previewVisible ? '清除源影像' : '显示源影像'}
+                        </button>
+                        <button
+                          type="button"
+                          style={buttonStyle(selected ? 'success' : 'primary', done || active)}
+                          disabled={done || active}
+                          onClick={() => toggleRadarSelection(item)}
+                        >
+                          {selected ? '已选' : '选择'}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -911,19 +1238,47 @@ export default function FloodAnalysisWorkspace({
                 </>
               )}
             />
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8 }}>
-              <UnifiedDatePicker value={pairPreStart} onChange={setPairPreStart} placeholder="灾前开始" language={language} />
-              <UnifiedDatePicker value={pairPreEnd} onChange={setPairPreEnd} placeholder="灾前结束" language={language} />
-              <UnifiedDatePicker value={pairPostStart} onChange={setPairPostStart} placeholder="灾后开始" language={language} />
-              <UnifiedDatePicker value={pairPostEnd} onChange={setPairPostEnd} placeholder="灾后结束" language={language} />
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: palette.text2, fontSize: 12 }}>
-                重叠阈值
-                <input type="number" min="0" max="1" step="0.05" value={overlapThreshold} onChange={event => setOverlapThreshold(event.target.value)} style={{ ...inputStyle, width: 80 }} />
-              </label>
+            <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                <input value={disasterName} onChange={event => setDisasterName(event.target.value)} placeholder="灾害名称（可选）" style={inputStyle} />
+                <UnifiedDatePicker value={disasterDate} onChange={setDisasterDate} placeholder="灾害发生日期" language={language} />
+              </div>
+              <RegionSelector
+                options={pairRegionOptions}
+                selection={pairRegionSelection}
+                onProvinceChange={value => updateRegionProvince('pair', value)}
+                onCityChange={value => updateRegionCity('pair', value)}
+                disabled={regionLoading}
+              />
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 6 }}>
+                <label style={{ color: palette.text2, fontSize: 12 }}>
+                  灾前窗口（天）
+                  <input type="number" min="1" max="365" value={preWindowDays} onChange={event => setPreWindowDays(event.target.value)} style={inputStyle} />
+                </label>
+                <label style={{ color: palette.text2, fontSize: 12 }}>
+                  灾后窗口（天）
+                  <input type="number" min="1" max="365" value={postWindowDays} onChange={event => setPostWindowDays(event.target.value)} style={inputStyle} />
+                </label>
+                <label style={{ color: palette.text2, fontSize: 12 }}>
+                  AOI覆盖
+                  <input type="number" min="0" max="1" step="0.05" value={minAoiCoverage} onChange={event => setMinAoiCoverage(event.target.value)} style={inputStyle} />
+                </label>
+                <label style={{ color: palette.text2, fontSize: 12 }}>
+                  配对重叠
+                  <input type="number" min="0" max="1" step="0.05" value={overlapThreshold} onChange={event => setOverlapThreshold(event.target.value)} style={inputStyle} />
+                </label>
+              </div>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: palette.text2, fontSize: 12 }}>
                 <input type="checkbox" checked={refine} onChange={event => setRefine(event.target.checked)} style={{ accentColor: palette.primary }} />
                 MRF 精化
               </label>
+              {pairSearchSummary && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+                  <KeyValue label="灾前匹配池" value={String(pairSearchSummary.pre_pool_count || 0)} />
+                  <KeyValue label="灾后匹配池" value={String(pairSearchSummary.post_pool_count || 0)} />
+                  <KeyValue label="候选配对" value={String(pairSearchSummary.candidate_count || 0)} strong />
+                </div>
+              )}
             </div>
             <div style={{ display: 'grid', gap: 8 }}>
               {candidatePairs.length === 0 && <EmptyState>暂无候选配对。</EmptyState>}
@@ -946,12 +1301,37 @@ export default function FloodAnalysisWorkspace({
                       <strong>#{pair.pre.id} {formatYmd(pair.pre.imaging_date, language)}</strong>
                       <span style={{ color: palette.muted }}>{'->'}</span>
                       <strong>#{pair.post.id} {formatYmd(pair.post.imaging_date, language)}</strong>
+                      {pair.score != null && <StatusBadge tone="info">评分 {Number(pair.score).toFixed(2)}</StatusBadge>}
                       <StatusBadge tone={active ? 'info' : 'muted'}>{active ? '已选' : '候选'}</StatusBadge>
                     </div>
                     <div style={{ color: palette.muted, fontSize: 11, marginTop: 5 }}>
-                      重叠 {(Number(pair.overlap_ratio || 0) * 100).toFixed(1)}%
+                      配对重叠 {formatPercent(pair.overlap_ratio)}
+                      {pair.aoi_coverage_ratio != null ? ` · AOI覆盖 ${formatPercent(pair.aoi_coverage_ratio)}` : ''}
                       {pair.time_diff_days != null ? ` · 间隔 ${pair.time_diff_days} 天` : ''}
+                      {pair.pre_delta_days != null ? ` · 灾前 ${pair.pre_delta_days} 天` : ''}
+                      {pair.post_delta_days != null ? ` · 灾后 ${pair.post_delta_days} 天` : ''}
                       {pair.pre.satellite ? ` · ${pair.pre.satellite}` : ''}
+                      {pair.pre.polarization ? ` · ${pair.pre.polarization}` : ''}
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        style={buttonStyle('secondary', false, { display: 'inline-flex', padding: '3px 8px', fontSize: 11 })}
+                        onClick={event => {
+                          event.stopPropagation();
+                          handleShowPairCoverage(pair);
+                        }}
+                        onKeyDown={event => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            handleShowPairCoverage(pair);
+                          }
+                        }}
+                      >
+                        预览覆盖
+                      </span>
                     </div>
                   </button>
                 );
@@ -973,6 +1353,8 @@ export default function FloodAnalysisWorkspace({
                   onShowMap={handleShowFloodEvent}
                   onToggleLayer={handleToggleFloodLayer}
                   onSelectImpact={handleSelectImpact}
+                  onCreateProduct={handleCreateFloodProduct}
+                  productBusy={productBusyId === event.id}
                 />
               ))}
             </div>
@@ -983,15 +1365,18 @@ export default function FloodAnalysisWorkspace({
       {activeView === 'impact' && (
         <main>
           <section style={{ ...sectionStyle, borderTop: 'none' }}>
-            <SectionHeader title="套合对象" />
+            <SectionHeader
+              title="套合对象"
+              actions={<button type="button" style={buttonStyle('quiet', impactLoading)} disabled={impactLoading || !selectedImpactEvent} onClick={() => selectedImpactEvent && loadImpactResult(selectedImpactEvent.id)}>刷新结果</button>}
+            />
             <div style={{ display: 'grid', gap: 8 }}>
               {[
                 ['洪涝分类栅格', selectedImpactEvent ? `结果 #${selectedImpactEvent.id}` : '请选择结果', selectedImpactEvent ? 'ok' : 'muted'],
-                ['灾害点', '已有底库', 'ok'],
-                ['洪涝矢量化', '待接入', 'warn'],
-                ['行政区统计', '待接入', 'muted'],
-                ['当前 AOI', '待接入', 'muted'],
-                ['自定义矢量', '待接入', 'muted'],
+                ['洪涝矢量化', impactResult?.warnings?.includes?.('overlay has not been run') ? '未生成' : (impactResult ? '已生成' : '待运行'), impactResult && !impactResult?.warnings?.includes?.('overlay has not been run') ? 'ok' : 'warn'],
+                ['灾害点命中', impactResult ? `${impactResult.hazard_points?.inside_flood?.length || 0} 个` : '待运行', impactResult ? 'ok' : 'muted'],
+                ['近洪涝风险点', impactResult ? `${impactResult.hazard_points?.near_flood?.length || 0} 个` : '待运行', impactResult ? 'info' : 'muted'],
+                ['DInSAR关联', impactResult ? `${impactResult.dinsar_products?.length || 0} 个` : '待运行', impactResult ? 'info' : 'muted'],
+                ['行政区统计', impactResult?.affected_aois?.length ? `${impactResult.affected_aois.length} 个` : '暂无数据', impactResult ? 'muted' : 'muted'],
               ].map(([name, status, tone]) => (
                 <div key={name} style={{ ...rowStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                   <strong>{name}</strong>
@@ -1035,9 +1420,68 @@ export default function FloodAnalysisWorkspace({
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
               <button type="button" style={buttonStyle('secondary', !selectedImpactEvent)} disabled={!selectedImpactEvent} onClick={() => selectedImpactEvent && handleShowFloodEvent(selectedImpactEvent)}>加载洪涝图层</button>
-              <button type="button" style={buttonStyle('quiet', true)} disabled>运行套合分析</button>
+              <button type="button" style={buttonStyle('secondary', !impactResult?.flood_vector_geojson)} disabled={!impactResult?.flood_vector_geojson} onClick={handleShowFloodVector}>加载洪涝矢量</button>
+              <button type="button" style={buttonStyle('primary', readOnly || !selectedImpactEvent || overlayRunning)} disabled={readOnly || !selectedImpactEvent || overlayRunning} onClick={handleRunOverlay}>
+                {overlayRunning ? '套合中' : '运行套合分析'}
+              </button>
               <button type="button" style={buttonStyle('quiet', true)} disabled>导出影响清单</button>
             </div>
+          </section>
+
+          <section style={sectionStyle}>
+            <SectionHeader title="套合结果" />
+            {impactLoading && <EmptyState>套合结果加载中...</EmptyState>}
+            {!impactLoading && !impactResult && <EmptyState>选择一个已完成的洪涝结果后运行套合分析。</EmptyState>}
+            {!impactLoading && impactResult && (
+              <div style={{ display: 'grid', gap: 10 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 8 }}>
+                  <KeyValue label="洪涝面积" value={formatArea(impactResult.flood_area_km2)} strong />
+                  <KeyValue label="命中灾害点" value={String(impactResult.hazard_points?.inside_flood?.length || 0)} strong />
+                  <KeyValue label="近洪涝风险点" value={String(impactResult.hazard_points?.near_flood?.length || 0)} />
+                  <KeyValue label="DInSAR产品" value={String(impactResult.dinsar_products?.length || 0)} />
+                  <KeyValue label="影响行政区" value={String(impactResult.affected_aois?.length || 0)} />
+                </div>
+                {impactResult.warnings?.length > 0 && (
+                  <div style={{ color: palette.amber, fontSize: 11 }}>
+                    {impactResult.warnings.join('；')}
+                  </div>
+                )}
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {(impactResult.hazard_points?.inside_flood || []).slice(0, 5).map(point => (
+                    <div key={`inside_${point.id}`} style={rowStyle}>
+                      <strong>{point.name || `灾害点 #${point.id}`}</strong>
+                      <div style={{ color: palette.muted, fontSize: 11, marginTop: 4 }}>
+                        洪涝范围内 · {[point.type, point.city, point.county].filter(Boolean).join(' / ') || '-'}
+                      </div>
+                    </div>
+                  ))}
+                  {(impactResult.hazard_points?.near_flood || []).slice(0, 5).map(point => (
+                    <div key={`near_${point.id}`} style={rowStyle}>
+                      <strong>{point.name || `灾害点 #${point.id}`}</strong>
+                      <div style={{ color: palette.muted, fontSize: 11, marginTop: 4 }}>
+                        距洪涝范围 {point.distance_m ?? '-'} m · {[point.type, point.city, point.county].filter(Boolean).join(' / ') || '-'}
+                      </div>
+                    </div>
+                  ))}
+                  {(impactResult.dinsar_products || []).slice(0, 5).map(product => (
+                    <div key={`dinsar_${product.id || product.product_id}`} style={rowStyle}>
+                      <strong>{product.display_name || product.product_id}</strong>
+                      <div style={{ color: palette.muted, fontSize: 11, marginTop: 4 }}>
+                        {product.engine || '-'} · 形变 {product.deformation_mm ?? '-'} mm · AI {product.ai_score ?? '-'}
+                      </div>
+                    </div>
+                  ))}
+                  {(impactResult.affected_aois || []).slice(0, 5).map(aoi => (
+                    <div key={`aoi_${aoi.tree_id || aoi.name}`} style={rowStyle}>
+                      <strong>{aoi.name || aoi.tree_id}</strong>
+                      <div style={{ color: palette.muted, fontSize: 11, marginTop: 4 }}>
+                        {aoi.level || '-'} · 受淹面积 {formatArea(aoi.flood_area_km2)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
         </main>
       )}
@@ -1051,6 +1495,7 @@ export default function FloodAnalysisWorkspace({
                 <>
                   <button type="button" style={buttonStyle(resultMode === 'flood' ? 'primary' : 'quiet')} onClick={() => setResultMode('flood')}>洪涝</button>
                   <button type="button" style={buttonStyle(resultMode === 'water' ? 'primary' : 'quiet')} onClick={() => setResultMode('water')}>水体</button>
+                  <button type="button" style={buttonStyle(resultMode === 'products' ? 'primary' : 'quiet')} onClick={() => setResultMode('products')}>产品</button>
                   <button type="button" style={buttonStyle('secondary')} onClick={refreshAll}>刷新</button>
                 </>
               )}
@@ -1067,6 +1512,8 @@ export default function FloodAnalysisWorkspace({
                     onShowMap={handleShowFloodEvent}
                     onToggleLayer={handleToggleFloodLayer}
                     onSelectImpact={handleSelectImpact}
+                    onCreateProduct={handleCreateFloodProduct}
+                    productBusy={productBusyId === event.id}
                   />
                 ))}
               </div>
@@ -1079,13 +1526,22 @@ export default function FloodAnalysisWorkspace({
                 ))}
               </div>
             )}
+            {resultMode === 'products' && (
+              <div style={{ display: 'grid', gap: 8 }}>
+                {productLoading && <EmptyState>洪涝产品加载中...</EmptyState>}
+                {!productLoading && floodProducts.length === 0 && <EmptyState>暂无洪涝产品。可在洪涝结果行点击“生成产品”。</EmptyState>}
+                {!productLoading && floodProducts.map(product => (
+                  <FloodProductRow key={product.id || product.product_id} product={product} onOpenManifest={handleOpenProductManifest} />
+                ))}
+              </div>
+            )}
           </section>
 
           <section style={sectionStyle}>
             <SectionHeader title="产品出口" />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
-              <button type="button" style={buttonStyle('quiet', true)} disabled>GeoTIFF</button>
-              <button type="button" style={buttonStyle('quiet', true)} disabled>GeoJSON</button>
+              <button type="button" style={buttonStyle('secondary')} onClick={() => setResultMode('products')}>产品列表</button>
+              <button type="button" style={buttonStyle('quiet', true)} disabled>GeoJSON 导出</button>
               <button type="button" style={buttonStyle('quiet', true)} disabled>报告</button>
             </div>
           </section>

@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.schema import CreateColumn
+from sqlalchemy.schema import CreateColumn, CreateIndex
 
 from .config import read_bool_env, settings
 
@@ -23,8 +23,11 @@ POSTGIS_VIEWS = {
 }
 
 ALLOWED_EXTRA_TABLES = {
+    "alembic_version",
     "spatial_query_logs",
 }
+
+ALEMBIC_HEAD_REVISION = "0004"
 
 MIGRATION_FILES = [
     "001_st_intersection_agg.sql",
@@ -337,6 +340,50 @@ def _add_missing_columns(conn, inspector, base, dialect) -> List[str]:
     return added_columns
 
 
+def _create_missing_indexes(conn, inspector, base, dialect) -> List[str]:
+    created_indexes: List[str] = []
+    existing_tables = set(inspector.get_table_names())
+    for table_name, table in base.metadata.tables.items():
+        if table_name not in existing_tables:
+            continue
+
+        current_indexes = {index["name"] for index in inspector.get_indexes(table_name)}
+        for index in sorted(table.indexes, key=lambda item: item.name or ""):
+            if not index.name or index.name in current_indexes:
+                continue
+            try:
+                index_sql = str(CreateIndex(index).compile(dialect=dialect))
+                conn.exec_driver_sql(index_sql)
+                created_indexes.append(index.name)
+                current_indexes.add(index.name)
+            except Exception as exc:
+                print(f"[WARN] Failed to create index {table_name}.{index.name}: {exc}")
+    return created_indexes
+
+
+def _ensure_alembic_version_marker(conn, revision: str = ALEMBIC_HEAD_REVISION) -> Dict[str, Any]:
+    status: Dict[str, Any] = {"revision": revision, "created": False, "updated": False}
+    conn.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS alembic_version (
+            version_num VARCHAR(32) NOT NULL
+        )
+        """
+    )
+    rows = conn.execute(text("SELECT version_num FROM alembic_version")).fetchall()
+    previous = [row[0] for row in rows]
+    status["previous"] = previous
+    if not rows:
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:revision)"), {"revision": revision})
+        status["created"] = True
+        return status
+    if previous != [revision] or len(rows) != 1:
+        conn.execute(text("DELETE FROM alembic_version"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:revision)"), {"revision": revision})
+        status["updated"] = True
+    return status
+
+
 def _resolve_hazard_shapefile() -> str:
     hazard_dir = settings.HAZARD_POINTS_DIR
     hazard_filename = settings.HAZARD_POINTS_FILENAME or "Point.shp"
@@ -513,6 +560,8 @@ def ensure_database_ready(
         "mismatch_detected": False,
         "mismatch_reasons": [],
         "added_columns": [],
+        "created_indexes": [],
+        "alembic_version": None,
         "applied_sql_files": [],
         "admin": None,
         "hazard_seed": None,
@@ -545,16 +594,26 @@ def ensure_database_ready(
                     base.metadata.create_all(bind=conn)
                     inspector = inspect(conn)
                     result["added_columns"] = _add_missing_columns(conn, inspector, base, engine.dialect)
+                    inspector = inspect(conn)
+                    result["created_indexes"] = _create_missing_indexes(conn, inspector, base, engine.dialect)
                 if bootstrap_required:
                     result["bootstrap_initialized"] = True
             else:
                 base.metadata.create_all(bind=conn)
+                inspector = inspect(conn)
+                result["created_indexes"] = _create_missing_indexes(conn, inspector, base, engine.dialect)
 
             migrations_dir = os.path.join(project_root(), "backend", "migrations")
             for migration_file in MIGRATION_FILES:
                 migration_path = os.path.join(migrations_dir, migration_file)
                 if _apply_sql_file(conn, migration_path):
                     result["applied_sql_files"].append(migration_file)
+
+            final_diagnostics = inspect_database_structure(conn)
+            if not final_diagnostics.get("mismatch"):
+                result["alembic_version"] = _ensure_alembic_version_marker(conn)
+            else:
+                result["post_maintenance_mismatch_reasons"] = final_diagnostics.get("reasons", [])
 
         session = Session()
         try:

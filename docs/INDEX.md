@@ -36,8 +36,11 @@
 - [PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md](PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md)
   多引擎结果目录、发布结构和 catalog 治理设计。
 
+- [FLOOD_GEOTIFF_GAMMA_PREPROCESS_DESIGN_20260515.md](FLOOD_GEOTIFF_GAMMA_PREPROCESS_DESIGN_20260515.md)
+  洪涝模块 GeoTIFF 化与 GAMMA 前处理评估，定义“原始数据到分析级 TIF 由可插拔处理器完成，水体/洪涝算法只运行在 GeoTIFF 层”的当前技术决策。
+
 - [FLOOD_DISASTER_ANALYSIS_SYSTEM_DESIGN_20260514.md](FLOOD_DISASTER_ANALYSIS_SYSTEM_DESIGN_20260514.md)
-  洪涝灾害分析独立系统设计，定义多源 SAR 数据、ENVI/SARscape 洪涝流程、标准产品包和矢量套合分析边界。
+  洪涝灾害分析独立系统早期设计，保留工作台、产品包和矢量套合分析边界；其中 ENVI/SARscape 作为洪涝主线的表述已被 2026-05-15 GeoTIFF 化设计取代。
 
 - [WSL_RUNTIME_REFACTOR_DESIGN_20260422.md](WSL_RUNTIME_REFACTOR_DESIGN_20260422.md)
   WSL 共享运行时和 Broker 设计。
@@ -50,15 +53,18 @@
 
 ## 3. 时序 InSAR / SBAS
 
-- [ISCE2_SBAS_TIMESERIES_DESIGN.md](ISCE2_SBAS_TIMESERIES_DESIGN.md)
-- [ISCE2_SBAS_PRODUCT_SPEC.md](ISCE2_SBAS_PRODUCT_SPEC.md)
-- [ISCE2_SBAS_ENGINEERING_DESIGN_20260428.md](ISCE2_SBAS_ENGINEERING_DESIGN_20260428.md)
-  Current-phase engineering design for the managed ISCE2 + MintPy SBAS route.
+- [SBAS_INSAR_PRODUCTION_PIPELINE_DESIGN_20260519.md](SBAS_INSAR_PRODUCTION_PIPELINE_DESIGN_20260519.md)
+  Gamma/LT1 SBAS-InSAR 独立生产页面与统一流水线收口设计。
+- [TIMESERIES_LEGACY_DEPRECATION_20260521.md](TIMESERIES_LEGACY_DEPRECATION_20260521.md)
+  旧 ISCE2/MintPy 时序生产链路停用记录，定义当前入口隐藏、配置默认关闭和后续物理删除条件。
+- [GAMMA_IPTA_LT1_SBAS_TRIAL_RUNBOOK_20260518.md](GAMMA_IPTA_LT1_SBAS_TRIAL_RUNBOOK_20260518.md)
+  Gamma 官方 DIFF + IPTA 路径处理 LT1 数据的本地试验记录、产物和符号约定。
 
 说明：
 
-- 当前前端顶级显示名已经统一为“时序 InSAR”。
-- 当前默认接入仍然是 SBAS 路径，因此这两份文档仍然有效。
+- 当前 SBAS-InSAR 生产主线是 Gamma 独立生产页面，不再使用旧 ISCE2/MintPy 时序生产页作为入口。
+- 旧 `timeseries-production` 后端、旧前端面板和 `ps_timeseries_runs` 相关结构暂时保留兼容，但默认关闭。
+- `ISCE2_SBAS_TIMESERIES_DESIGN.md`、`ISCE2_SBAS_PRODUCT_SPEC.md`、`ISCE2_SBAS_ENGINEERING_DESIGN_20260428.md` 仅作为历史参考，不再作为当前生产事实依据。
 - `SBAS_*` 命名的一批旧文档已经归档，只保留历史追溯价值。
 
 ## 4. 配对与前端导航
@@ -130,4 +136,5 @@
 - 已归档的 `项目汇报.md`
 - 已归档的各类 `*_EXPERIMENT_*` / `*_PROGRESS_*` / `*_TODO_*`
 
-最后更新：2026-05-12
+最后更新：2026-05-15
+最近修订：2026-05-21

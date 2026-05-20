@@ -1,14 +1,5 @@
 import apiClient from './client';
 
-export const getFloodSources = (params = {}) =>
-  apiClient.get('/flood/sources', { params });
-
-export const refreshFloodSources = () =>
-  apiClient.post('/flood/sources/refresh');
-
-export const getFloodSourceReadiness = (id) =>
-  apiClient.get(`/flood/sources/${id}/readiness`);
-
 export const submitFloodPreprocess = (payload) =>
   apiClient.post('/flood/preprocess', payload);
 
@@ -33,26 +24,11 @@ export const getFloodWaterExtractions = (limit = 20, offset = 0, status = null) 
 export const getFloodWaterExtractionPreview = (id) =>
   apiClient.get(`/flood/water-extractions/${id}/preview`).then(r => r.data);
 
-export const getFloodPreprocessRuns = (params = {}) =>
-  apiClient.get('/flood/preprocess-runs', { params });
-
-export const getFloodReadyProducts = (params = {}) =>
-  apiClient.get('/flood/ready-products', { params });
-
-export const getFloodReadyProductPreview = (id) =>
-  apiClient.get(`/flood/ready-products/${id}/preview`).then(r => r.data);
-
 export const searchFloodPairs = (payload) =>
-  apiClient.post('/flood/pairs/search', payload);
+  apiClient.post('/flood/pairs/search', payload).then(r => r.data);
 
-export const saveFloodPair = (payload) =>
-  apiClient.post('/flood/pairs', payload);
-
-export const getFloodPairs = (params = {}) =>
-  apiClient.get('/flood/pairs', { params });
-
-export const deleteFloodPair = (id) =>
-  apiClient.delete(`/flood/pairs/${id}`);
+export const searchFloodDisasterPairs = (payload) =>
+  apiClient.post('/flood/disaster-pairs/search', payload).then(r => r.data);
 
 export const submitFloodDetection = (payload) =>
   apiClient.post('/flood/detections', payload);
@@ -60,20 +36,26 @@ export const submitFloodDetection = (payload) =>
 export const getFloodDetections = (params = {}) =>
   apiClient.get('/flood/detections', { params });
 
-export const getFloodDetection = (id) =>
-  apiClient.get(`/flood/detections/${id}`);
-
 export const getFloodDetectionPreview = (id, layer) =>
   apiClient.get(`/flood/detections/${id}/preview/${layer}`).then(r => r.data);
-
-export const vectorizeFloodDetection = (id, payload = {}) =>
-  apiClient.post(`/flood/detections/${id}/vectorize`, payload);
 
 export const runFloodOverlay = (id, payload = {}) =>
   apiClient.post(`/flood/detections/${id}/overlay`, payload);
 
 export const getFloodImpact = (id) =>
   apiClient.get(`/flood/detections/${id}/impact`).then(r => r.data);
+
+export const createFloodProduct = (detectionId) =>
+  apiClient.post(`/flood/detections/${detectionId}/products`);
+
+export const getFloodProducts = (params = {}) =>
+  apiClient.get('/flood/products', { params });
+
+export const getFloodProduct = (id) =>
+  apiClient.get(`/flood/products/${id}`);
+
+export const getFloodProductManifest = (id) =>
+  apiClient.get(`/flood/products/${id}/manifest`).then(r => r.data);
 
 export const getFloodResults = (params = {}) =>
   apiClient.get('/flood/results', { params });
@@ -83,9 +65,3 @@ export const getFloodResult = (id) =>
 
 export const getFloodResultManifest = (id) =>
   apiClient.get(`/flood/results/${id}/manifest`).then(r => r.data);
-
-export const createFloodReport = (payload) =>
-  apiClient.post('/flood/reports', payload);
-
-export const getFloodReport = (id) =>
-  apiClient.get(`/flood/reports/${id}`).then(r => r.data);

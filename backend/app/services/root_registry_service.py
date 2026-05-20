@@ -237,6 +237,15 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
     )
     specs.extend(
         _iter_multi_root_specs(
+            env_var="GF3_ARCHIVE_SOURCE_DIRS",
+            paths=split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS),
+            root_role="source_pool_gf3_archive",
+            display_prefix="GF3 Archive Pool",
+            scan_mode="archive_walk",
+        )
+    )
+    specs.extend(
+        _iter_multi_root_specs(
             env_var="GF3_SOURCE_DIRS",
             paths=split_env_paths(settings.GF3_SOURCE_DIRS),
             root_role="source_pool_gf3_input",
@@ -251,6 +260,24 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
             root_role="source_pool_gf3_output",
             display_prefix="GF3 Output Pool",
             scan_mode="scene_directory",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
+            env_var="SAR_ANALYSIS_READY_ROOT",
+            path=settings.SAR_ANALYSIS_READY_ROOT,
+            root_role="sar_analysis_ready",
+            display_name="SAR Analysis-ready GeoTIFF Root",
+            scan_mode="scene_directory",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
+            env_var="SAR_ANALYSIS_WORK_ROOT",
+            path=settings.SAR_ANALYSIS_WORK_ROOT,
+            root_role="sar_analysis_work",
+            display_name="SAR Analysis Work Root",
+            scan_mode="directory_walk",
         )
     )
     orbit_source_paths = split_env_paths(settings.ORBIT_SOURCE_DIRS)

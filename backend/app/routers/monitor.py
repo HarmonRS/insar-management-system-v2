@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from ..config import read_int_env
+from ..config import read_int_env, settings, split_env_paths
 from ..database import get_db
 from ..models import AuthUserORM, SystemTaskORM, TaskLogORM
 from ..scheduler import MONITOR_CONFIG
@@ -41,9 +41,21 @@ class MonitorConfig(BaseModel):
     radar_dirs: List[str] = []
     orbit_dir: Optional[str] = None
     dinsar_dirs: List[str] = []
+    gf3_archive_source_dirs: List[str] = []
     gf3_source_dirs: List[str] = []
     gf3_storage_dirs: List[str] = []
     # Manual-only: config is read from .env
+
+
+class GF3UnpackConfig(BaseModel):
+    source_dirs: List[str] = []
+    target_dirs: List[str] = []
+    archive_exts: List[str] = []
+    delete_archive: bool = False
+
+
+class GF3UnpackRunRequest(BaseModel):
+    max_files_per_run: Optional[int] = Field(default=None, ge=0)
 
 
 @router.post("/monitor/config")
@@ -136,6 +148,56 @@ async def run_gf3_batch_process(admin_user: AuthUserORM = Depends(_require_admin
         )
         return {
             "message": "GF3 批量处理任务已提交",
+            "task_id": task_id,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.get("/monitor/gf3-unpack/config")
+async def get_gf3_unpack_config(admin_user: AuthUserORM = Depends(_require_admin)):
+    return GF3UnpackConfig(
+        source_dirs=MONITOR_CONFIG.get("gf3_archive_source_dirs") or [],
+        target_dirs=MONITOR_CONFIG.get("gf3_source_dirs") or [],
+        archive_exts=split_env_paths(settings.GF3_ARCHIVE_EXTS),
+        delete_archive=bool(settings.GF3_UNPACK_DELETE_ARCHIVE),
+    )
+
+
+@router.post("/monitor/gf3-unpack", status_code=202)
+async def run_gf3_unpack(
+    request_data: GF3UnpackRunRequest | None = None,
+    admin_user: AuthUserORM = Depends(_require_admin),
+):
+    """
+    将 GF3 压缩包池解包到 GF3_SOURCE_DIRS，作为后续 L1A→L2 预处理输入。
+    """
+    gf3_archive_source_dirs = MONITOR_CONFIG.get("gf3_archive_source_dirs") or []
+    gf3_source_dirs = MONITOR_CONFIG.get("gf3_source_dirs") or []
+    if not gf3_archive_source_dirs:
+        raise HTTPException(status_code=400, detail="GF3_ARCHIVE_SOURCE_DIRS is not configured.")
+    if not gf3_source_dirs:
+        raise HTTPException(status_code=400, detail="GF3_SOURCE_DIRS is not configured.")
+
+    max_files = None
+    if request_data is not None and request_data.max_files_per_run is not None:
+        max_files = max(0, int(request_data.max_files_per_run))
+
+    task_type = "GF3_UNPACK"
+    task_name = "GF3 压缩包解包"
+    payload = {
+        "source_dirs": gf3_archive_source_dirs,
+        "target_dirs": gf3_source_dirs,
+        "archive_exts": split_env_paths(settings.GF3_ARCHIVE_EXTS),
+    }
+    if max_files is not None:
+        payload["max_files_per_run"] = max_files
+
+    try:
+        task_id = await task_service.create_task(task_type, task_name, params=payload)
+        await job_queue_service.create_job(task_type, payload=payload, task_id=task_id)
+        return {
+            "message": "GF3 解包任务已提交",
             "task_id": task_id,
         }
     except ValueError as e:
