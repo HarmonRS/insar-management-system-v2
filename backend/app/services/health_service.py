@@ -1272,6 +1272,7 @@ async def _check_wsl_runtime() -> Dict[str, Any]:
         required_by_engine = {
             "isce2": bool(settings.ISCE2_ENABLED or settings.TIMESERIES_ENABLED),
             "pyint": bool(settings.PYINT_ENABLED),
+            "gamma": bool(settings.GAMMA_SBAS_ENABLED),
         }
         for runtime in wsl_runtime_registry.runtimes.values():
             required = bool(required_by_engine.get(runtime.engine_code, False))
@@ -1285,6 +1286,9 @@ async def _check_wsl_runtime() -> Dict[str, Any]:
             distro_matches_shared = str(runtime.distro or "").strip() == str(
                 wsl_runtime_registry.shared_distro or ""
             ).strip()
+            if runtime.engine_code == "gamma":
+                python_matches_shared = bool(str(runtime.python_path or "").strip())
+                distro_matches_shared = bool(str(runtime.distro or "").strip())
             runtime_ok = runner_exists and python_matches_shared and distro_matches_shared
             if env_profile_exists is False and required:
                 runtime_ok = False

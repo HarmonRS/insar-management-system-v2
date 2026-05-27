@@ -190,6 +190,16 @@ async def lifespan(app: FastAPI):
     )
     if pairing_bootstrap.get("error"):
         print(f">>> [Pairing] Startup bootstrap failed: {pairing_bootstrap['error']}")
+    print(
+        ">>> [Gamma SBAS] enabled={0} runtime={1} distro={2} python={3} work_root={4} product_root={5}".format(
+            "YES" if settings.GAMMA_SBAS_ENABLED else "NO",
+            settings.GAMMA_SBAS_RUNTIME_ID or "?",
+            settings.GAMMA_SBAS_WSL_DISTRO or "?",
+            settings.GAMMA_SBAS_PYTHON or "?",
+            settings.GAMMA_SBAS_WORK_ROOT or "?",
+            settings.GAMMA_SBAS_PRODUCT_ROOT or "?",
+        )
+    )
 
     # 当前项目默认 Manual-only 扫描模式，保留调度器关闭状态。
     # scheduler_manager.start()

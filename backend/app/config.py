@@ -308,6 +308,25 @@ class Settings(BaseSettings):
     PYINT_GAMMA_ENV_SCRIPT: str = ""
     PYINT_DEFAULT_TIMEOUT_SECONDS: int = 43200
     PYINT_SMOKE_TEST_ENABLED: bool = False
+
+    GAMMA_SBAS_ENABLED: bool = True
+    GAMMA_SBAS_RUNTIME_ID: str = ""
+    GAMMA_SBAS_WSL_DISTRO: str = ""
+    GAMMA_SBAS_PYTHON: str = ""
+    GAMMA_SBAS_ENV_SCRIPT: str = ""
+    GAMMA_SBAS_WORK_ROOT: str = ""
+    GAMMA_SBAS_PRODUCT_ROOT: str = ""
+    GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT: str = ""
+    GAMMA_SBAS_SOURCE_ROOTS: str = ""
+    GAMMA_SBAS_ORBIT_ROOTS: str = ""
+    GAMMA_SBAS_DEFAULT_RLKS: int = 8
+    GAMMA_SBAS_DEFAULT_AZLKS: int = 8
+    GAMMA_SBAS_DEFAULT_MB_MODE: int = 0
+    GAMMA_SBAS_DEFAULT_REFERENCE_WINDOW: int = 16
+    GAMMA_SBAS_AUTO_APPROVE_ITAB: bool = True
+    GAMMA_SBAS_STEP_TIMEOUT_SECONDS: int = 43200
+    GAMMA_SBAS_WORKFLOW_TIMEOUT_SECONDS: int = 172800
+
     JOB_WORKER_HEALTH_TIMEOUT: int = 60
     JOB_WORKER_JOB_HEARTBEAT_INTERVAL: float = 5.0
     JOB_WORKER_STALE_RECOVER_INTERVAL: float = 15.0
@@ -623,6 +642,79 @@ class Settings(BaseSettings):
         )
         if not self.PYINT_ORBIT_POOL_TXT:
             object.__setattr__(self, "PYINT_ORBIT_POOL_TXT", self.ORBIT_POOL_ENVI)
+        if not self.GAMMA_SBAS_RUNTIME_ID:
+            object.__setattr__(self, "GAMMA_SBAS_RUNTIME_ID", "gamma_sbas_runtime_v1")
+        if not self.GAMMA_SBAS_WSL_DISTRO:
+            object.__setattr__(
+                self,
+                "GAMMA_SBAS_WSL_DISTRO",
+                self.WSL_DISTRO or self.PYINT_WSL_DISTRO or self.ISCE2_WSL_DISTRO,
+            )
+        if not self.GAMMA_SBAS_PYTHON:
+            object.__setattr__(
+                self,
+                "GAMMA_SBAS_PYTHON",
+                self.WSL_SHARED_PYTHON or self.PYINT_WSL_PYTHON or self.ISCE2_PYTHON,
+            )
+        if not self.GAMMA_SBAS_ENV_SCRIPT:
+            object.__setattr__(self, "GAMMA_SBAS_ENV_SCRIPT", self.PYINT_GAMMA_ENV_SCRIPT)
+        if not self.GAMMA_SBAS_WORK_ROOT:
+            object.__setattr__(
+                self,
+                "GAMMA_SBAS_WORK_ROOT",
+                os.path.join(backend_dir, "runtime", "sbas_insar_production"),
+            )
+        if not self.GAMMA_SBAS_PRODUCT_ROOT:
+            object.__setattr__(
+                self,
+                "GAMMA_SBAS_PRODUCT_ROOT",
+                os.path.join(self.TIMESERIES_PRODUCT_DIR, "sbas"),
+            )
+        if not self.GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT:
+            object.__setattr__(
+                self,
+                "GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT",
+                os.path.join(backend_dir, "templates", "gamma_sbas"),
+            )
+        if not self.GAMMA_SBAS_SOURCE_ROOTS:
+            def _local_split_paths(raw: str | None) -> list[str]:
+                items: list[str] = []
+                for part in str(raw or "").replace(";", ",").split(","):
+                    text = part.strip().strip('"').strip("'")
+                    if text:
+                        items.append(text)
+                return items
+            lt1_roots = [
+                item
+                for value in (self.SOURCE_PRODUCT_DIRS, self.MONITOR_RADAR_DIRS, self.INSAR_STORAGE_DIRS)
+                for item in _local_split_paths(value)
+                if "lutan" in item.lower() or "lt1" in item.lower()
+            ]
+            lt1_roots = list(dict.fromkeys(lt1_roots))
+            object.__setattr__(self, "GAMMA_SBAS_SOURCE_ROOTS", ";".join(lt1_roots) or r"D:\LuTan1_Image_Pool")
+        if not self.GAMMA_SBAS_ORBIT_ROOTS:
+            object.__setattr__(self, "GAMMA_SBAS_ORBIT_ROOTS", self.PYINT_ORBIT_POOL_TXT or self.ORBIT_POOL_ENVI)
+        object.__setattr__(self, "GAMMA_SBAS_DEFAULT_RLKS", max(1, int(self.GAMMA_SBAS_DEFAULT_RLKS or 8)))
+        object.__setattr__(self, "GAMMA_SBAS_DEFAULT_AZLKS", max(1, int(self.GAMMA_SBAS_DEFAULT_AZLKS or 8)))
+        gamma_sbas_mb_mode = int(self.GAMMA_SBAS_DEFAULT_MB_MODE or 0)
+        if gamma_sbas_mb_mode not in {0, 1, 2}:
+            gamma_sbas_mb_mode = 0
+        object.__setattr__(self, "GAMMA_SBAS_DEFAULT_MB_MODE", gamma_sbas_mb_mode)
+        object.__setattr__(
+            self,
+            "GAMMA_SBAS_DEFAULT_REFERENCE_WINDOW",
+            max(1, int(self.GAMMA_SBAS_DEFAULT_REFERENCE_WINDOW or 16)),
+        )
+        object.__setattr__(
+            self,
+            "GAMMA_SBAS_STEP_TIMEOUT_SECONDS",
+            max(60, int(self.GAMMA_SBAS_STEP_TIMEOUT_SECONDS or 43200)),
+        )
+        object.__setattr__(
+            self,
+            "GAMMA_SBAS_WORKFLOW_TIMEOUT_SECONDS",
+            max(self.GAMMA_SBAS_STEP_TIMEOUT_SECONDS, int(self.GAMMA_SBAS_WORKFLOW_TIMEOUT_SECONDS or 172800)),
+        )
         if self.TIMESERIES_ENABLED:
             if not self.TIMESERIES_WSL_DISTRO:
                 object.__setattr__(self, "TIMESERIES_WSL_DISTRO", self.WSL_DISTRO or self.ISCE2_WSL_DISTRO)
@@ -755,6 +847,10 @@ class Settings(BaseSettings):
         os.makedirs(settings.PYINT_WORK_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_OUTPUT_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_DEM_ROOT, exist_ok=True)
+        if settings.GAMMA_SBAS_ENABLED:
+            os.makedirs(settings.GAMMA_SBAS_WORK_ROOT, exist_ok=True)
+            os.makedirs(settings.GAMMA_SBAS_PRODUCT_ROOT, exist_ok=True)
+            os.makedirs(settings.GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT, exist_ok=True)
         if settings.TIMESERIES_ENABLED and settings.TIMESERIES_WORK_ROOT:
             os.makedirs(settings.TIMESERIES_WORK_ROOT, exist_ok=True)
 
@@ -1031,6 +1127,42 @@ def validate_runtime_config() -> dict[str, Any]:
             errors=errors,
             warnings=warnings,
             expect_file=True,
+        )
+
+    if settings.GAMMA_SBAS_ENABLED:
+        if not settings.GAMMA_SBAS_RUNTIME_ID:
+            errors.append("GAMMA_SBAS_ENABLED=true but GAMMA_SBAS_RUNTIME_ID is not configured.")
+        if not settings.GAMMA_SBAS_WSL_DISTRO:
+            errors.append("GAMMA_SBAS_ENABLED=true but GAMMA_SBAS_WSL_DISTRO is not configured.")
+        if not settings.GAMMA_SBAS_PYTHON:
+            errors.append("GAMMA_SBAS_ENABLED=true but GAMMA_SBAS_PYTHON is not configured.")
+        _check_path(
+            label="GAMMA_SBAS_ENV_SCRIPT",
+            value=settings.GAMMA_SBAS_ENV_SCRIPT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=True,
+        )
+        _check_path(
+            label="GAMMA_SBAS_WORK_ROOT",
+            value=settings.GAMMA_SBAS_WORK_ROOT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
+        )
+        _check_path(
+            label="GAMMA_SBAS_PRODUCT_ROOT",
+            value=settings.GAMMA_SBAS_PRODUCT_ROOT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
+        )
+        _check_path(
+            label="GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT",
+            value=settings.GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
         )
 
     if settings.ISCE2_ENABLED or settings.PYINT_ENABLED:

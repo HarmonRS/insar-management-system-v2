@@ -24,6 +24,12 @@ export const listSbasInsarRuns = () =>
 export const getSbasInsarRun = runId =>
   apiClient.get(`/sbas-insar-production/runs/${encodeURIComponent(runId)}`).then(r => r.data);
 
+export const prepareSbasInsarWorkflow = (runId, payload = {}) =>
+  apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/workflow`, payload).then(r => r.data);
+
+export const submitSbasInsarWorkflowJob = (runId, payload = {}) =>
+  apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/workflow/jobs`, payload).then(r => r.data);
+
 export const runSbasInsarBaselineAudit = (runId, payload = {}) =>
   apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/baseline-audit`, payload).then(r => r.data);
 
@@ -36,14 +42,23 @@ export const prepareSbasInsarCoregistration = (runId, payload = {}) =>
 export const submitSbasInsarCoregistrationJob = (runId, payload = {}) =>
   apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/coregistration/jobs`, payload).then(r => r.data);
 
+export const prepareSbasInsarRdcDem = (runId, payload = {}) =>
+  apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/rdc-dem`, payload).then(r => r.data);
+
+export const submitSbasInsarRdcDemJob = (runId, payload = {}) =>
+  apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/rdc-dem/jobs`, payload).then(r => r.data);
+
+export const prepareSbasInsarInterferograms = (runId, payload = {}) =>
+  apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/interferograms`, payload).then(r => r.data);
+
+export const submitSbasInsarInterferogramsJob = (runId, payload = {}) =>
+  apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/interferograms/jobs`, payload).then(r => r.data);
+
+export const prepareSbasInsarIptaTimeseries = (runId, payload = {}) =>
+  apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/ipta-timeseries`, payload).then(r => r.data);
+
+export const submitSbasInsarIptaTimeseriesJob = (runId, payload = {}) =>
+  apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/ipta-timeseries/jobs`, payload).then(r => r.data);
+
 export const getSbasInsarRunArtifactUrl = (runId, relativePath) =>
   `/api/sbas-insar-production/runs/${encodeURIComponent(runId)}/artifacts/${encodeArtifactPath(relativePath)}`;
-
-export const listSbasInsarTrialRuns = () =>
-  apiClient.get('/sbas-insar-production/trial-runs').then(r => r.data);
-
-export const getSbasInsarTrialRun = trialId =>
-  apiClient.get(`/sbas-insar-production/trial-runs/${encodeURIComponent(trialId)}`).then(r => r.data);
-
-export const getSbasInsarArtifactUrl = (trialId, relativePath) =>
-  `/api/sbas-insar-production/trial-runs/${encodeURIComponent(trialId)}/artifacts/${encodeArtifactPath(relativePath)}`;

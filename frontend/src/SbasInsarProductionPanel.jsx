@@ -4,17 +4,22 @@ import {
   auditSbasInsarStack,
   decideSbasInsarItab,
   discoverSbasInsarStacks,
-  getSbasInsarArtifactUrl,
   getSbasInsarCapabilities,
   getSbasInsarRun,
   getSbasInsarRunArtifactUrl,
-  getSbasInsarTrialRun,
   listSbasInsarRuns,
-  listSbasInsarTrialRuns,
   prepareSbasInsarCoregistration,
+  prepareSbasInsarInterferograms,
+  prepareSbasInsarIptaTimeseries,
+  prepareSbasInsarRdcDem,
+  prepareSbasInsarWorkflow,
   runSbasInsarBaselineAudit,
   submitSbasInsarCoregistrationJob,
+  submitSbasInsarInterferogramsJob,
+  submitSbasInsarIptaTimeseriesJob,
+  submitSbasInsarRdcDemJob,
   submitSbasInsarRun,
+  submitSbasInsarWorkflowJob,
 } from './api/sbasInsarProduction';
 
 const shellStyle = {
@@ -90,7 +95,14 @@ function formatBytes(value) {
 }
 
 function StatusBadge({ value }) {
-  const okValues = new Set(['TRIAL_READY', 'READY', 'READY_FOR_GAMMA_BASELINE_AUDIT']);
+  const okValues = new Set([
+    'READY',
+    'READY_FOR_GAMMA_BASELINE_AUDIT',
+    'WORKFLOW_READY',
+    'WORKFLOW_COMPLETED',
+    'COMPLETED',
+    'IPTA_TIMESERIES_READY',
+  ]);
   const isOk = okValues.has(value);
   const color = isOk ? '#0f766e' : '#92400e';
   return (
@@ -130,20 +142,6 @@ function Metric({ label, value }) {
   );
 }
 
-function ArtifactLink({ trialId, artifact }) {
-  const href = getSbasInsarArtifactUrl(trialId, artifact.relative_path);
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      style={{ color: '#0f766e', fontWeight: 650, textDecoration: 'none' }}
-    >
-      打开
-    </a>
-  );
-}
-
 function RunArtifactLink({ runId, artifact }) {
   const href = getSbasInsarRunArtifactUrl(runId, artifact.relative_path);
   return (
@@ -160,14 +158,10 @@ function RunArtifactLink({ runId, artifact }) {
 
 export default function SbasInsarProductionPanel({ readOnly = false }) {
   const [capabilities, setCapabilities] = useState(null);
-  const [trials, setTrials] = useState([]);
   const [runs, setRuns] = useState([]);
-  const [selectedTrialId, setSelectedTrialId] = useState('');
   const [selectedRunId, setSelectedRunId] = useState('');
-  const [detail, setDetail] = useState(null);
   const [runDetail, setRunDetail] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
   const [error, setError] = useState('');
   const [discovering, setDiscovering] = useState(false);
@@ -181,58 +175,43 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
   const [coregistrationLoading, setCoregistrationLoading] = useState(false);
   const [coregistrationJobLoading, setCoregistrationJobLoading] = useState(false);
   const [coregistrationJob, setCoregistrationJob] = useState(null);
+  const [rdcDemLoading, setRdcDemLoading] = useState(false);
+  const [rdcDemJobLoading, setRdcDemJobLoading] = useState(false);
+  const [rdcDemJob, setRdcDemJob] = useState(null);
+  const [interferogramLoading, setInterferogramLoading] = useState(false);
+  const [interferogramJobLoading, setInterferogramJobLoading] = useState(false);
+  const [interferogramJob, setInterferogramJob] = useState(null);
+  const [iptaTimeseriesLoading, setIptaTimeseriesLoading] = useState(false);
+  const [iptaTimeseriesJobLoading, setIptaTimeseriesJobLoading] = useState(false);
+  const [iptaTimeseriesJob, setIptaTimeseriesJob] = useState(null);
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowJobLoading, setWorkflowJobLoading] = useState(false);
+  const [workflowJob, setWorkflowJob] = useState(null);
 
-  const loadTrials = useCallback(async () => {
+  const loadProductionRuns = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const [capabilityData, trialData, runData] = await Promise.all([
+      const [capabilityData, runData] = await Promise.all([
         getSbasInsarCapabilities(),
-        listSbasInsarTrialRuns(),
         listSbasInsarRuns(),
       ]);
-      const items = Array.isArray(trialData?.items) ? trialData.items : [];
       const runItems = Array.isArray(runData?.items) ? runData.items : [];
       setCapabilities(capabilityData);
-      setTrials(items);
       setRuns(runItems);
-      setSelectedTrialId(current => current || items[0]?.trial_id || '');
       setSelectedRunId(current => current || runItems[0]?.run_id || '');
     } catch (exc) {
       setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR 列表加载失败');
       setCapabilities(null);
-      setTrials([]);
       setRuns([]);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  const loadDetail = useCallback(async trialId => {
-    if (!trialId) {
-      setDetail(null);
-      return;
-    }
-    setDetailLoading(true);
-    setError('');
-    try {
-      const data = await getSbasInsarTrialRun(trialId);
-      setDetail(data);
-    } catch (exc) {
-      setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR 详情加载失败');
-      setDetail(null);
-    } finally {
-      setDetailLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
-    loadTrials();
-  }, [loadTrials]);
-
-  useEffect(() => {
-    loadDetail(selectedTrialId);
-  }, [loadDetail, selectedTrialId]);
+    loadProductionRuns();
+  }, [loadProductionRuns]);
 
   const loadRunDetail = useCallback(async runId => {
     if (!runId) {
@@ -308,7 +287,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
           : undefined,
         min_scenes: 3,
         require_orbits: true,
-        dry_run: true,
+        dry_run: false,
         monitor_point_strategy: 'auto_low_sigma_high_rate',
       });
       const runId = data?.run?.run_id;
@@ -325,6 +304,50 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
       setSubmitLoading(false);
     }
   }, [readOnly, selectedStackId, stackCandidates]);
+
+  const workflowPayload = useMemo(() => ({
+    force: false,
+    rlks: 8,
+    azlks: 8,
+    reference_window: 16,
+    mb_mode: 0,
+    timeout_seconds: 172800,
+  }), []);
+
+  const handlePrepareWorkflow = useCallback(async () => {
+    if (!selectedRunId || readOnly) return;
+    setWorkflowLoading(true);
+    setError('');
+    try {
+      const data = await prepareSbasInsarWorkflow(selectedRunId, workflowPayload);
+      setRunDetail(data);
+      const runData = await listSbasInsarRuns();
+      setRuns(Array.isArray(runData?.items) ? runData.items : []);
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'Gamma SBAS workflow 生成失败');
+    } finally {
+      setWorkflowLoading(false);
+    }
+  }, [readOnly, selectedRunId, workflowPayload]);
+
+  const handleSubmitWorkflowJob = useCallback(async () => {
+    if (!selectedRunId || readOnly) return;
+    setWorkflowJobLoading(true);
+    setError('');
+    try {
+      const data = await submitSbasInsarWorkflowJob(selectedRunId, workflowPayload);
+      setWorkflowJob(data);
+      const detailData = await getSbasInsarRun(selectedRunId);
+      setRunDetail(detailData);
+      const runData = await listSbasInsarRuns();
+      setRuns(Array.isArray(runData?.items) ? runData.items : []);
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'Gamma SBAS workflow 任务提交失败');
+      setWorkflowJob(null);
+    } finally {
+      setWorkflowJobLoading(false);
+    }
+  }, [readOnly, selectedRunId, workflowPayload]);
 
   const handleBaselineAudit = useCallback(async (execute = false) => {
     if (!selectedRunId || readOnly) return;
@@ -413,31 +436,168 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     }
   }, [readOnly, selectedRunId]);
 
-  const artifacts = useMemo(() => detail?.artifacts || [], [detail]);
-  const primaryPreview = (
-    artifacts.find(item => item.key === 'los_rate_toward_mm_per_year_geo_preview_png')
-    || artifacts.find(item => item.key === 'los_rate_toward_mm_per_year_bmp')
-  );
-  const sigmaPreview = (
-    artifacts.find(item => item.key === 'los_sigma_mm_per_year_geo_preview_png')
-    || artifacts.find(item => item.key === 'los_sigma_mm_per_year_bmp')
-  );
-  const monitorPreview = artifacts.find(item => item.role === 'monitor_point' && item.relative_path.endsWith('.png'));
-  const monitorCsv = artifacts.find(item => item.role === 'monitor_point' && item.relative_path.endsWith('.csv'));
-  const productArtifacts = artifacts.filter(item => item.role !== 'monitor_point');
-  const trial = detail?.trial || null;
-  const stack = trial?.stack || {};
-  const summary = detail?.summary || {};
-  const radar = summary.radar || {};
-  const monitorPoint = Array.isArray(summary.monitor_points) ? summary.monitor_points[0] : null;
+  const handlePrepareRdcDem = useCallback(async () => {
+    if (!selectedRunId || readOnly) return;
+    setRdcDemLoading(true);
+    setError('');
+    try {
+      const data = await prepareSbasInsarRdcDem(selectedRunId, {
+        execute: false,
+        rlks: 8,
+      });
+      setRunDetail(data);
+      const runData = await listSbasInsarRuns();
+      setRuns(Array.isArray(runData?.items) ? runData.items : []);
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR RDC DEM 计划生成失败');
+    } finally {
+      setRdcDemLoading(false);
+    }
+  }, [readOnly, selectedRunId]);
+
+  const handleSubmitRdcDemJob = useCallback(async () => {
+    if (!selectedRunId || readOnly) return;
+    setRdcDemJobLoading(true);
+    setError('');
+    try {
+      const data = await submitSbasInsarRdcDemJob(selectedRunId, {
+        rlks: 8,
+        timeout_seconds: 43200,
+      });
+      setRdcDemJob(data);
+      const detailData = await getSbasInsarRun(selectedRunId);
+      setRunDetail(detailData);
+      const runData = await listSbasInsarRuns();
+      setRuns(Array.isArray(runData?.items) ? runData.items : []);
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR RDC DEM 任务提交失败');
+      setRdcDemJob(null);
+    } finally {
+      setRdcDemJobLoading(false);
+    }
+  }, [readOnly, selectedRunId]);
+
+  const handlePrepareInterferograms = useCallback(async () => {
+    if (!selectedRunId || readOnly) return;
+    setInterferogramLoading(true);
+    setError('');
+    try {
+      const data = await prepareSbasInsarInterferograms(selectedRunId, {
+        execute: false,
+        rlks: 8,
+        azlks: 8,
+        unwrap_threshold: 0.2,
+      });
+      setRunDetail(data);
+      const runData = await listSbasInsarRuns();
+      setRuns(Array.isArray(runData?.items) ? runData.items : []);
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR interferogram 计划生成失败');
+    } finally {
+      setInterferogramLoading(false);
+    }
+  }, [readOnly, selectedRunId]);
+
+  const handleSubmitInterferogramsJob = useCallback(async () => {
+    if (!selectedRunId || readOnly) return;
+    setInterferogramJobLoading(true);
+    setError('');
+    try {
+      const data = await submitSbasInsarInterferogramsJob(selectedRunId, {
+        rlks: 8,
+        azlks: 8,
+        unwrap_threshold: 0.2,
+        timeout_seconds: 43200,
+      });
+      setInterferogramJob(data);
+      const detailData = await getSbasInsarRun(selectedRunId);
+      setRunDetail(detailData);
+      const runData = await listSbasInsarRuns();
+      setRuns(Array.isArray(runData?.items) ? runData.items : []);
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR interferogram 任务提交失败');
+      setInterferogramJob(null);
+    } finally {
+      setInterferogramJobLoading(false);
+    }
+  }, [readOnly, selectedRunId]);
+
+  const handlePrepareIptaTimeseries = useCallback(async () => {
+    if (!selectedRunId || readOnly) return;
+    setIptaTimeseriesLoading(true);
+    setError('');
+    try {
+      const data = await prepareSbasInsarIptaTimeseries(selectedRunId, {
+        execute: false,
+        rlks: 8,
+        reference_window: 16,
+      });
+      setRunDetail(data);
+      const runData = await listSbasInsarRuns();
+      setRuns(Array.isArray(runData?.items) ? runData.items : []);
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR IPTA timeseries 计划生成失败');
+    } finally {
+      setIptaTimeseriesLoading(false);
+    }
+  }, [readOnly, selectedRunId]);
+
+  const handleSubmitIptaTimeseriesJob = useCallback(async () => {
+    if (!selectedRunId || readOnly) return;
+    setIptaTimeseriesJobLoading(true);
+    setError('');
+    try {
+      const data = await submitSbasInsarIptaTimeseriesJob(selectedRunId, {
+        rlks: 8,
+        reference_window: 16,
+        timeout_seconds: 43200,
+      });
+      setIptaTimeseriesJob(data);
+      const detailData = await getSbasInsarRun(selectedRunId);
+      setRunDetail(detailData);
+      const runData = await listSbasInsarRuns();
+      setRuns(Array.isArray(runData?.items) ? runData.items : []);
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR IPTA timeseries 任务提交失败');
+      setIptaTimeseriesJob(null);
+    } finally {
+      setIptaTimeseriesJobLoading(false);
+    }
+  }, [readOnly, selectedRunId]);
+
   const selectedStack = stackCandidates.find(item => item.stack_id === selectedStackId) || null;
   const run = runDetail?.run || null;
   const runManifest = runDetail?.manifest || {};
+  const workflowManifest = runDetail?.workflow_manifest || {};
+  const workflowState = runDetail?.workflow_state || {};
+  const workflowSteps = Array.isArray(workflowManifest.steps) ? workflowManifest.steps : [];
+  const expertDocumentSteps = Array.isArray(workflowManifest.expert_document?.steps)
+    ? workflowManifest.expert_document.steps
+    : [];
+  const workflowStepState = workflowState.steps || {};
   const stagePlan = runDetail?.command_manifest?.stage_plan || [];
   const runArtifacts = runDetail?.artifacts || [];
   const baselineSummary = runManifest.baseline_audit?.summary || null;
   const itabDecision = runManifest.baseline_audit?.itab_decision || null;
   const coregistrationPlan = runManifest.coregistration || null;
+  const rdcDemPlan = runManifest.rdc_dem || null;
+  const interferogramPlan = runManifest.interferograms || null;
+  const detrendAtmPlan = runManifest.detrend_atm || null;
+  const iptaTimeseriesPlan = runManifest.ipta_timeseries || null;
+  const publishProductsPlan = runManifest.publish_products || null;
+  const monitorProductsPlan = runManifest.monitor_point_products || null;
+  const runPrimaryPreview = (
+    runArtifacts.find(item => item.key === 'los_rate_toward_m_per_year_hls_geo_preview_png')
+    || runArtifacts.find(item => item.key === 'los_rate_toward_mm_per_year_geo_preview_png')
+    || runArtifacts.find(item => item.key === 'los_rate_toward_mm_per_year_bmp')
+  );
+  const runSigmaPreview = (
+    runArtifacts.find(item => item.key === 'los_sigma_m_per_year_cc_geo_preview_png')
+    || runArtifacts.find(item => item.key === 'los_sigma_mm_per_year_geo_preview_png')
+    || runArtifacts.find(item => item.key === 'los_sigma_mm_per_year_bmp')
+  );
+  const runMonitorPreview = runArtifacts.find(item => item.role === 'monitor_point' && item.relative_path.endsWith('.png'));
+  const runMonitorCsv = runArtifacts.find(item => item.role === 'monitor_point' && item.relative_path.endsWith('.csv'));
   const itabApproved = itabDecision?.decision === 'approve' || runManifest.baseline_audit?.approved_for_next_stage === true;
   const itabRejected = itabDecision?.decision === 'reject';
 
@@ -453,7 +613,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
           </div>
           <button
             type="button"
-            onClick={loadTrials}
+            onClick={loadProductionRuns}
             disabled={loading}
             style={{
               border: '1px solid #0f766e',
@@ -695,6 +855,136 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                 </div>
 
                 {!readOnly && (
+                  <div style={{ border: '1px solid #bbf7d0', borderRadius: 8, padding: 10, background: '#f0fdf4' }}>
+                    <div style={valueStyle}>Gamma SBAS Workflow</div>
+                    <div style={{ ...mutedStyle, marginTop: 6 }}>
+                      专家文档目录 + manifest + WSL runner 主路径。旧分阶段执行仅作为兼容桥接。
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                      <button
+                        type="button"
+                        onClick={handlePrepareWorkflow}
+                        disabled={workflowLoading}
+                        style={{
+                          border: '1px solid #15803d',
+                          borderRadius: 8,
+                          background: '#dcfce7',
+                          color: '#166534',
+                          padding: '8px 12px',
+                          fontWeight: 700,
+                          cursor: workflowLoading ? 'default' : 'pointer',
+                        }}
+                      >
+                        {workflowLoading ? '生成中' : '生成 Workflow Manifest'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSubmitWorkflowJob}
+                        disabled={workflowJobLoading}
+                        style={{
+                          border: '1px solid #0f766e',
+                          borderRadius: 8,
+                          background: '#ccfbf1',
+                          color: '#0f766e',
+                          padding: '8px 12px',
+                          fontWeight: 700,
+                          cursor: workflowJobLoading ? 'default' : 'pointer',
+                        }}
+                      >
+                        {workflowJobLoading ? '提交中' : '提交 Gamma SBAS Workflow'}
+                      </button>
+                    </div>
+                    {workflowJob && workflowJob.run_id === run.run_id && (
+                      <div style={{ ...mutedStyle, marginTop: 8 }}>
+                        已提交后台任务：{workflowJob.task_id}；Job：{workflowJob.job_id}
+                      </div>
+                    )}
+                    {workflowSteps.length > 0 && (
+                      <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
+                        {workflowSteps.map(step => {
+                          const state = workflowStepState[step.id] || {};
+                          return (
+                            <div
+                              key={step.id}
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'minmax(190px, 1fr) minmax(120px, auto)',
+                                gap: 8,
+                                alignItems: 'center',
+                                border: '1px solid #bbf7d0',
+                                borderRadius: 8,
+                                padding: '8px 10px',
+                                background: '#ffffff',
+                              }}
+                            >
+                              <div>
+                                <div style={{ color: '#0f172a', fontSize: 13, fontWeight: 650 }}>
+                                  {step.id} · {step.name}
+                                </div>
+                                <div style={mutedStyle}>
+                                  {(step.expert_tools || []).join(', ') || 'planned'}；{step.enabled ? 'enabled' : 'planned'}
+                                </div>
+                              </div>
+                              <StatusBadge value={state.status || step.status || 'PENDING'} />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {expertDocumentSteps.length > 0 && (
+                      <div style={{ marginTop: 12 }}>
+                        <div style={valueStyle}>Expert document path</div>
+                        <div style={{ ...mutedStyle, marginTop: 4 }}>
+                          {expertDocumentSteps.length} sections from the LT1 Gamma SBAS expert document. Commands are shown as the acceptance checklist; implementation may be a bridge where the verified experiment already covers the same Gamma function.
+                        </div>
+                        <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
+                          {expertDocumentSteps.map(item => {
+                            const mappedStatuses = (item.mapped_workflow_steps || [])
+                              .map(mapped => {
+                                const state = workflowStepState[mapped.id] || {};
+                                return state.status || mapped.status;
+                              })
+                              .filter(Boolean);
+                            const displayStatus = mappedStatuses[0] || item.implementation_status || 'planned';
+                            const commandPreview = (item.commands || []).slice(0, 3).join(' | ');
+                            return (
+                              <div
+                                key={item.id}
+                                style={{
+                                  display: 'grid',
+                                  gridTemplateColumns: 'minmax(210px, 1fr) minmax(120px, auto)',
+                                  gap: 8,
+                                  alignItems: 'start',
+                                  border: '1px solid #e2e8f0',
+                                  borderRadius: 8,
+                                  padding: '8px 10px',
+                                  background: item.enabled ? '#ffffff' : '#f8fafc',
+                                }}
+                              >
+                                <div>
+                                  <div style={{ color: '#0f172a', fontSize: 13, fontWeight: 650 }}>
+                                    {item.order}. {item.title}
+                                  </div>
+                                  <div style={mutedStyle}>
+                                    maps to {(item.workflow_steps || []).join(', ') || '-'}; {item.command_count || 0} commands; {item.implementation_status}
+                                  </div>
+                                  {commandPreview && (
+                                    <div style={{ ...mutedStyle, marginTop: 3, fontFamily: 'monospace', overflowWrap: 'anywhere' }}>
+                                      {commandPreview}
+                                    </div>
+                                  )}
+                                </div>
+                                <StatusBadge value={displayStatus} />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!readOnly && false && (
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <button
                       type="button"
@@ -759,6 +1049,102 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                       }}
                     >
                       {coregistrationJobLoading ? '提交中' : '提交共参考配准任务'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handlePrepareRdcDem}
+                      disabled={rdcDemLoading}
+                      style={{
+                        border: '1px solid #0369a1',
+                        borderRadius: 8,
+                        background: '#f0f9ff',
+                        color: '#0369a1',
+                        padding: '8px 12px',
+                        fontWeight: 700,
+                        cursor: rdcDemLoading ? 'default' : 'pointer',
+                      }}
+                    >
+                      {rdcDemLoading ? '生成中' : '生成 RDC DEM 脚本'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSubmitRdcDemJob}
+                      disabled={rdcDemJobLoading}
+                      style={{
+                        border: '1px solid #4338ca',
+                        borderRadius: 8,
+                        background: '#eef2ff',
+                        color: '#3730a3',
+                        padding: '8px 12px',
+                        fontWeight: 700,
+                        cursor: rdcDemJobLoading ? 'default' : 'pointer',
+                      }}
+                    >
+                      {rdcDemJobLoading ? '提交中' : '提交 RDC DEM 任务'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handlePrepareInterferograms}
+                      disabled={interferogramLoading}
+                      style={{
+                        border: '1px solid #7c2d12',
+                        borderRadius: 8,
+                        background: '#fff7ed',
+                        color: '#7c2d12',
+                        padding: '8px 12px',
+                        fontWeight: 700,
+                        cursor: interferogramLoading ? 'default' : 'pointer',
+                      }}
+                    >
+                      {interferogramLoading ? '生成中' : '生成干涉图脚本'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSubmitInterferogramsJob}
+                      disabled={interferogramJobLoading}
+                      style={{
+                        border: '1px solid #be123c',
+                        borderRadius: 8,
+                        background: '#fff1f2',
+                        color: '#be123c',
+                        padding: '8px 12px',
+                        fontWeight: 700,
+                        cursor: interferogramJobLoading ? 'default' : 'pointer',
+                      }}
+                    >
+                      {interferogramJobLoading ? '提交中' : '提交干涉图任务'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handlePrepareIptaTimeseries}
+                      disabled={iptaTimeseriesLoading}
+                      style={{
+                        border: '1px solid #166534',
+                        borderRadius: 8,
+                        background: '#f0fdf4',
+                        color: '#166534',
+                        padding: '8px 12px',
+                        fontWeight: 700,
+                        cursor: iptaTimeseriesLoading ? 'default' : 'pointer',
+                      }}
+                    >
+                      {iptaTimeseriesLoading ? '生成中' : '生成 IPTA 脚本'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSubmitIptaTimeseriesJob}
+                      disabled={iptaTimeseriesJobLoading}
+                      style={{
+                        border: '1px solid #15803d',
+                        borderRadius: 8,
+                        background: '#dcfce7',
+                        color: '#166534',
+                        padding: '8px 12px',
+                        fontWeight: 700,
+                        cursor: iptaTimeseriesJobLoading ? 'default' : 'pointer',
+                      }}
+                    >
+                      {iptaTimeseriesJobLoading ? '提交中' : '提交 IPTA 任务'}
                     </button>
                   </div>
                 )}
@@ -943,6 +1329,296 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                   </div>
                 </div>
 
+                {rdcDemPlan && (
+                  <div style={{ border: '1px solid #bfdbfe', borderRadius: 8, padding: 10, background: '#eff6ff' }}>
+                    <div style={valueStyle}>RDC DEM Plan</div>
+                    <div style={{ ...metricGridStyle, marginTop: 8 }}>
+                      <Metric label="Reference date" value={rdcDemPlan.reference_date || '-'} />
+                      <Metric label="RLKS" value={`${rdcDemPlan.rlks || '-'}`} />
+                      <Metric
+                        label="DEM covers center"
+                        value={rdcDemPlan.dem_source?.covers_stack_center === false ? 'No' : 'Yes'}
+                      />
+                      <Metric
+                        label="DEM covers bbox"
+                        value={rdcDemPlan.dem_source?.covers_stack_bbox ? 'Yes' : 'Partial'}
+                      />
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 8, wordBreak: 'break-all' }}>
+                      Script: {rdcDemPlan.script_path || '-'}
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 5, wordBreak: 'break-all' }}>
+                      DEM source: {rdcDemPlan.dem_source?.windows_path || rdcDemPlan.dem_source?.wsl_path || '-'}
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 5, wordBreak: 'break-all' }}>
+                      Output: {rdcDemPlan.outputs?.rdc_dem || '-'}
+                    </div>
+                    {rdcDemPlan.execution && (
+                      <div style={{ ...mutedStyle, marginTop: 5 }}>
+                        Execution: {rdcDemPlan.execution.status || '-'};{' '}
+                        {rdcDemPlan.execution.ended_at || rdcDemPlan.execution.started_at || '-'}
+                      </div>
+                    )}
+                    {rdcDemPlan.summary && (
+                      <div style={{ ...mutedStyle, marginTop: 5 }}>
+                        Ready: {rdcDemPlan.summary.ready ? 'Yes' : 'No'}; missing:{' '}
+                        {(rdcDemPlan.summary.missing_outputs || []).join(', ') || 'none'}
+                      </div>
+                    )}
+                    {rdcDemJob && rdcDemJob.run_id === run.run_id && (
+                      <div
+                        style={{
+                          marginTop: 8,
+                          border: '1px solid #c7d2fe',
+                          borderRadius: 8,
+                          background: '#eef2ff',
+                          color: '#3730a3',
+                          padding: '7px 9px',
+                          fontSize: 12,
+                          lineHeight: 1.5,
+                          wordBreak: 'break-all',
+                        }}
+                      >
+                        Queued task: {rdcDemJob.task_id}; Job: {rdcDemJob.job_id}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {interferogramPlan && (
+                  <div style={{ border: '1px solid #fed7aa', borderRadius: 8, padding: 10, background: '#fff7ed' }}>
+                    <div style={valueStyle}>Interferogram Plan</div>
+                    <div style={{ ...metricGridStyle, marginTop: 8 }}>
+                      <Metric label="Reference date" value={interferogramPlan.reference_date || '-'} />
+                      <Metric label="Pairs" value={`${interferogramPlan.pair_count || 0}`} />
+                      <Metric label="Looks" value={`${interferogramPlan.rlks || '-'} / ${interferogramPlan.azlks || '-'}`} />
+                      <Metric label="Threshold" value={`${interferogramPlan.unwrap_threshold ?? '-'}`} />
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 8, wordBreak: 'break-all' }}>
+                      Script: {interferogramPlan.script_path || '-'}
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 5, wordBreak: 'break-all' }}>
+                      DIFF_tab: {interferogramPlan.outputs?.diff_tab || '-'}
+                    </div>
+                    {interferogramPlan.execution && (
+                      <div style={{ ...mutedStyle, marginTop: 5 }}>
+                        Execution: {interferogramPlan.execution.status || '-'};{' '}
+                        {interferogramPlan.execution.ended_at || interferogramPlan.execution.started_at || '-'}
+                      </div>
+                    )}
+                    {interferogramPlan.summary && (
+                      <div style={{ ...mutedStyle, marginTop: 5 }}>
+                        Ready pairs: {interferogramPlan.summary.ready_pair_count || 0}/
+                        {interferogramPlan.summary.pair_count || 0}; missing:{' '}
+                        {(interferogramPlan.summary.missing_pairs || []).join(', ') || 'none'}
+                      </div>
+                    )}
+                    {interferogramJob && interferogramJob.run_id === run.run_id && (
+                      <div
+                        style={{
+                          marginTop: 8,
+                          border: '1px solid #fecdd3',
+                          borderRadius: 8,
+                          background: '#fff1f2',
+                          color: '#be123c',
+                          padding: '7px 9px',
+                          fontSize: 12,
+                          lineHeight: 1.5,
+                          wordBreak: 'break-all',
+                        }}
+                      >
+                        Queued task: {interferogramJob.task_id}; Job: {interferogramJob.job_id}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {detrendAtmPlan && (
+                  <div style={{ border: '1px solid #fed7aa', borderRadius: 8, padding: 10, background: '#fff7ed' }}>
+                    <div style={valueStyle}>Detrend / ATM Plan</div>
+                    <div style={{ ...metricGridStyle, marginTop: 8 }}>
+                      <Metric label="Reference date" value={detrendAtmPlan.reference_date || '-'} />
+                      <Metric label="Pairs" value={`${detrendAtmPlan.summary?.ready_pair_count || 0}/${detrendAtmPlan.pair_count || detrendAtmPlan.summary?.pair_count || 0}`} />
+                      <Metric label="CC min" value={`${detrendAtmPlan.coherence_min ?? '-'}`} />
+                      <Metric label="Ready" value={detrendAtmPlan.summary?.ready ? 'Yes' : '-'} />
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 8, wordBreak: 'break-all' }}>
+                      Script: {detrendAtmPlan.script_path || '-'}
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 5, wordBreak: 'break-all' }}>
+                      DIFF_atmsub_tab: {detrendAtmPlan.outputs?.diff_atmsub_tab || detrendAtmPlan.summary?.outputs?.diff_atmsub_tab?.path || '-'}
+                    </div>
+                    {detrendAtmPlan.execution && (
+                      <div style={{ ...mutedStyle, marginTop: 5 }}>
+                        Execution: {detrendAtmPlan.execution.status || '-'};{' '}
+                        {detrendAtmPlan.execution.ended_at || detrendAtmPlan.execution.started_at || '-'}
+                      </div>
+                    )}
+                    {detrendAtmPlan.summary && (
+                      <div style={{ ...mutedStyle, marginTop: 5 }}>
+                        Missing pairs: {(detrendAtmPlan.summary.missing_pairs || []).join(', ') || 'none'}; rows:{' '}
+                        {detrendAtmPlan.summary.diff_atmsub_tab_row_count || 0}/
+                        {detrendAtmPlan.summary.itab_atmsub_row_count || 0}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {iptaTimeseriesPlan && (
+                  <div style={{ border: '1px solid #bbf7d0', borderRadius: 8, padding: 10, background: '#f0fdf4' }}>
+                    <div style={valueStyle}>IPTA Time-Series Plan</div>
+                    <div style={{ ...metricGridStyle, marginTop: 8 }}>
+                      <Metric label="Reference date" value={iptaTimeseriesPlan.reference_date || '-'} />
+                      <Metric label="RLKS" value={`${iptaTimeseriesPlan.rlks || '-'}`} />
+                      <Metric label="Window" value={`${iptaTimeseriesPlan.reference_window || '-'}`} />
+                      <Metric label="Ready" value={iptaTimeseriesPlan.summary?.ready ? 'Yes' : '-'} />
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 8, wordBreak: 'break-all' }}>
+                      Script: {iptaTimeseriesPlan.script_path || '-'}
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 5, wordBreak: 'break-all' }}>
+                      ts_rate: {iptaTimeseriesPlan.outputs?.ts_rate || iptaTimeseriesPlan.summary?.outputs?.ts_rate?.path || '-'}
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 5, wordBreak: 'break-all' }}>
+                      sigma_rate: {iptaTimeseriesPlan.outputs?.sigma_rate || iptaTimeseriesPlan.summary?.outputs?.sigma_rate?.path || '-'}
+                    </div>
+                    {iptaTimeseriesPlan.execution && (
+                      <div style={{ ...mutedStyle, marginTop: 5 }}>
+                        Execution: {iptaTimeseriesPlan.execution.status || '-'};{' '}
+                        {iptaTimeseriesPlan.execution.ended_at || iptaTimeseriesPlan.execution.started_at || '-'}
+                      </div>
+                    )}
+                    {iptaTimeseriesPlan.summary && (
+                      <div style={{ ...mutedStyle, marginTop: 5 }}>
+                        Missing: {(iptaTimeseriesPlan.summary.missing_outputs || []).join(', ') || 'none'}; rows:{' '}
+                        {iptaTimeseriesPlan.summary.diff_ts_row_count || 0}/
+                        {iptaTimeseriesPlan.summary.itab_ts_row_count || 0}
+                      </div>
+                    )}
+                    {iptaTimeseriesJob && iptaTimeseriesJob.run_id === run.run_id && (
+                      <div
+                        style={{
+                          marginTop: 8,
+                          border: '1px solid #bbf7d0',
+                          borderRadius: 8,
+                          background: '#dcfce7',
+                          color: '#166534',
+                          padding: '7px 9px',
+                          fontSize: 12,
+                          lineHeight: 1.5,
+                          wordBreak: 'break-all',
+                        }}
+                      >
+                        Queued task: {iptaTimeseriesJob.task_id}; Job: {iptaTimeseriesJob.job_id}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {publishProductsPlan && (
+                  <div style={{ border: '1px solid #bae6fd', borderRadius: 8, padding: 10, background: '#f0f9ff' }}>
+                    <div style={valueStyle}>Publish Products</div>
+                    <div style={{ ...metricGridStyle, marginTop: 8 }}>
+                      <Metric label="Reference date" value={publishProductsPlan.reference_date || '-'} />
+                      <Metric label="RLKS" value={`${publishProductsPlan.rlks || '-'}`} />
+                      <Metric label="Ready" value={publishProductsPlan.summary?.ready ? 'Yes' : '-'} />
+                      <Metric label="LOS sign" value="Toward positive" />
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 8, wordBreak: 'break-all' }}>
+                      Script: {publishProductsPlan.script_path || '-'}
+                    </div>
+                    {publishProductsPlan.summary && (
+                      <div style={{ ...mutedStyle, marginTop: 5 }}>
+                        Missing: {(publishProductsPlan.summary.missing_outputs || []).join(', ') || 'none'}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {monitorProductsPlan && (
+                  <div style={{ border: '1px solid #ddd6fe', borderRadius: 8, padding: 10, background: '#f5f3ff' }}>
+                    <div style={valueStyle}>Monitoring Point Products</div>
+                    <div style={{ ...metricGridStyle, marginTop: 8 }}>
+                      <Metric label="Reference date" value={monitorProductsPlan.reference_date || '-'} />
+                      <Metric label="Dates" value={`${monitorProductsPlan.dates?.length || 0}`} />
+                      <Metric label="Ready" value={monitorProductsPlan.summary?.ready ? 'Yes' : '-'} />
+                      <Metric label="Mode" value={runDetail.monitor_points?.mode || '-'} />
+                    </div>
+                    {monitorProductsPlan.summary?.monitor_outputs?.length > 0 && (
+                      <div style={{ ...mutedStyle, marginTop: 5 }}>
+                        Points: {monitorProductsPlan.summary.monitor_outputs.map(item => item.point_id).join(', ')}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {(runPrimaryPreview || runSigmaPreview || runMonitorPreview) && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+                    {runPrimaryPreview && (
+                      <div>
+                        <div style={{ ...valueStyle, marginBottom: 6 }}>LOS Velocity</div>
+                        <div style={{ ...mutedStyle, marginBottom: 6 }}>
+                          {runPrimaryPreview.key.endsWith('_geo_preview_png') ? 'WGS84 geocoded preview' : 'RDC QA preview'}
+                        </div>
+                        <img
+                          alt="Run LOS velocity toward radar positive"
+                          src={getSbasInsarRunArtifactUrl(run.run_id, runPrimaryPreview.relative_path)}
+                          style={{
+                            width: '100%',
+                            aspectRatio: '4 / 3',
+                            objectFit: 'contain',
+                            border: '1px solid #d8dee8',
+                            borderRadius: 8,
+                            background: '#f8fafc',
+                          }}
+                        />
+                      </div>
+                    )}
+                    {runSigmaPreview && (
+                      <div>
+                        <div style={{ ...valueStyle, marginBottom: 6 }}>LOS Sigma</div>
+                        <div style={{ ...mutedStyle, marginBottom: 6 }}>
+                          {runSigmaPreview.key.endsWith('_geo_preview_png') ? 'WGS84 geocoded preview' : 'RDC QA preview'}
+                        </div>
+                        <img
+                          alt="Run LOS velocity sigma"
+                          src={getSbasInsarRunArtifactUrl(run.run_id, runSigmaPreview.relative_path)}
+                          style={{
+                            width: '100%',
+                            aspectRatio: '4 / 3',
+                            objectFit: 'contain',
+                            border: '1px solid #d8dee8',
+                            borderRadius: 8,
+                            background: '#f8fafc',
+                          }}
+                        />
+                      </div>
+                    )}
+                    {runMonitorPreview && (
+                      <div>
+                        <div style={{ ...valueStyle, marginBottom: 6 }}>Monitoring Curve</div>
+                        <img
+                          alt="Run monitoring point LOS displacement time series"
+                          src={getSbasInsarRunArtifactUrl(run.run_id, runMonitorPreview.relative_path)}
+                          style={{
+                            width: '100%',
+                            aspectRatio: '4 / 3',
+                            objectFit: 'contain',
+                            border: '1px solid #d8dee8',
+                            borderRadius: 8,
+                            background: '#ffffff',
+                          }}
+                        />
+                        {runMonitorCsv && (
+                          <div style={{ ...mutedStyle, marginTop: 6 }}>
+                            <RunArtifactLink runId={run.run_id} artifact={runMonitorCsv} />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {runArtifacts.length > 0 && (
                   <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, overflow: 'hidden' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -976,192 +1652,6 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
         </div>
       </section>
 
-      <div style={gridStyle}>
-        <section style={sectionStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
-            <h3 style={{ margin: 0, fontSize: 15, color: '#0f172a' }}>试验/生产序列</h3>
-            <span style={mutedStyle}>{trials.length} 组</span>
-          </div>
-          <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
-            {trials.map(item => {
-              const active = item.trial_id === selectedTrialId;
-              return (
-                <button
-                  key={item.trial_id}
-                  type="button"
-                  onClick={() => setSelectedTrialId(item.trial_id)}
-                  style={{
-                    ...buttonBaseStyle,
-                    borderColor: active ? '#0f766e' : '#d8dee8',
-                    background: active ? '#f0fdfa' : '#ffffff',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                    <strong style={{ color: '#0f172a', fontSize: 13 }}>{item.platform || 'LT1'} / {item.relative_orbit || '-'}</strong>
-                    <StatusBadge value={item.status} />
-                  </div>
-                  <div style={{ ...mutedStyle, marginTop: 6 }}>
-                    {item.dates?.[0] || '-'} 至 {item.dates?.[item.dates.length - 1] || '-'}，
-                    {item.scene_count || 0} 景，{item.direction || '-'}，{item.polarization || '-'}
-                  </div>
-                </button>
-              );
-            })}
-            {!loading && trials.length === 0 && (
-              <div style={{ ...mutedStyle, padding: '10px 0' }}>
-                未发现可读取的 Gamma SBAS/IPTA 试验汇总。
-              </div>
-            )}
-          </div>
-        </section>
-
-        <section style={sectionStyle}>
-          {detailLoading && <div style={mutedStyle}>正在加载详情...</div>}
-          {!detailLoading && trial && (
-            <div style={{ display: 'grid', gap: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'flex-start' }}>
-                <div>
-                  <h3 style={{ margin: 0, fontSize: 17, color: '#0f172a' }}>{trial.trial_id}</h3>
-                  <div style={{ ...mutedStyle, marginTop: 5 }}>
-                    {stack.platform} / relOrbit {stack.relative_orbit} / {stack.direction} / {stack.mode} / {stack.polarization}
-                  </div>
-                </div>
-                <StatusBadge value={trial.status} />
-              </div>
-
-              <div style={metricGridStyle}>
-                <Metric label="日期数" value={`${trial.scene_count || 0}`} />
-                <Metric label="参考日期" value={trial.reference_date || '-'} />
-                <Metric label="LOS 速率中位数" value={formatValue(trial.primary_rate_median_mm_year, ' mm/yr')} />
-                <Metric label="LOS sigma 中位数" value={formatValue(trial.sigma_median_mm_year, ' mm/yr')} />
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
-                {primaryPreview && (
-                  <div>
-                    <div style={{ ...valueStyle, marginBottom: 6 }}>LOS 速率图</div>
-                    <div style={{ ...mutedStyle, marginBottom: 6 }}>
-                      {primaryPreview.key.endsWith('_geo_preview_png') ? 'WGS84 地理编码预览' : 'RDC 处理几何浏览图'}
-                    </div>
-                    <img
-                      alt="LOS velocity toward radar positive"
-                      src={getSbasInsarArtifactUrl(trial.trial_id, primaryPreview.relative_path)}
-                      style={{
-                        width: '100%',
-                        aspectRatio: '4 / 3',
-                        objectFit: 'contain',
-                        border: '1px solid #d8dee8',
-                        borderRadius: 8,
-                        background: '#f8fafc',
-                      }}
-                    />
-                  </div>
-                )}
-                {monitorPreview && (
-                  <div>
-                    <div style={{ ...valueStyle, marginBottom: 6 }}>监测点形变曲线</div>
-                    <img
-                      alt="Monitoring point LOS displacement time series"
-                      src={getSbasInsarArtifactUrl(trial.trial_id, monitorPreview.relative_path)}
-                      style={{
-                        width: '100%',
-                        aspectRatio: '4 / 3',
-                        objectFit: 'contain',
-                        border: '1px solid #d8dee8',
-                        borderRadius: 8,
-                        background: '#ffffff',
-                      }}
-                    />
-                  </div>
-                )}
-                {sigmaPreview && (
-                  <div>
-                    <div style={{ ...valueStyle, marginBottom: 6 }}>LOS sigma 图</div>
-                    <div style={{ ...mutedStyle, marginBottom: 6 }}>
-                      {sigmaPreview.key.endsWith('_geo_preview_png') ? 'WGS84 地理编码预览' : 'RDC 处理几何浏览图'}
-                    </div>
-                    <img
-                      alt="LOS velocity sigma"
-                      src={getSbasInsarArtifactUrl(trial.trial_id, sigmaPreview.relative_path)}
-                      style={{
-                        width: '100%',
-                        aspectRatio: '4 / 3',
-                        objectFit: 'contain',
-                        border: '1px solid #d8dee8',
-                        borderRadius: 8,
-                        background: '#f8fafc',
-                      }}
-                    />
-                  </div>
-                )}
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
-                <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10 }}>
-                  <div style={valueStyle}>LOS 符号约定</div>
-                  <div style={{ ...mutedStyle, marginTop: 6 }}>
-                    {radar.los_sign_convention || trial.los_sign_convention || '-'}
-                  </div>
-                </div>
-              <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10 }}>
-                <div style={valueStyle}>监测点</div>
-                <div style={{ ...mutedStyle, marginTop: 6 }}>
-                    {monitorPoint ? (
-                      <>
-                        {monitorPoint.point_id}，约 {formatValue(monitorPoint.approx_lonlat?.lon)}E /
-                        {formatValue(monitorPoint.approx_lonlat?.lat)}N，速率
-                        {formatValue(monitorPoint.los_rate_toward_mm_per_year, ' mm/yr')}
-                        {monitorCsv && (
-                          <>
-                            {' '}
-                            <ArtifactLink trialId={trial.trial_id} artifact={monitorCsv} />
-                          </>
-                        )}
-                      </>
-                    ) : '-'}
-                  </div>
-                </div>
-              </div>
-              <div style={{ ...mutedStyle }}>
-                当前曲线是自动选取的单个样例点，用于验证时序曲线能力；正式监测点需要用户点击、导入点位或质量筛选后的点集。
-              </div>
-
-              <div>
-                <div style={{ ...valueStyle, marginBottom: 8 }}>产品文件</div>
-                <div style={{ overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 8 }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ background: '#f8fafc', color: '#475569' }}>
-                        <th style={{ textAlign: 'left', padding: '8px 10px', borderBottom: '1px solid #e2e8f0' }}>产品</th>
-                        <th style={{ textAlign: 'left', padding: '8px 10px', borderBottom: '1px solid #e2e8f0' }}>角色</th>
-                        <th style={{ textAlign: 'right', padding: '8px 10px', borderBottom: '1px solid #e2e8f0' }}>大小</th>
-                        <th style={{ textAlign: 'right', padding: '8px 10px', borderBottom: '1px solid #e2e8f0' }}>操作</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {productArtifacts.map(item => (
-                        <tr key={item.key}>
-                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #f1f5f9', color: '#0f172a' }}>{item.label}</td>
-                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #f1f5f9', color: '#64748b' }}>{item.role}</td>
-                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #f1f5f9', textAlign: 'right', color: '#64748b' }}>
-                            {formatBytes(item.size_bytes)}
-                          </td>
-                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #f1f5f9', textAlign: 'right' }}>
-                            <ArtifactLink trialId={trial.trial_id} artifact={item} />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
-          {!detailLoading && !trial && (
-            <div style={mutedStyle}>请选择一个 SBAS-InSAR 试验或生产序列。</div>
-          )}
-        </section>
-      </div>
     </div>
   );
 }

@@ -88,6 +88,59 @@ class SbasCoregistrationJobRequest(BaseModel):
     timeout_seconds: int = Field(default=43200, ge=60, le=172800)
 
 
+class SbasRdcDemRequest(BaseModel):
+    execute: bool = False
+    rlks: int = Field(default=8, ge=1, le=64)
+
+
+class SbasRdcDemJobRequest(BaseModel):
+    rlks: int = Field(default=8, ge=1, le=64)
+    timeout_seconds: int = Field(default=43200, ge=60, le=172800)
+
+
+class SbasInterferogramsRequest(BaseModel):
+    execute: bool = False
+    rlks: int = Field(default=8, ge=1, le=64)
+    azlks: int = Field(default=8, ge=1, le=64)
+    unwrap_threshold: float = Field(default=0.20, ge=0.01, le=0.95)
+
+
+class SbasInterferogramsJobRequest(BaseModel):
+    rlks: int = Field(default=8, ge=1, le=64)
+    azlks: int = Field(default=8, ge=1, le=64)
+    unwrap_threshold: float = Field(default=0.20, ge=0.01, le=0.95)
+    timeout_seconds: int = Field(default=43200, ge=60, le=172800)
+
+
+class SbasIptaTimeseriesRequest(BaseModel):
+    execute: bool = False
+    rlks: int = Field(default=8, ge=1, le=64)
+    reference_window: int = Field(default=16, ge=1, le=256)
+    mb_mode: int = Field(default=0, ge=0, le=2)
+
+
+class SbasIptaTimeseriesJobRequest(BaseModel):
+    rlks: int = Field(default=8, ge=1, le=64)
+    reference_window: int = Field(default=16, ge=1, le=256)
+    mb_mode: int = Field(default=0, ge=0, le=2)
+    timeout_seconds: int = Field(default=43200, ge=60, le=172800)
+
+
+class SbasWorkflowPrepareRequest(BaseModel):
+    force: bool = False
+    rlks: int = Field(default=8, ge=1, le=64)
+    azlks: int = Field(default=8, ge=1, le=64)
+    reference_window: int = Field(default=16, ge=1, le=256)
+    mb_mode: int = Field(default=0, ge=0, le=2)
+
+
+class SbasWorkflowJobRequest(SbasWorkflowPrepareRequest):
+    from_step: str | None = Field(default=None, max_length=64)
+    to_step: str | None = Field(default=None, max_length=64)
+    only_steps: list[str] | None = None
+    timeout_seconds: int = Field(default=172800, ge=60, le=604800)
+
+
 @router.get("/capabilities")
 async def get_sbas_insar_capabilities():
     return sbas_insar_production_service.get_capabilities()
@@ -166,6 +219,76 @@ async def get_sbas_insar_run(run_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/workflow", status_code=202)
+async def prepare_sbas_insar_workflow(run_id: str, request: SbasWorkflowPrepareRequest):
+    try:
+        return await asyncio.to_thread(
+            sbas_insar_production_service.prepare_workflow,
+            run_id,
+            force=request.force,
+            rlks=request.rlks,
+            azlks=request.azlks,
+            reference_window=request.reference_window,
+            mb_mode=request.mb_mode,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/workflow/jobs", status_code=202)
+async def submit_sbas_insar_workflow_job(run_id: str, request: SbasWorkflowJobRequest):
+    try:
+        await asyncio.to_thread(
+            sbas_insar_production_service.prepare_workflow,
+            run_id,
+            force=request.force,
+            rlks=request.rlks,
+            azlks=request.azlks,
+            reference_window=request.reference_window,
+            mb_mode=request.mb_mode,
+        )
+        from ..services.job_handlers import JOB_TYPE_SBAS_GAMMA_WORKFLOW
+
+        payload = {
+            "run_id": run_id,
+            "force": request.force,
+            "rlks": request.rlks,
+            "azlks": request.azlks,
+            "reference_window": request.reference_window,
+            "mb_mode": request.mb_mode,
+            "from_step": request.from_step,
+            "to_step": request.to_step,
+            "only_steps": request.only_steps or [],
+            "timeout_seconds": request.timeout_seconds,
+        }
+        task_id = await task_service.create_task(
+            task_type=JOB_TYPE_SBAS_GAMMA_WORKFLOW,
+            task_name=f"Gamma SBAS Workflow {run_id}",
+            params=payload,
+        )
+        job_id = await job_queue_service.create_job(
+            job_type=JOB_TYPE_SBAS_GAMMA_WORKFLOW,
+            payload=payload,
+            task_id=task_id,
+            max_attempts=1,
+        )
+        return {
+            "message": "Gamma SBAS workflow job queued.",
+            "run_id": run_id,
+            "task_id": task_id,
+            "job_id": job_id,
+            "job_type": JOB_TYPE_SBAS_GAMMA_WORKFLOW,
+        }
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 409 if "already running" in message.lower() or "conflict" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
 
 
 @router.post("/runs/{run_id}/baseline-audit", status_code=202)
@@ -271,6 +394,219 @@ async def submit_sbas_insar_coregistration_job(run_id: str, request: SbasCoregis
     except ValueError as exc:
         message = str(exc)
         status_code = 409 if "冲突" in message or "conflict" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.post("/runs/{run_id}/rdc-dem", status_code=202)
+async def prepare_sbas_insar_rdc_dem(run_id: str, request: SbasRdcDemRequest):
+    try:
+        return await asyncio.to_thread(
+            sbas_insar_production_service.prepare_rdc_dem,
+            run_id,
+            execute=request.execute,
+            rlks=request.rlks,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/rdc-dem/jobs", status_code=202)
+async def submit_sbas_insar_rdc_dem_job(run_id: str, request: SbasRdcDemJobRequest):
+    try:
+        run_detail = await asyncio.to_thread(sbas_insar_production_service.get_run_detail, run_id)
+        status = str((run_detail.get("run") or {}).get("status") or "").strip()
+        if status in {"COREGISTRATION_READY", "RDC_DEM_FAILED"}:
+            await asyncio.to_thread(
+                sbas_insar_production_service.prepare_rdc_dem,
+                run_id,
+                execute=False,
+                rlks=request.rlks,
+            )
+            run_detail = await asyncio.to_thread(sbas_insar_production_service.get_run_detail, run_id)
+            status = str((run_detail.get("run") or {}).get("status") or "").strip()
+        if status not in {"RDC_DEM_SCRIPT_READY", "RDC_DEM_RUNNING"}:
+            raise ValueError(f"run status does not allow RDC DEM job submission: {status}")
+        if status == "RDC_DEM_RUNNING":
+            raise ValueError("RDC DEM is already running for this run")
+
+        from ..services.job_handlers import JOB_TYPE_SBAS_RDC_DEM
+
+        payload = {
+            "run_id": run_id,
+            "rlks": request.rlks,
+            "timeout_seconds": request.timeout_seconds,
+        }
+        task_id = await task_service.create_task(
+            task_type=JOB_TYPE_SBAS_RDC_DEM,
+            task_name=f"SBAS-InSAR RDC DEM {run_id}",
+            params=payload,
+        )
+        job_id = await job_queue_service.create_job(
+            job_type=JOB_TYPE_SBAS_RDC_DEM,
+            payload=payload,
+            task_id=task_id,
+            max_attempts=1,
+        )
+        return {
+            "message": "SBAS-InSAR RDC DEM job queued.",
+            "run_id": run_id,
+            "task_id": task_id,
+            "job_id": job_id,
+            "job_type": JOB_TYPE_SBAS_RDC_DEM,
+        }
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 409 if "already running" in message.lower() or "conflict" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.post("/runs/{run_id}/interferograms", status_code=202)
+async def prepare_sbas_insar_interferograms(run_id: str, request: SbasInterferogramsRequest):
+    try:
+        return await asyncio.to_thread(
+            sbas_insar_production_service.prepare_interferograms,
+            run_id,
+            execute=request.execute,
+            rlks=request.rlks,
+            azlks=request.azlks,
+            unwrap_threshold=request.unwrap_threshold,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/interferograms/jobs", status_code=202)
+async def submit_sbas_insar_interferograms_job(run_id: str, request: SbasInterferogramsJobRequest):
+    try:
+        run_detail = await asyncio.to_thread(sbas_insar_production_service.get_run_detail, run_id)
+        status = str((run_detail.get("run") or {}).get("status") or "").strip()
+        if status in {"RDC_DEM_READY", "INTERFEROGRAMS_FAILED"}:
+            await asyncio.to_thread(
+                sbas_insar_production_service.prepare_interferograms,
+                run_id,
+                execute=False,
+                rlks=request.rlks,
+                azlks=request.azlks,
+                unwrap_threshold=request.unwrap_threshold,
+            )
+            run_detail = await asyncio.to_thread(sbas_insar_production_service.get_run_detail, run_id)
+            status = str((run_detail.get("run") or {}).get("status") or "").strip()
+        if status not in {"INTERFEROGRAMS_SCRIPT_READY", "INTERFEROGRAMS_RUNNING"}:
+            raise ValueError(f"run status does not allow interferogram job submission: {status}")
+        if status == "INTERFEROGRAMS_RUNNING":
+            raise ValueError("interferograms are already running for this run")
+
+        from ..services.job_handlers import JOB_TYPE_SBAS_INTERFEROGRAMS
+
+        payload = {
+            "run_id": run_id,
+            "rlks": request.rlks,
+            "azlks": request.azlks,
+            "unwrap_threshold": request.unwrap_threshold,
+            "timeout_seconds": request.timeout_seconds,
+        }
+        task_id = await task_service.create_task(
+            task_type=JOB_TYPE_SBAS_INTERFEROGRAMS,
+            task_name=f"SBAS-InSAR Interferograms {run_id}",
+            params=payload,
+        )
+        job_id = await job_queue_service.create_job(
+            job_type=JOB_TYPE_SBAS_INTERFEROGRAMS,
+            payload=payload,
+            task_id=task_id,
+            max_attempts=1,
+        )
+        return {
+            "message": "SBAS-InSAR interferogram job queued.",
+            "run_id": run_id,
+            "task_id": task_id,
+            "job_id": job_id,
+            "job_type": JOB_TYPE_SBAS_INTERFEROGRAMS,
+        }
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 409 if "already running" in message.lower() or "conflict" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.post("/runs/{run_id}/ipta-timeseries", status_code=202)
+async def prepare_sbas_insar_ipta_timeseries(run_id: str, request: SbasIptaTimeseriesRequest):
+    try:
+        return await asyncio.to_thread(
+            sbas_insar_production_service.prepare_ipta_timeseries,
+            run_id,
+            execute=request.execute,
+            rlks=request.rlks,
+            reference_window=request.reference_window,
+            mb_mode=request.mb_mode,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/ipta-timeseries/jobs", status_code=202)
+async def submit_sbas_insar_ipta_timeseries_job(run_id: str, request: SbasIptaTimeseriesJobRequest):
+    try:
+        run_detail = await asyncio.to_thread(sbas_insar_production_service.get_run_detail, run_id)
+        status = str((run_detail.get("run") or {}).get("status") or "").strip()
+        if status in {"INTERFEROGRAMS_READY", "IPTA_TIMESERIES_FAILED"}:
+            await asyncio.to_thread(
+                sbas_insar_production_service.prepare_ipta_timeseries,
+                run_id,
+                execute=False,
+                rlks=request.rlks,
+                reference_window=request.reference_window,
+                mb_mode=request.mb_mode,
+            )
+            run_detail = await asyncio.to_thread(sbas_insar_production_service.get_run_detail, run_id)
+            status = str((run_detail.get("run") or {}).get("status") or "").strip()
+        if status not in {"IPTA_TIMESERIES_SCRIPT_READY", "IPTA_TIMESERIES_RUNNING"}:
+            raise ValueError(f"run status does not allow IPTA time-series job submission: {status}")
+        if status == "IPTA_TIMESERIES_RUNNING":
+            raise ValueError("IPTA time-series is already running for this run")
+
+        from ..services.job_handlers import JOB_TYPE_SBAS_IPTA_TIMESERIES
+
+        payload = {
+            "run_id": run_id,
+            "rlks": request.rlks,
+            "reference_window": request.reference_window,
+            "mb_mode": request.mb_mode,
+            "timeout_seconds": request.timeout_seconds,
+        }
+        task_id = await task_service.create_task(
+            task_type=JOB_TYPE_SBAS_IPTA_TIMESERIES,
+            task_name=f"SBAS-InSAR IPTA Timeseries {run_id}",
+            params=payload,
+        )
+        job_id = await job_queue_service.create_job(
+            job_type=JOB_TYPE_SBAS_IPTA_TIMESERIES,
+            payload=payload,
+            task_id=task_id,
+            max_attempts=1,
+        )
+        return {
+            "message": "SBAS-InSAR IPTA time-series job queued.",
+            "run_id": run_id,
+            "task_id": task_id,
+            "job_id": job_id,
+            "job_type": JOB_TYPE_SBAS_IPTA_TIMESERIES,
+        }
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 409 if "already running" in message.lower() or "conflict" in message.lower() else 400
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 

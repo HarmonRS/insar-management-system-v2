@@ -112,6 +112,7 @@ def build_wsl_runtime_registry() -> WslRuntimeRegistry:
 
     isce2_runner_windows = _project_file_windows("deploy", "wsl", "runners", "isce2_runner.py")
     gamma_runner_windows = _project_file_windows("deploy", "wsl", "runners", "gamma_pyint_runner.py")
+    gamma_sbas_runner_windows = _project_file_windows("deploy", "wsl", "runners", "gamma_sbas_runner.py")
     gamma_profile_windows = _project_file_windows("deploy", "wsl", "profiles", "gamma_env.sh")
 
     runtimes = {
@@ -149,6 +150,33 @@ def build_wsl_runtime_registry() -> WslRuntimeRegistry:
                 "legacy_distro_env_var": "PYINT_WSL_DISTRO",
                 "legacy_python_env_var": "PYINT_WSL_PYTHON",
                 "legacy_profile_env_var": "PYINT_GAMMA_ENV_SCRIPT",
+            },
+        ),
+        settings.GAMMA_SBAS_RUNTIME_ID: WslRuntimeDefinition(
+            runtime_id=settings.GAMMA_SBAS_RUNTIME_ID,
+            engine_code="gamma",
+            display_name="Gamma SBAS Runtime V1",
+            distro=str(settings.GAMMA_SBAS_WSL_DISTRO or shared_distro).strip() or shared_distro,
+            conda_env_name=shared_conda_env,
+            python_path=str(settings.GAMMA_SBAS_PYTHON or shared_python_path).strip() or shared_python_path,
+            runner_path_windows=gamma_sbas_runner_windows,
+            runner_path_wsl=_windows_path_to_wsl_mount(gamma_sbas_runner_windows),
+            allowed_operations=("lt1_gamma_sbas_workflow", "lt1_gamma_sbas_step"),
+            env_profile_path_windows=str(settings.GAMMA_SBAS_ENV_SCRIPT or gamma_profile_windows).strip(),
+            env_profile_path_wsl=_windows_path_to_wsl_mount(
+                str(settings.GAMMA_SBAS_ENV_SCRIPT or gamma_profile_windows).strip()
+            ),
+            metadata_json={
+                "shared_runtime": True,
+                "workflow_code": "sbas_insar",
+                "processor_code": "gamma_ipta_sbas",
+                "env_vars": {
+                    "runtime_id": "GAMMA_SBAS_RUNTIME_ID",
+                    "python": "GAMMA_SBAS_PYTHON",
+                    "env_profile": "GAMMA_SBAS_ENV_SCRIPT",
+                    "work_root": "GAMMA_SBAS_WORK_ROOT",
+                    "product_root": "GAMMA_SBAS_PRODUCT_ROOT",
+                },
             },
         ),
     }

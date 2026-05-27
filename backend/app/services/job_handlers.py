@@ -92,6 +92,10 @@ JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
 JOB_TYPE_SCAN_ASSET_INVENTORY = "SCAN_ASSET_INVENTORY"
 JOB_TYPE_SBAS_COREGISTRATION = "SBAS_COREGISTRATION"
+JOB_TYPE_SBAS_RDC_DEM = "SBAS_RDC_DEM"
+JOB_TYPE_SBAS_INTERFEROGRAMS = "SBAS_INTERFEROGRAMS"
+JOB_TYPE_SBAS_IPTA_TIMESERIES = "SBAS_IPTA_TIMESERIES"
+JOB_TYPE_SBAS_GAMMA_WORKFLOW = "SBAS_GAMMA_WORKFLOW"
 
 COPY_ALLOWED_STATUSES = {"PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"}
 
@@ -4263,6 +4267,346 @@ async def _handle_sbas_coregistration(job: SystemJobORM) -> None:
     )
 
 
+async def _handle_sbas_rdc_dem(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("SBAS_RDC_DEM requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("SBAS_RDC_DEM requires run_id payload.")
+
+    rlks = _normalize_positive_int(payload.get("rlks")) or 8
+    timeout_seconds = _normalize_positive_int(payload.get("timeout_seconds")) or 43200
+
+    await task_service.start_task(job.task_id, message="正在执行 SBAS-InSAR Gamma RDC DEM...")
+    await task_service.update_task(
+        job.task_id,
+        progress=5,
+        message=f"准备运行 Gamma gc_map1/gc_map_fine: run_id={run_id}",
+    )
+    await task_service.add_log(
+        job.task_id,
+        "INFO",
+        f"SBAS RDC DEM queued: run_id={run_id}, rlks={rlks}, timeout={timeout_seconds}s",
+    )
+
+    from .sbas_insar_production_service import sbas_insar_production_service
+
+    async def _task_keepalive() -> None:
+        progress = 12
+        while True:
+            await asyncio.sleep(60)
+            progress = min(88, progress + 2)
+            await task_service.update_task(
+                job.task_id,
+                progress=progress,
+                message=f"Gamma RDC DEM 仍在运行: run_id={run_id}",
+            )
+
+    runner_task = asyncio.create_task(
+        asyncio.to_thread(
+            sbas_insar_production_service.execute_rdc_dem,
+            run_id,
+            rlks=rlks,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    keepalive_task = asyncio.create_task(_task_keepalive())
+    try:
+        result = await runner_task
+    finally:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+
+    manifest = result.get("manifest") or {}
+    run = result.get("run") or {}
+    summary = (manifest.get("rdc_dem") or {}).get("summary") or {}
+    status = str(run.get("status") or manifest.get("status") or "").strip()
+    if status != "RDC_DEM_READY":
+        raise RuntimeError(
+            "SBAS RDC DEM failed: "
+            f"status={status or 'UNKNOWN'}, "
+            f"missing_outputs={summary.get('missing_outputs') or []}"
+        )
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            "SBAS-InSAR RDC DEM 完成: "
+            f"rdc_dem={((summary.get('outputs') or {}).get('rdc_dem') or {}).get('path') or '-'}"
+        ),
+    )
+
+
+async def _handle_sbas_interferograms(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("SBAS_INTERFEROGRAMS requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("SBAS_INTERFEROGRAMS requires run_id payload.")
+
+    rlks = _normalize_positive_int(payload.get("rlks")) or 8
+    azlks = _normalize_positive_int(payload.get("azlks")) or 8
+    timeout_seconds = _normalize_positive_int(payload.get("timeout_seconds")) or 43200
+    try:
+        unwrap_threshold = float(payload.get("unwrap_threshold") or 0.20)
+    except (TypeError, ValueError):
+        unwrap_threshold = 0.20
+
+    await task_service.start_task(job.task_id, message="正在执行 SBAS-InSAR Gamma 差分干涉图...")
+    await task_service.update_task(
+        job.task_id,
+        progress=5,
+        message=f"准备运行 Gamma phase_sim_orb/SLC_diff_intf/mcf: run_id={run_id}",
+    )
+    await task_service.add_log(
+        job.task_id,
+        "INFO",
+        (
+            f"SBAS interferograms queued: run_id={run_id}, rlks={rlks}, azlks={azlks}, "
+            f"unwrap_threshold={unwrap_threshold}, timeout={timeout_seconds}s"
+        ),
+    )
+
+    from .sbas_insar_production_service import sbas_insar_production_service
+
+    async def _task_keepalive() -> None:
+        progress = 12
+        while True:
+            await asyncio.sleep(60)
+            progress = min(88, progress + 2)
+            await task_service.update_task(
+                job.task_id,
+                progress=progress,
+                message=f"Gamma 差分干涉图仍在运行: run_id={run_id}",
+            )
+
+    runner_task = asyncio.create_task(
+        asyncio.to_thread(
+            sbas_insar_production_service.execute_interferograms,
+            run_id,
+            rlks=rlks,
+            azlks=azlks,
+            unwrap_threshold=unwrap_threshold,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    keepalive_task = asyncio.create_task(_task_keepalive())
+    try:
+        result = await runner_task
+    finally:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+
+    manifest = result.get("manifest") or {}
+    run = result.get("run") or {}
+    summary = (manifest.get("interferograms") or {}).get("summary") or {}
+    status = str(run.get("status") or manifest.get("status") or "").strip()
+    if status != "INTERFEROGRAMS_READY":
+        raise RuntimeError(
+            "SBAS interferograms failed: "
+            f"status={status or 'UNKNOWN'}, "
+            f"missing_pairs={summary.get('missing_pairs') or []}, "
+            f"missing_tabs={summary.get('missing_tabs') or []}"
+        )
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            "SBAS-InSAR 差分干涉图完成: "
+            f"{summary.get('ready_pair_count', 0)}/{summary.get('pair_count', 0)} pairs ready"
+        ),
+    )
+
+
+async def _handle_sbas_ipta_timeseries(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("SBAS_IPTA_TIMESERIES requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("SBAS_IPTA_TIMESERIES requires run_id payload.")
+
+    rlks = _normalize_positive_int(payload.get("rlks")) or 8
+    reference_window = _normalize_positive_int(payload.get("reference_window")) or 16
+    try:
+        mb_mode = int(payload.get("mb_mode") or 0)
+    except (TypeError, ValueError):
+        mb_mode = 0
+    if mb_mode not in {0, 1, 2}:
+        mb_mode = 0
+    timeout_seconds = _normalize_positive_int(payload.get("timeout_seconds")) or 43200
+
+    await task_service.start_task(job.task_id, message="Running SBAS-InSAR Gamma IPTA time-series inversion...")
+    await task_service.update_task(
+        job.task_id,
+        progress=5,
+        message=f"Preparing Gamma mb/ts_rate: run_id={run_id}",
+    )
+    await task_service.add_log(
+        job.task_id,
+        "INFO",
+        (
+            f"SBAS IPTA time-series queued: run_id={run_id}, rlks={rlks}, "
+            f"reference_window={reference_window}, mb_mode={mb_mode}, "
+            f"timeout={timeout_seconds}s"
+        ),
+    )
+
+    from .sbas_insar_production_service import sbas_insar_production_service
+
+    async def _task_keepalive() -> None:
+        progress = 12
+        while True:
+            await asyncio.sleep(60)
+            progress = min(88, progress + 2)
+            await task_service.update_task(
+                job.task_id,
+                progress=progress,
+                message=f"Gamma IPTA mb/ts_rate still running: run_id={run_id}",
+            )
+
+    runner_task = asyncio.create_task(
+        asyncio.to_thread(
+            sbas_insar_production_service.execute_ipta_timeseries,
+            run_id,
+            rlks=rlks,
+            reference_window=reference_window,
+            mb_mode=mb_mode,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    keepalive_task = asyncio.create_task(_task_keepalive())
+    try:
+        result = await runner_task
+    finally:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+
+    manifest = result.get("manifest") or {}
+    run = result.get("run") or {}
+    summary = (manifest.get("ipta_timeseries") or {}).get("summary") or {}
+    status = str(run.get("status") or manifest.get("status") or "").strip()
+    if status != "IPTA_TIMESERIES_READY":
+        raise RuntimeError(
+            "SBAS IPTA time-series failed: "
+            f"status={status or 'UNKNOWN'}, "
+            f"missing_outputs={summary.get('missing_outputs') or []}"
+        )
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            "SBAS-InSAR IPTA time-series complete: "
+            f"ts_rate={((summary.get('outputs') or {}).get('ts_rate') or {}).get('path') or '-'}"
+        ),
+    )
+
+
+async def _handle_sbas_gamma_workflow(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("SBAS_GAMMA_WORKFLOW requires task_id for progress tracking.")
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("SBAS_GAMMA_WORKFLOW requires run_id payload.")
+
+    from_step = str(payload.get("from_step") or "").strip() or None
+    to_step = str(payload.get("to_step") or "").strip() or None
+    only_steps_raw = payload.get("only_steps") or []
+    only_steps = [str(item).strip() for item in only_steps_raw if str(item).strip()] if isinstance(only_steps_raw, list) else []
+    force = bool(payload.get("force", False))
+    timeout_seconds = _normalize_positive_int(payload.get("timeout_seconds")) or int(settings.GAMMA_SBAS_WORKFLOW_TIMEOUT_SECONDS)
+
+    await task_service.start_task(job.task_id, message="Running Gamma SBAS expert workflow...")
+    await task_service.update_task(
+        job.task_id,
+        progress=5,
+        message=f"Preparing Gamma SBAS manifest runner: run_id={run_id}",
+    )
+    await task_service.add_log(
+        job.task_id,
+        "INFO",
+        (
+            f"SBAS Gamma workflow queued: run_id={run_id}, from={from_step or '-'}, "
+            f"to={to_step or '-'}, only={only_steps or '-'}, force={force}, timeout={timeout_seconds}s"
+        ),
+    )
+
+    from .sbas_insar_production_service import sbas_insar_production_service
+
+    async def _task_keepalive() -> None:
+        progress = 10
+        while True:
+            await asyncio.sleep(60)
+            progress = min(92, progress + 2)
+            await task_service.update_task(
+                job.task_id,
+                progress=progress,
+                message="Gamma SBAS workflow is still running...",
+            )
+
+    runner_task = asyncio.create_task(
+        asyncio.to_thread(
+            sbas_insar_production_service.execute_workflow,
+            run_id,
+            from_step=from_step,
+            to_step=to_step,
+            only_steps=only_steps,
+            force=force,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    keepalive_task = asyncio.create_task(_task_keepalive())
+    try:
+        result = await runner_task
+    finally:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+
+    run = result.get("run") or {}
+    manifest = result.get("manifest") or {}
+    workflow = manifest.get("workflow") or {}
+    summary = workflow.get("summary") or {}
+    status = str(run.get("status") or manifest.get("status") or "").strip()
+    if status not in {"WORKFLOW_COMPLETED", "WORKFLOW_PARTIAL"}:
+        raise RuntimeError(
+            "SBAS Gamma workflow failed: "
+            f"status={status or 'UNKNOWN'}, failed_steps={summary.get('failed_count') or 0}"
+        )
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            f"Gamma SBAS expert workflow {status.lower()}: "
+            f"completed={summary.get('completed_count', 0)}, "
+            f"skipped={summary.get('skipped_count', 0)}, "
+            f"planned={summary.get('planned_count', 0)}"
+        ),
+    )
+
+
 _HANDLERS = {
     JOB_TYPE_SCAN_DATA: _handle_scan_data,
     JOB_TYPE_SCAN_ASSET_INVENTORY: _handle_scan_asset_inventory,
@@ -4301,6 +4645,10 @@ _HANDLERS = {
     JOB_TYPE_GF3_UNPACK: _handle_gf3_unpack,
     JOB_TYPE_GF3_BATCH_PROCESS: _handle_gf3_batch_process,
     JOB_TYPE_SBAS_COREGISTRATION: _handle_sbas_coregistration,
+    JOB_TYPE_SBAS_RDC_DEM: _handle_sbas_rdc_dem,
+    JOB_TYPE_SBAS_INTERFEROGRAMS: _handle_sbas_interferograms,
+    JOB_TYPE_SBAS_IPTA_TIMESERIES: _handle_sbas_ipta_timeseries,
+    JOB_TYPE_SBAS_GAMMA_WORKFLOW: _handle_sbas_gamma_workflow,
 }
 
 
