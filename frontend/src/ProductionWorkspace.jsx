@@ -9,6 +9,7 @@ import { PanelLoadingBody } from './components/app/AppLoadingFallbacks';
 
 const LazyDinsarProductionPanel = lazy(() => import('./DinsarProductionPanel'));
 const LazySbasInsarProductionPanel = lazy(() => import('./SbasInsarProductionPanel'));
+const LazySbasInsarProductsPanel = lazy(() => import('./SbasInsarProductsPanel'));
 const LazyDinsarProductsPanel = lazy(() => import('./DinsarProductsPanel'));
 
 const shellStyle = {
@@ -65,6 +66,10 @@ export default function ProductionWorkspace({
 
   const handleDinsarProductQueued = taskId => {
     onTaskStart?.(taskId, 'D-InSAR 产物任务已入队，等待处理...');
+  };
+
+  const handleSbasProductQueued = taskId => {
+    onTaskStart?.(taskId, 'SBAS-InSAR result catalog task queued.');
   };
 
   return (
@@ -176,6 +181,12 @@ export default function ProductionWorkspace({
           {activeView === 'sbas_insar_production' && (
             <LazySbasInsarProductionPanel
               readOnly={readOnly}
+            />
+          )}
+          {activeView === 'sbas_insar_products' && (
+            <LazySbasInsarProductsPanel
+              readOnly={readOnly}
+              onJobQueued={handleSbasProductQueued}
             />
           )}
           {activeView === 'dinsar_products' && (

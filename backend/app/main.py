@@ -19,6 +19,7 @@ from .services.pairing_state_service import pairing_state_service
 from .services.psinsar_catalog_service import psinsar_catalog_service
 from .services.result_catalog_service import result_catalog_service
 from .services.root_registry_service import root_registry_service
+from .services.sbas_insar_catalog_service import sbas_insar_catalog_service
 
 
 @asynccontextmanager
@@ -80,6 +81,18 @@ async def lifespan(app: FastAPI):
             "manifest_count": 0,
             "db_count": 0,
             "needs_rebuild": False,
+            "queued": False,
+            "error": str(exc),
+        }
+    try:
+        sbas_catalog_bootstrap = await sbas_insar_catalog_service.bootstrap_catalog_on_startup_clean()
+    except Exception as exc:
+        sbas_catalog_bootstrap = {
+            "storage_root": settings.GAMMA_SBAS_WORK_ROOT,
+            "manifest_count": 0,
+            "db_count": 0,
+            "needs_rebuild": False,
+            "rebuilt": False,
             "queued": False,
             "error": str(exc),
         }
@@ -179,6 +192,17 @@ async def lifespan(app: FastAPI):
     if ps_catalog_bootstrap.get("error"):
         print(f">>> [Timeseries Catalog] Startup bootstrap failed: {ps_catalog_bootstrap['error']}")
     print(
+        ">>> [Gamma SBAS Catalog] root={0} runs={1} db={2} rebuild={3} rebuilt={4}".format(
+            sbas_catalog_bootstrap.get("storage_root") or "?",
+            sbas_catalog_bootstrap.get("manifest_count", 0),
+            sbas_catalog_bootstrap.get("db_count", 0),
+            "YES" if sbas_catalog_bootstrap.get("needs_rebuild") else "NO",
+            "YES" if sbas_catalog_bootstrap.get("rebuilt") else "NO",
+        )
+    )
+    if sbas_catalog_bootstrap.get("error"):
+        print(f">>> [Gamma SBAS Catalog] Startup bootstrap failed: {sbas_catalog_bootstrap['error']}")
+    print(
         ">>> [Pairing] status={0} scenes={1} pairs={2} dirty={3} metric={4} rebuild={5}".format(
             pairing_bootstrap.get("status") or "?",
             pairing_bootstrap.get("scene_count", 0),
@@ -214,17 +238,19 @@ async def lifespan(app: FastAPI):
             health.get("timeseries_result_catalog", {})
             or health.get("psinsar_result_catalog", {})
         ).get("ok")
+        sbas_catalog_ok = health.get("sbas_insar_result_catalog", {}).get("ok")
         pairing_ok = health.get("pairing_system", {}).get("ok")
         idl_ok = health.get("idl", {}).get("ok")
         product_packages_ok = health.get("product_packages", {}).get("ok")
         wsl_runtime_ok = health.get("wsl_runtime", {}).get("ok")
         print(
-            ">>> [Health] DB:{0} Schema:{1} Worker:{2} DInSAR-Catalog:{3} Timeseries-Catalog:{4} Packages:{5} WSL:{6} Pairing:{7} IDL:{8}".format(
+            ">>> [Health] DB:{0} Schema:{1} Worker:{2} DInSAR-Catalog:{3} Timeseries-Catalog:{4} SBAS-Catalog:{5} Packages:{6} WSL:{7} Pairing:{8} IDL:{9}".format(
                 "OK" if db_ok else "FAIL",
                 "OK" if schema_ok else "FAIL",
                 "OK" if worker_ok else "FAIL",
                 "OK" if dinsar_catalog_ok else "FAIL",
                 "OK" if psinsar_catalog_ok else "FAIL",
+                "OK" if sbas_catalog_ok else "FAIL",
                 "OK" if product_packages_ok else "FAIL",
                 "OK" if wsl_runtime_ok else "FAIL",
                 "OK" if pairing_ok else "FAIL",

@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from shapely.geometry import box as shapely_box
+
 from ..config import settings
+from .admin_region_lookup_service import (
+    admin_region_matches,
+    lookup_admin_region_for_point,
+    lookup_admin_region_geometry,
+)
 
 
 PRODUCT_DEFINITIONS = (
@@ -745,7 +752,7 @@ class SbasInsarProductionService:
                 "default_strategy": "gamma_geocode_back_data2geotiff_los_sign_conversion",
                 "geocoded_preview_source": "EPSG:4326 GeoTIFF",
             },
-            "monitor_point_modes": ["auto_low_sigma_high_rate", "manual_lonlat"],
+            "monitor_point_modes": ["auto_representative_points", "auto_low_sigma_high_rate", "manual_lonlat"],
             "default_los_convention": {
                 "key": "los_rate_toward_mm_per_year",
                 "description": "toward radar positive; away from radar negative",
@@ -778,10 +785,20 @@ class SbasInsarProductionService:
         platform: str | None = None,
         relative_orbit: str | None = None,
         orbit_direction: str | None = None,
+        admin_region: str | None = None,
+        discovery_mode: str = "strict",
+        aoi_bbox: dict[str, Any] | None = None,
+        min_aoi_coverage_ratio: float = 0.01,
+        min_common_overlap_ratio: float = 0.0,
         force_refresh: bool = False,
     ) -> dict[str, Any]:
         source_paths = self._resolve_source_roots(source_roots)
         orbit_paths = self._resolve_orbit_roots(orbit_roots)
+        normalized_mode = self._normalize_discovery_mode(discovery_mode)
+        min_aoi_coverage_ratio = max(0.0, min(1.0, float(min_aoi_coverage_ratio or 0.0)))
+        min_common_overlap_ratio = max(0.0, min(1.0, float(min_common_overlap_ratio or 0.0)))
+        discovery_aoi = self._build_discovery_aoi(admin_region=admin_region, aoi_bbox=aoi_bbox)
+        effective_mode = "aoi" if normalized_mode == "aoi" and discovery_aoi.get("geometry") is not None else "strict"
         cache_key = self._discovery_cache_key(
             source_paths=source_paths,
             orbit_paths=orbit_paths,
@@ -792,6 +809,11 @@ class SbasInsarProductionService:
             platform=platform,
             relative_orbit=relative_orbit,
             orbit_direction=orbit_direction,
+            admin_region=admin_region,
+            discovery_mode=effective_mode,
+            aoi_bbox=aoi_bbox,
+            min_aoi_coverage_ratio=min_aoi_coverage_ratio,
+            min_common_overlap_ratio=min_common_overlap_ratio,
         )
         if not force_refresh:
             cached = self._read_discovery_cache(cache_key)
@@ -804,6 +826,7 @@ class SbasInsarProductionService:
         platform_filter = str(platform or "").strip().upper()
         rel_filter = str(relative_orbit or "").strip()
         direction_filter = str(orbit_direction or "").strip().upper()
+        aoi_geometry = discovery_aoi.get("geometry") if effective_mode == "aoi" else None
 
         for root in source_paths:
             try:
@@ -819,18 +842,54 @@ class SbasInsarProductionService:
                         continue
                     if direction_filter and str(scene.get("orbit_direction") or "").upper() != direction_filter:
                         continue
+                    if aoi_geometry is not None:
+                        scene = self._scene_with_aoi_metrics(scene, aoi_geometry)
+                        if not scene.get("aoi_intersects"):
+                            continue
+                        if float(scene.get("aoi_overlap_ratio") or 0.0) < min_aoi_coverage_ratio:
+                            continue
                     scenes.append(scene)
             except Exception as exc:
                 errors.append({"source_root": str(root), "error": str(exc)})
 
-        grouped: dict[str, list[dict[str, Any]]] = {}
+        grouped_initial: dict[str, list[dict[str, Any]]] = {}
         for scene in scenes:
-            grouped.setdefault(self._stack_group_key(scene), []).append(scene)
+            group_key = self._aoi_stack_group_key(scene) if effective_mode == "aoi" else self._stack_group_key(scene)
+            grouped_initial.setdefault(group_key, []).append(scene)
+
+        if effective_mode == "aoi":
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for observation_key, group_scenes in grouped_initial.items():
+                for cluster in self._cluster_aoi_scenes(group_scenes):
+                    cluster_key = self._aoi_cluster_key(observation_key, cluster)
+                    clustered_scenes = [
+                        {
+                            **scene,
+                            "aoi_cluster_key": cluster_key,
+                            "aoi_cluster_source": "footprint_common_overlap",
+                        }
+                        for scene in cluster
+                    ]
+                    grouped[cluster_key] = clustered_scenes
+        else:
+            grouped = grouped_initial
 
         candidates = [
-            self._build_stack_candidate(group_scenes, min_scenes=min_scenes, require_orbits=require_orbits)
+            self._build_stack_candidate(
+                group_scenes,
+                min_scenes=min_scenes,
+                require_orbits=require_orbits,
+                discovery_mode=effective_mode,
+                aoi_summary=discovery_aoi.get("summary"),
+                min_common_overlap_ratio=min_common_overlap_ratio,
+            )
             for group_scenes in grouped.values()
         ]
+        if admin_region and effective_mode != "aoi":
+            candidates = [
+                candidate for candidate in candidates
+                if admin_region_matches(candidate.get("admin_region"), admin_region)
+            ]
         candidates.sort(
             key=lambda item: (
                 int(item.get("status") != "READY"),
@@ -852,6 +911,11 @@ class SbasInsarProductionService:
             "orbit_roots": [str(path) for path in orbit_paths],
             "min_scenes": min_scenes,
             "require_orbits": require_orbits,
+            "discovery_mode": effective_mode,
+            "requested_discovery_mode": normalized_mode,
+            "aoi": discovery_aoi.get("summary"),
+            "min_aoi_coverage_ratio": min_aoi_coverage_ratio,
+            "min_common_overlap_ratio": min_common_overlap_ratio,
             "scene_count": len(scenes),
             "candidate_count": len(candidates),
             "errors": errors[:50],
@@ -874,6 +938,11 @@ class SbasInsarProductionService:
         orbit_roots: list[str] | None = None,
         min_scenes: int = 3,
         require_orbits: bool = True,
+        discovery_mode: str = "strict",
+        admin_region: str | None = None,
+        aoi_bbox: dict[str, Any] | None = None,
+        min_aoi_coverage_ratio: float = 0.01,
+        min_common_overlap_ratio: float = 0.0,
     ) -> dict[str, Any]:
         discovery = self.discover_stacks(
             source_roots=source_roots,
@@ -882,6 +951,11 @@ class SbasInsarProductionService:
             require_orbits=require_orbits,
             include_scenes=True,
             limit=0,
+            discovery_mode=discovery_mode,
+            admin_region=admin_region,
+            aoi_bbox=aoi_bbox,
+            min_aoi_coverage_ratio=min_aoi_coverage_ratio,
+            min_common_overlap_ratio=min_common_overlap_ratio,
         )
         candidate = next(
             (item for item in discovery.get("items", []) if item.get("stack_id") == stack_id),
@@ -927,6 +1001,9 @@ class SbasInsarProductionService:
             "status": "READY_FOR_GAMMA_BASELINE_AUDIT" if not blockers else "BLOCKED",
             "require_orbits": require_orbits,
             "min_scenes": min_scenes,
+            "discovery_mode": candidate.get("discovery_mode") or discovery.get("discovery_mode") or "strict",
+            "aoi": candidate.get("aoi") or discovery.get("aoi"),
+            "common_overlap_ratio": candidate.get("common_overlap_ratio"),
             "stack": {
                 key: candidate.get(key)
                 for key in [
@@ -941,6 +1018,7 @@ class SbasInsarProductionService:
                     "reference_date",
                 ]
             },
+            "geographic_coverage": self._build_stack_geographic_coverage({"scenes": usable_scenes}),
             "scenes": usable_scenes,
             "excluded_scenes": [
                 scene for scene in candidate.get("scenes", [])
@@ -983,7 +1061,12 @@ class SbasInsarProductionService:
         min_scenes: int = 3,
         require_orbits: bool = True,
         monitor_points: list[dict[str, Any]] | None = None,
-        monitor_point_strategy: str = "auto_low_sigma_high_rate",
+        monitor_point_strategy: str = "auto_representative_points",
+        discovery_mode: str = "strict",
+        admin_region: str | None = None,
+        aoi_bbox: dict[str, Any] | None = None,
+        min_aoi_coverage_ratio: float = 0.01,
+        min_common_overlap_ratio: float = 0.0,
         dry_run: bool = True,
     ) -> dict[str, Any]:
         audit = self.audit_stack(
@@ -992,6 +1075,11 @@ class SbasInsarProductionService:
             orbit_roots=orbit_roots,
             min_scenes=min_scenes,
             require_orbits=require_orbits,
+            discovery_mode=discovery_mode,
+            admin_region=admin_region,
+            aoi_bbox=aoi_bbox,
+            min_aoi_coverage_ratio=min_aoi_coverage_ratio,
+            min_common_overlap_ratio=min_common_overlap_ratio,
         )
         manifest = audit["manifest"]
         if manifest.get("status") != "READY_FOR_GAMMA_BASELINE_AUDIT":
@@ -1023,6 +1111,9 @@ class SbasInsarProductionService:
             "status": "WORKFLOW_READY",
             "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "stack_id": stack_id,
+            "discovery_mode": manifest.get("discovery_mode"),
+            "aoi": manifest.get("aoi"),
+            "common_overlap_ratio": manifest.get("common_overlap_ratio"),
             "stack_manifest_path": audit["manifest_path"],
             "pair_network_path": audit["pair_network_path"],
             "workflow_manifest_path": str(run_dir / "manifest.json"),
@@ -1106,6 +1197,7 @@ class SbasInsarProductionService:
             }
         workflow_state = self._read_optional_json(run_dir / "state" / "step_status.json")
         monitor_points = self._read_optional_json(run_dir / "monitor_points.json")
+        geographic_coverage = self._build_run_geographic_coverage(run_dir, manifest)
         return {
             "run": self._build_run_card(run_dir, manifest),
             "manifest": manifest,
@@ -1113,6 +1205,7 @@ class SbasInsarProductionService:
             "workflow_manifest": workflow_manifest,
             "workflow_state": workflow_state,
             "monitor_points": monitor_points,
+            "geographic_coverage": geographic_coverage,
             "artifacts": self._build_run_artifacts(run_dir),
         }
 
@@ -2483,6 +2576,9 @@ class SbasInsarProductionService:
             },
             "outputs": {
                 "export_dir": str(export_dir),
+                "vector_dir": str(run_dir / "publish" / "vectors"),
+                "point_vector_geojson_gz": str(run_dir / "publish" / "vectors" / "los_rate_points.geojson.gz"),
+                "point_vector_summary": str(run_dir / "publish" / "vectors" / "los_rate_points_summary.json"),
                 "product_summary": str(run_dir / "product_summary.json"),
                 "quality_summary": str(run_dir / "quality_summary.json"),
             },
@@ -3614,6 +3710,11 @@ class SbasInsarProductionService:
         platform: str | None,
         relative_orbit: str | None,
         orbit_direction: str | None,
+        admin_region: str | None,
+        discovery_mode: str,
+        aoi_bbox: dict[str, Any] | None,
+        min_aoi_coverage_ratio: float,
+        min_common_overlap_ratio: float,
     ) -> str:
         payload = {
             "source_paths": [os.path.normcase(str(path.resolve())) for path in source_paths],
@@ -3633,6 +3734,12 @@ class SbasInsarProductionService:
             "platform": str(platform or "").strip().upper(),
             "relative_orbit": str(relative_orbit or "").strip(),
             "orbit_direction": str(orbit_direction or "").strip().upper(),
+            "admin_region": str(admin_region or "").strip(),
+            "discovery_mode": str(discovery_mode or "strict").strip().lower(),
+            "aoi_bbox": SbasInsarProductionService._normalize_bbox(aoi_bbox),
+            "min_aoi_coverage_ratio": float(min_aoi_coverage_ratio),
+            "min_common_overlap_ratio": float(min_common_overlap_ratio),
+            "response_shape": "aoi_discovery_v1",
         }
         return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
@@ -4434,6 +4541,249 @@ class SbasInsarProductionService:
             return None
 
     @staticmethod
+    def _normalize_bbox(value: Any) -> dict[str, float] | None:
+        if not isinstance(value, dict):
+            return None
+        try:
+            min_lon = float(value["min_lon"])
+            min_lat = float(value["min_lat"])
+            max_lon = float(value["max_lon"])
+            max_lat = float(value["max_lat"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if min_lon >= max_lon or min_lat >= max_lat:
+            return None
+        return {
+            "min_lon": min_lon,
+            "min_lat": min_lat,
+            "max_lon": max_lon,
+            "max_lat": max_lat,
+        }
+
+    @classmethod
+    def _bbox_to_geojson_feature(cls, bbox: dict[str, Any] | None, *, properties: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        normalized = cls._normalize_bbox(bbox)
+        if not normalized:
+            return None
+        min_lon = normalized["min_lon"]
+        min_lat = normalized["min_lat"]
+        max_lon = normalized["max_lon"]
+        max_lat = normalized["max_lat"]
+        return {
+            "type": "Feature",
+            "properties": properties or {},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [min_lon, min_lat],
+                    [max_lon, min_lat],
+                    [max_lon, max_lat],
+                    [min_lon, max_lat],
+                    [min_lon, min_lat],
+                ]],
+            },
+        }
+
+    @staticmethod
+    def _point_to_geojson_feature(point: dict[str, Any] | None, *, properties: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        if not isinstance(point, dict):
+            return None
+        try:
+            lon = float(point["lon"])
+            lat = float(point["lat"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return {
+            "type": "Feature",
+            "properties": properties or {},
+            "geometry": {
+                "type": "Point",
+                "coordinates": [lon, lat],
+            },
+        }
+
+    def _build_stack_geographic_coverage(self, stack_manifest: dict[str, Any]) -> dict[str, Any]:
+        scenes = stack_manifest.get("scenes") or []
+        usable_scenes = [
+            scene for scene in scenes
+            if isinstance(scene, dict) and isinstance(scene.get("bbox"), dict)
+        ]
+        bbox_union = self._stack_bbox_union(stack_manifest)
+        bbox_intersection = self._bbox_intersection([scene.get("bbox") for scene in usable_scenes])
+        center = self._stack_center(stack_manifest)
+        union_feature = self._bbox_to_geojson_feature(
+            bbox_union,
+            properties={
+                "role": "stack_bbox_union",
+                "source": "lt1_scene_metadata",
+                "scene_count": len(usable_scenes),
+            },
+        )
+        intersection_feature = self._bbox_to_geojson_feature(
+            bbox_intersection,
+            properties={
+                "role": "stack_bbox_intersection",
+                "source": "lt1_scene_metadata",
+                "scene_count": len(usable_scenes),
+            },
+        )
+        center_feature = self._point_to_geojson_feature(
+            center,
+            properties={"role": "stack_center", "source": "scene_centers_or_bbox"},
+        )
+        scene_features: list[dict[str, Any]] = []
+        for scene in usable_scenes:
+            feature = self._bbox_to_geojson_feature(
+                scene.get("bbox"),
+                properties={
+                    "role": "scene_bbox",
+                    "scene_name": scene.get("scene_name"),
+                    "date": scene.get("date"),
+                    "satellite": scene.get("satellite"),
+                    "relative_orbit": scene.get("relative_orbit"),
+                },
+            )
+            if feature:
+                scene_features.append(feature)
+        overview_features = [
+            item for item in [union_feature, intersection_feature, center_feature]
+            if item
+        ]
+        return {
+            "schema": "insar.sbas-geographic-coverage/v1",
+            "crs": "EPSG:4326",
+            "source": "lt1_scene_metadata",
+            "bbox": bbox_union,
+            "bbox_intersection": bbox_intersection,
+            "center": center,
+            "admin_region": lookup_admin_region_for_point(
+                (center or {}).get("lon"),
+                (center or {}).get("lat"),
+            ),
+            "scene_bbox_count": len(scene_features),
+            "geojson": {
+                "type": "FeatureCollection",
+                "features": overview_features,
+            },
+            "scene_footprints_geojson": {
+                "type": "FeatureCollection",
+                "features": scene_features,
+            },
+        }
+
+    def _build_run_geographic_coverage(self, run_dir: Path, run_manifest: dict[str, Any]) -> dict[str, Any]:
+        stack_manifest = self._read_optional_json(run_dir / "stack_manifest.json")
+        if not stack_manifest:
+            stack_manifest_path = Path(str(run_manifest.get("stack_manifest_path") or ""))
+            if stack_manifest_path.is_file():
+                stack_manifest = self._read_optional_json(stack_manifest_path)
+        stack_manifest = stack_manifest or {}
+        coverage = self._build_stack_geographic_coverage(stack_manifest)
+        rdc_dem = run_manifest.get("rdc_dem") or {}
+        rdc_dem_summary = (
+            (rdc_dem.get("summary") if isinstance(rdc_dem, dict) else None)
+            or self._read_optional_json(run_dir / "rdc_dem_summary.json")
+            or {}
+        )
+        dem_source = rdc_dem_summary.get("dem_source") or (rdc_dem.get("dem_source") if isinstance(rdc_dem, dict) else None) or {}
+        dem_coverage = self._normalize_bbox(dem_source.get("coverage")) if isinstance(dem_source, dict) else None
+        monitor_summary = (
+            (run_manifest.get("monitor_point_products") or {}).get("summary")
+            or self._read_optional_json(run_dir / "monitor_points_summary.json")
+            or {}
+        )
+        monitor_points: list[dict[str, Any]] = []
+        for item in monitor_summary.get("monitor_outputs") or []:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata") or {}
+            lonlat = metadata.get("approx_lonlat") or {}
+            try:
+                lon = float(lonlat["lon"])
+                lat = float(lonlat["lat"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            monitor_points.append(
+                {
+                    "point_id": item.get("point_id") or metadata.get("point_id"),
+                    "lon": lon,
+                    "lat": lat,
+                    "selection": metadata.get("selection"),
+                    "los_rate_toward_mm_per_year": metadata.get("los_rate_toward_mm_per_year"),
+                    "los_sigma_mm_per_year": metadata.get("los_sigma_mm_per_year"),
+                    "source": "monitor_points_summary",
+                }
+            )
+        if not monitor_points:
+            for item in monitor_summary.get("monitor_points") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    lon = float(item["lon"])
+                    lat = float(item["lat"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                monitor_points.append(
+                    {
+                        "point_id": item.get("point_id"),
+                        "lon": lon,
+                        "lat": lat,
+                        "selection": item.get("selection"),
+                        "los_rate_toward_mm_per_year": item.get("los_rate_toward_mm_per_year"),
+                        "los_sigma_mm_per_year": item.get("los_sigma_mm_per_year"),
+                        "source": "monitor_points_summary",
+                    }
+                )
+        monitor_features = [
+            feature for feature in (
+                self._point_to_geojson_feature(
+                    {"lon": point["lon"], "lat": point["lat"]},
+                    properties={
+                        "role": "monitor_point",
+                        "point_id": point.get("point_id"),
+                        "selection": point.get("selection"),
+                        "los_rate_toward_mm_per_year": point.get("los_rate_toward_mm_per_year"),
+                        "los_sigma_mm_per_year": point.get("los_sigma_mm_per_year"),
+                    },
+                )
+                for point in monitor_points
+            )
+            if feature
+        ]
+        dem_feature = self._bbox_to_geojson_feature(
+            dem_coverage,
+            properties={
+                "role": "dem_coverage",
+                "source": "rdc_dem_summary",
+                "covers_stack_bbox": dem_source.get("covers_stack_bbox"),
+                "covers_stack_center": dem_source.get("covers_stack_center"),
+            },
+        )
+        features = list((coverage.get("geojson") or {}).get("features") or [])
+        if dem_feature:
+            features.append(dem_feature)
+        features.extend(monitor_features)
+        coverage.update(
+            {
+                "source": "run_stack_manifest",
+                "run_id": run_manifest.get("run_id") or run_dir.name,
+                "stack_id": run_manifest.get("stack_id") or stack_manifest.get("stack_id"),
+                "stack": stack_manifest.get("stack") or run_manifest.get("stack") or {},
+                "date_start": min(self._stack_dates(stack_manifest), default=None),
+                "date_end": max(self._stack_dates(stack_manifest), default=None),
+                "dem_coverage": dem_coverage,
+                "dem_covers_stack_bbox": dem_source.get("covers_stack_bbox"),
+                "dem_covers_stack_center": dem_source.get("covers_stack_center"),
+                "monitor_points": monitor_points,
+                "geojson": {
+                    "type": "FeatureCollection",
+                    "features": features,
+                },
+            }
+        )
+        return coverage
+
+    @staticmethod
     def _file_record(path: Path) -> dict[str, Any]:
         exists = path.is_file()
         return {
@@ -4478,12 +4828,157 @@ class SbasInsarProductionService:
         ]
         return "|".join(str(part or "") for part in parts)
 
+    @staticmethod
+    def _aoi_stack_group_key(scene: dict[str, Any]) -> str:
+        parts = [
+            scene.get("satellite"),
+            scene.get("satellite_mode"),
+            scene.get("relative_orbit"),
+            scene.get("orbit_direction"),
+            scene.get("imaging_mode"),
+            scene.get("polarization"),
+        ]
+        return "|".join(str(part or "") for part in parts)
+
+    @staticmethod
+    def _normalize_discovery_mode(value: str | None) -> str:
+        text = str(value or "").strip().lower()
+        return "aoi" if text == "aoi" else "strict"
+
+    def _build_discovery_aoi(
+        self,
+        *,
+        admin_region: str | None,
+        aoi_bbox: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        bbox = self._normalize_bbox(aoi_bbox)
+        if bbox:
+            geometry = shapely_box(
+                bbox["min_lon"],
+                bbox["min_lat"],
+                bbox["max_lon"],
+                bbox["max_lat"],
+            )
+            return {
+                "geometry": geometry,
+                "summary": {
+                    "match_status": "matched",
+                    "source": "bbox",
+                    "bbox": bbox,
+                    "display_name": "Custom AOI bbox",
+                },
+            }
+
+        region = lookup_admin_region_geometry(admin_region)
+        if not region:
+            return {"geometry": None, "summary": None}
+        geometry = region.get("geometry")
+        summary = {key: value for key, value in region.items() if key != "geometry"}
+        if geometry is None or getattr(geometry, "is_empty", False):
+            return {"geometry": None, "summary": summary}
+        return {"geometry": geometry, "summary": summary}
+
+    def _scene_with_aoi_metrics(self, scene: dict[str, Any], aoi_geometry: Any) -> dict[str, Any]:
+        bbox = self._normalize_bbox(scene.get("bbox"))
+        if not bbox:
+            return {**scene, "aoi_intersects": False, "aoi_overlap_ratio": 0.0}
+        scene_geometry = shapely_box(
+            bbox["min_lon"],
+            bbox["min_lat"],
+            bbox["max_lon"],
+            bbox["max_lat"],
+        )
+        try:
+            intersects = bool(scene_geometry.intersects(aoi_geometry))
+        except Exception:
+            return {**scene, "aoi_intersects": False, "aoi_overlap_ratio": 0.0}
+        if not intersects:
+            return {**scene, "aoi_intersects": False, "aoi_overlap_ratio": 0.0}
+        try:
+            intersection_area = float(scene_geometry.intersection(aoi_geometry).area or 0.0)
+            scene_area = float(scene_geometry.area or 0.0)
+            aoi_area = float(getattr(aoi_geometry, "area", 0.0) or 0.0)
+        except Exception:
+            intersection_area = 0.0
+            scene_area = 0.0
+            aoi_area = 0.0
+        return {
+            **scene,
+            "aoi_intersects": True,
+            "aoi_overlap_ratio": intersection_area / scene_area if scene_area > 0 else 0.0,
+            "aoi_covered_ratio": intersection_area / aoi_area if aoi_area > 0 else None,
+        }
+
+    @staticmethod
+    def _bbox_area(value: dict[str, Any] | None) -> float:
+        if not value:
+            return 0.0
+        try:
+            width = float(value["max_lon"]) - float(value["min_lon"])
+            height = float(value["max_lat"]) - float(value["min_lat"])
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+        return width * height if width > 0 and height > 0 else 0.0
+
+    def _cluster_aoi_scenes(self, scenes: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        sorted_scenes = sorted(
+            scenes,
+            key=lambda item: (
+                str(item.get("date") or ""),
+                float(item.get("center_lon") or 0.0),
+                float(item.get("center_lat") or 0.0),
+            ),
+        )
+        clusters: list[dict[str, Any]] = []
+        for scene in sorted_scenes:
+            scene_bbox = self._normalize_bbox(scene.get("bbox"))
+            if not scene_bbox:
+                continue
+            best_index: int | None = None
+            best_score = -1.0
+            for index, cluster in enumerate(clusters):
+                candidate_intersection = self._bbox_intersection(
+                    [cluster.get("bbox_intersection"), scene_bbox]
+                )
+                if not candidate_intersection:
+                    continue
+                score = self._bbox_area(candidate_intersection)
+                if score > best_score:
+                    best_index = index
+                    best_score = score
+            if best_index is None:
+                clusters.append({"bbox_intersection": scene_bbox, "scenes": [scene]})
+                continue
+            cluster = clusters[best_index]
+            cluster["bbox_intersection"] = self._bbox_intersection(
+                [cluster.get("bbox_intersection"), scene_bbox]
+            )
+            cluster["scenes"].append(scene)
+
+        return [cluster["scenes"] for cluster in clusters if cluster.get("scenes")]
+
+    def _aoi_cluster_key(self, observation_key: str, scenes: list[dict[str, Any]]) -> str:
+        bbox = self._bbox_intersection([scene.get("bbox") for scene in scenes])
+        if bbox:
+            lon = (bbox["min_lon"] + bbox["max_lon"]) / 2
+            lat = (bbox["min_lat"] + bbox["max_lat"]) / 2
+            spatial_key = f"overlap_E{lon:.2f}_N{lat:.2f}"
+        else:
+            center = self._stack_center({"scenes": scenes}) or {}
+            lon = self._as_float(center.get("lon"))
+            lat = self._as_float(center.get("lat"))
+            spatial_key = f"center_{self._center_bucket(lon, lat)}"
+        return f"{observation_key}|{spatial_key}"
+
     def _build_stack_candidate(
         self,
         scenes: list[dict[str, Any]],
         *,
         min_scenes: int,
         require_orbits: bool,
+        discovery_mode: str = "strict",
+        aoi_summary: dict[str, Any] | None = None,
+        min_common_overlap_ratio: float = 0.0,
     ) -> dict[str, Any]:
         scenes = sorted(scenes, key=lambda item: str(item.get("date") or ""))
         first = scenes[0]
@@ -4491,7 +4986,11 @@ class SbasInsarProductionService:
         usable = orbit_ready if require_orbits else scenes
         dates = [scene.get("date") for scene in scenes if scene.get("date")]
         usable_dates = [scene.get("date") for scene in usable if scene.get("date")]
-        group_key = self._stack_group_key(first)
+        mode = self._normalize_discovery_mode(discovery_mode)
+        group_key = (
+            str(first.get("aoi_cluster_key") or "")
+            or (self._aoi_stack_group_key(first) if mode == "aoi" else self._stack_group_key(first))
+        )
         stack_id = self._stable_id(group_key)
         temporal_gaps = self._temporal_gaps(usable_dates)
         blockers: list[str] = []
@@ -4499,11 +4998,55 @@ class SbasInsarProductionService:
             blockers.append(f"usable_scene_count {len(usable)} < min_scenes {min_scenes}")
         if require_orbits and len(orbit_ready) < len(scenes):
             blockers.append("missing precise orbit for one or more scenes")
+        usable_stack = {"scenes": usable}
+        bbox_intersection = self._bbox_intersection([scene.get("bbox") for scene in usable])
+        bbox_union = self._stack_bbox_union(usable_stack)
+        common_overlap_ratio = (
+            self._bbox_area(bbox_intersection) / self._bbox_area(bbox_union)
+            if bbox_intersection and bbox_union and self._bbox_area(bbox_union) > 0
+            else 0.0
+        )
+        if mode == "aoi" and usable and not bbox_intersection:
+            blockers.append("no common overlap across usable scenes")
+        if mode == "aoi" and min_common_overlap_ratio > 0 and common_overlap_ratio < min_common_overlap_ratio:
+            blockers.append(
+                f"common_overlap_ratio {common_overlap_ratio:.3f} < min_common_overlap_ratio {min_common_overlap_ratio:.3f}"
+            )
+        center = self._stack_center(usable_stack)
+        admin_region = lookup_admin_region_for_point(
+            (center or {}).get("lon"),
+            (center or {}).get("lat"),
+        )
+        aoi_overlap_values = [
+            float(scene.get("aoi_overlap_ratio") or 0.0)
+            for scene in usable
+            if scene.get("aoi_overlap_ratio") is not None
+        ]
         return {
             "stack_id": stack_id,
             "status": "READY" if not blockers else "BLOCKED",
             "blockers": blockers,
+            "discovery_mode": mode,
+            "aoi": aoi_summary,
             "group_key": group_key,
+            "hard_group_fields": [
+                "satellite",
+                "satellite_mode",
+                "relative_orbit",
+                "orbit_direction",
+                "imaging_mode",
+                "polarization",
+            ] if mode == "aoi" else [
+                "satellite",
+                "satellite_mode",
+                "receiving_station",
+                "relative_orbit",
+                "orbit_direction",
+                "imaging_mode",
+                "polarization",
+                "center_bucket",
+            ],
+            "soft_group_fields": ["receiving_station", "center_bucket"] if mode == "aoi" else [],
             "satellite": first.get("satellite"),
             "satellite_mode": first.get("satellite_mode"),
             "receiving_station": first.get("receiving_station"),
@@ -4523,7 +5066,17 @@ class SbasInsarProductionService:
             "reference_date": usable_dates[len(usable_dates) // 2] if usable_dates else None,
             "temporal_gaps_days": temporal_gaps,
             "max_temporal_gap_days": max(temporal_gaps) if temporal_gaps else 0,
-            "bbox_intersection": self._bbox_intersection([scene.get("bbox") for scene in usable]),
+            "bbox": bbox_union,
+            "bbox_intersection": bbox_intersection,
+            "common_overlap_ratio": common_overlap_ratio,
+            "aoi_overlap_ratio_min": min(aoi_overlap_values) if aoi_overlap_values else None,
+            "aoi_overlap_ratio_max": max(aoi_overlap_values) if aoi_overlap_values else None,
+            "aoi_overlap_ratio_mean": (
+                sum(aoi_overlap_values) / len(aoi_overlap_values)
+                if aoi_overlap_values else None
+            ),
+            "center": center,
+            "admin_region": admin_region,
             "scenes": scenes,
         }
 
@@ -5072,19 +5625,22 @@ class SbasInsarProductionService:
             mode = "manual_lonlat"
             note = "Manual monitoring points are stored for extraction after geocoded products are available."
         else:
-            mode = strategy or "auto_low_sigma_high_rate"
+            mode = strategy or "auto_representative_points"
+            if mode == "auto_low_sigma_high_rate":
+                mode = "auto_representative_points"
             note = (
-                "Automatic point is only a production placeholder until users provide a point layer "
-                "or approve a quality-filtered sampler."
+                "Automatic representative points are report-preview candidates until users provide "
+                "a point layer or approve final monitoring locations."
             )
         return {
             "schema": "insar.sbas-monitor-points/v1",
             "mode": mode,
             "points": normalized_points,
+            "auto_count": 5,
             "default_auto_strategy": {
-                "key": "auto_low_sigma_high_rate",
-                "selection": "low LOS sigma, high absolute LOS velocity, non-edge valid pixel",
-                "usage": "debug/sample only; not a business monitoring network",
+                "key": "auto_representative_points",
+                "selection": "away/toward/high-absolute-rate/stable/center valid pixels with low sigma and non-edge constraints",
+                "usage": "preview candidates only; not a business monitoring network",
             },
             "reference_date": (stack_manifest.get("stack") or {}).get("reference_date"),
             "coordinate_system": "EPSG:4326 for manual lon/lat points; radar coordinates are derived during publishing",
@@ -6062,6 +6618,14 @@ class SbasInsarProductionService:
         python_bin = settings.GAMMA_SBAS_PYTHON or settings.WSL_SHARED_PYTHON or settings.PYINT_WSL_PYTHON or "/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python"
         tool_script = Path(settings.PROJECT_ROOT) / "deploy" / "wsl" / "runners" / "gamma_sbas_product_tools.py"
         phase_to_los = wavelength / (4.0 * math.pi)
+        stack_manifest = self._read_optional_json(run_dir / "stack_manifest.json")
+        stack_dates = self._stack_dates(stack_manifest)
+        date_start = min(stack_dates, default="")
+        date_end = max(stack_dates, default="")
+        coverage = self._build_stack_geographic_coverage(stack_manifest)
+        admin_region = coverage.get("admin_region") or {}
+        admin_province = str(admin_region.get("province") or "").strip()
+        admin_city = str(admin_region.get("city") or "").strip()
         lines = [
             "#!/usr/bin/env bash",
             "set -euo pipefail",
@@ -6081,9 +6645,14 @@ class SbasInsarProductionService:
             f'RLKS="{rlks}"',
             f'WAVELENGTH="{wavelength:.12g}"',
             f'PHASE_TO_LOS="{phase_to_los:.12g}"',
+            f'DATE_START="{date_start}"',
+            f'DATE_END="{date_end}"',
+            f'ADMIN_PROVINCE="{admin_province}"',
+            f'ADMIN_CITY="{admin_city}"',
             "",
             f'source "{env_script}" >/dev/null 2>&1',
-            'mkdir -p "${EXPORT_DIR}" "${LOG_DIR}"',
+            'VECTOR_DIR="${RUN_ROOT}/publish/vectors"',
+            'mkdir -p "${EXPORT_DIR}" "${VECTOR_DIR}" "${LOG_DIR}"',
             "",
             'RDC_WIDTH="$(awk \'$1 == "range_samples:" {print $2; exit}\' "${MLI_PAR}")"',
             'GEO_WIDTH="$(awk \'$1 == "width:" {print $2; exit}\' "${DEM_PAR}")"',
@@ -6218,7 +6787,21 @@ class SbasInsarProductionService:
             "",
             '  make_preview "${EXPORT_DIR}/los_rate_toward_mm_per_year.tif" "${RATE_CMAP}" "${EXPORT_DIR}/los_rate_toward_mm_per_year.geo_preview.png"',
             '  make_preview "${EXPORT_DIR}/los_sigma_mm_per_year.tif" "${SIGMA_CMAP}" "${EXPORT_DIR}/los_sigma_mm_per_year.geo_preview.png"',
+            "",
+            '  "${PYTHON_BIN}" "${TOOL_SCRIPT}" export-points-geojson \\',
+            '    --toward-tif "${EXPORT_DIR}/los_rate_toward_mm_per_year.tif" \\',
+            '    --away-tif "${EXPORT_DIR}/los_rate_away_mm_per_year.tif" \\',
+            '    --sigma-tif "${EXPORT_DIR}/los_sigma_mm_per_year.tif" \\',
+            '    --output "${VECTOR_DIR}/los_rate_points.geojson.gz" \\',
+            '    --summary-path "${VECTOR_DIR}/los_rate_points_summary.json" \\',
+            '    --run-id "${RUN_ROOT##*/}" \\',
+            '    --date-start "${DATE_START}" \\',
+            '    --date-end "${DATE_END}" \\',
+            '    --reference-date "${REF_DATE}" \\',
+            '    --admin-province "${ADMIN_PROVINCE}" \\',
+            '    --admin-city "${ADMIN_CITY}"',
             '  ls -lh "${EXPORT_DIR}"',
+            '  ls -lh "${VECTOR_DIR}"',
             '} >"${LOG_DIR}/publish_products.log" 2>&1',
             "",
             'echo "Published Gamma SBAS products: ${EXPORT_DIR}"',
@@ -6853,6 +7436,12 @@ class SbasInsarProductionService:
             "los_rate_m_per_year_tif": export_dir / "los_rate_m_per_year.tif",
             "los_rate_away_m_per_year_hls_bmp": export_dir / "los_rate_away_m_per_year.hls.bmp",
         }
+        vector_dir = run_dir / "publish" / "vectors"
+        vector_outputs = {
+            "point_vector_geojson_gz": vector_dir / "los_rate_points.geojson.gz",
+            "point_vector_summary": vector_dir / "los_rate_points_summary.json",
+        }
+        point_vector_summary = self._read_optional_json(vector_outputs["point_vector_summary"]) or {}
         missing_outputs = [
             name for name, path in required_outputs.items()
             if not path.is_file() or path.stat().st_size <= 0
@@ -6961,8 +7550,10 @@ class SbasInsarProductionService:
             },
             "outputs": {
                 "export_dir": str(export_dir),
-                **{name: self._file_record(path) for name, path in {**required_outputs, **optional_outputs}.items()},
+                "vector_dir": str(vector_dir),
+                **{name: self._file_record(path) for name, path in {**required_outputs, **optional_outputs, **vector_outputs}.items()},
             },
+            "point_vector_summary": point_vector_summary,
             "rdc_size_checks": rdc_size_checks,
             "quality_summary": quality_stats,
             "product_summary": product_summary,
@@ -7489,6 +8080,10 @@ class SbasInsarProductionService:
 
     def _build_run_card(self, run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         stack = manifest.get("stack") or {}
+        try:
+            coverage = self._build_run_geographic_coverage(run_dir, manifest)
+        except Exception:
+            coverage = {}
         return {
             "run_id": manifest.get("run_id") or run_dir.name,
             "run_label": manifest.get("run_label"),
@@ -7501,12 +8096,19 @@ class SbasInsarProductionService:
             "scene_count": manifest.get("scene_count"),
             "pair_count": manifest.get("pair_count"),
             "next_stage": manifest.get("next_stage"),
+            "discovery_mode": manifest.get("discovery_mode"),
+            "aoi": manifest.get("aoi"),
+            "common_overlap_ratio": manifest.get("common_overlap_ratio"),
             "platform": stack.get("satellite"),
             "relative_orbit": stack.get("relative_orbit"),
             "direction": stack.get("orbit_direction"),
             "polarization": stack.get("polarization"),
             "center_bucket": stack.get("center_bucket"),
             "reference_date": stack.get("reference_date"),
+            "date_start": coverage.get("date_start"),
+            "date_end": coverage.get("date_end"),
+            "center": coverage.get("center"),
+            "admin_region": coverage.get("admin_region"),
             "run_dir": str(run_dir),
         }
 

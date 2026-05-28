@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import json
 import math
 import re
@@ -44,7 +45,7 @@ def write_scaled_float32(input_path: Path, output_path: Path, scale: float) -> N
     (data * float(scale)).astype(">f4", copy=False).tofile(output_path)
 
 
-def pick_auto_point(rate: np.ndarray, sigma: np.ndarray) -> tuple[int, int]:
+def monitor_valid_mask(rate: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     lines, width = rate.shape
     yy, xx = np.indices(rate.shape)
     edge_mask = (
@@ -57,6 +58,42 @@ def pick_auto_point(rate: np.ndarray, sigma: np.ndarray) -> tuple[int, int]:
     valid = finite & edge_mask & (rate != 0.0) & (sigma > 0.0)
     if not valid.any():
         raise RuntimeError("No valid pixels available for monitor point selection")
+    return valid
+
+
+def remove_near_selected(candidate: np.ndarray, selected: list[tuple[int, int]], min_distance: int) -> np.ndarray:
+    if not selected:
+        return candidate
+    yy, xx = np.indices(candidate.shape)
+    filtered = candidate.copy()
+    min_distance_sq = float(min_distance * min_distance)
+    for x, y in selected:
+        filtered &= ((xx - float(x)) ** 2 + (yy - float(y)) ** 2) >= min_distance_sq
+    return filtered
+
+
+def pick_scored_point(
+    score: np.ndarray,
+    candidate: np.ndarray,
+    selected: list[tuple[int, int]],
+    *,
+    min_distance: int,
+) -> tuple[int, int] | None:
+    filtered = remove_near_selected(candidate, selected, min_distance)
+    if not filtered.any():
+        filtered = candidate
+    if not filtered.any():
+        return None
+    safe_score = np.full(score.shape, -np.inf, dtype=np.float64)
+    safe_score[filtered] = score[filtered]
+    y, x = np.unravel_index(int(np.nanargmax(safe_score)), score.shape)
+    if not np.isfinite(safe_score[y, x]):
+        return None
+    return int(x), int(y)
+
+
+def pick_auto_point(rate: np.ndarray, sigma: np.ndarray) -> tuple[int, int]:
+    valid = monitor_valid_mask(rate, sigma)
 
     abs_rate = np.abs(rate[valid])
     sig = sigma[valid]
@@ -71,6 +108,97 @@ def pick_auto_point(rate: np.ndarray, sigma: np.ndarray) -> tuple[int, int]:
     score[candidate] = np.abs(rate[candidate]) / (sigma[candidate] + 1.0e-6)
     y, x = np.unravel_index(int(np.argmax(score)), rate.shape)
     return int(x), int(y)
+
+
+def pick_auto_points(rate: np.ndarray, sigma: np.ndarray, *, count: int = 5) -> list[dict[str, Any]]:
+    valid = monitor_valid_mask(rate, sigma)
+    lines, width = rate.shape
+    yy, xx = np.indices(rate.shape)
+    min_distance = max(24, int(min(width, lines) * 0.08))
+    sigma_max = float(np.percentile(sigma[valid], 40))
+    low_sigma = valid & (sigma <= sigma_max)
+    if not low_sigma.any():
+        low_sigma = valid
+
+    abs_rate = np.abs(rate)
+    abs_valid = abs_rate[valid]
+    high_abs_min = float(np.percentile(abs_valid, 85))
+    high_abs_max = float(np.percentile(abs_valid, 99))
+    low_abs_max = float(np.percentile(abs_valid, 25))
+    cx = (width - 1) / 2.0
+    cy = (lines - 1) / 2.0
+
+    definitions = [
+        {
+            "point_id": "auto_away_high_rate_low_sigma",
+            "selection": "automatic_away_from_radar_high_rate_low_sigma_non_edge",
+            "candidate": low_sigma & (rate < 0.0) & (abs_rate >= high_abs_min) & (abs_rate <= high_abs_max),
+            "score": (-rate) / (sigma + 1.0e-6),
+        },
+        {
+            "point_id": "auto_toward_high_rate_low_sigma",
+            "selection": "automatic_toward_radar_high_rate_low_sigma_non_edge",
+            "candidate": low_sigma & (rate > 0.0) & (abs_rate >= high_abs_min) & (abs_rate <= high_abs_max),
+            "score": rate / (sigma + 1.0e-6),
+        },
+        {
+            "point_id": "auto_low_sigma_high_rate",
+            "selection": "automatic_low_sigma_high_abs_rate_non_edge",
+            "candidate": low_sigma & (abs_rate >= high_abs_min) & (abs_rate <= high_abs_max),
+            "score": abs_rate / (sigma + 1.0e-6),
+        },
+        {
+            "point_id": "auto_stable_low_sigma",
+            "selection": "automatic_near_zero_rate_low_sigma_non_edge",
+            "candidate": low_sigma & (abs_rate <= low_abs_max),
+            "score": 1.0 / ((abs_rate + 1.0) * (sigma + 1.0e-6)),
+        },
+        {
+            "point_id": "auto_center_valid",
+            "selection": "automatic_valid_pixel_nearest_stack_center",
+            "candidate": valid,
+            "score": -((xx - cx) ** 2 + (yy - cy) ** 2),
+        },
+    ]
+
+    selected_xy: list[tuple[int, int]] = []
+    selected_points: list[dict[str, Any]] = []
+    for definition in definitions:
+        if len(selected_points) >= count:
+            break
+        candidate = definition["candidate"]
+        if not candidate.any():
+            candidate = low_sigma if low_sigma.any() else valid
+        picked = pick_scored_point(
+            np.asarray(definition["score"], dtype=np.float64),
+            candidate,
+            selected_xy,
+            min_distance=min_distance,
+        )
+        if picked is None:
+            continue
+        x, y = picked
+        selected_xy.append((x, y))
+        selected_points.append(
+            {
+                "point_id": definition["point_id"],
+                "selection": definition["selection"],
+                "range_pixel": x,
+                "azimuth_line": y,
+            }
+        )
+
+    if not selected_points:
+        x, y = pick_auto_point(rate, sigma)
+        selected_points.append(
+            {
+                "point_id": "auto_low_sigma_high_rate",
+                "selection": "automatic_low_sigma_high_rate_non_edge",
+                "range_pixel": x,
+                "azimuth_line": y,
+            }
+        )
+    return selected_points[:count]
 
 
 def dem_grid(dem_par: Path) -> dict[str, float | int]:
@@ -218,6 +346,190 @@ def write_point_outputs(
     return {"png": str(png_path), "csv": str(csv_path), "metadata": str(json_path)}
 
 
+def read_geotiff_float32(path: Path) -> dict[str, Any]:
+    try:
+        import rasterio
+
+        with rasterio.open(path) as src:
+            transform = src.transform
+            return {
+                "array": src.read(1).astype(np.float32, copy=False),
+                "width": src.width,
+                "height": src.height,
+                "nodata": src.nodata,
+                "crs": src.crs.to_string() if src.crs else None,
+                "transform": (transform.a, transform.b, transform.c, transform.d, transform.e, transform.f),
+            }
+    except Exception as rasterio_exc:
+        try:
+            from osgeo import gdal
+        except Exception as gdal_exc:
+            raise RuntimeError("rasterio or osgeo.gdal is required to read GeoTIFF files") from gdal_exc
+        dataset = gdal.Open(str(path), gdal.GA_ReadOnly)
+        if dataset is None:
+            raise RuntimeError(f"Unable to open GeoTIFF: {path}") from rasterio_exc
+        band = dataset.GetRasterBand(1)
+        array = band.ReadAsArray().astype(np.float32, copy=False)
+        geotransform = dataset.GetGeoTransform()
+        return {
+            "array": array,
+            "width": int(dataset.RasterXSize),
+            "height": int(dataset.RasterYSize),
+            "nodata": band.GetNoDataValue(),
+            "crs": dataset.GetProjection() or None,
+            "transform": (
+                float(geotransform[1]),
+                float(geotransform[2]),
+                float(geotransform[0]),
+                float(geotransform[4]),
+                float(geotransform[5]),
+                float(geotransform[3]),
+            ),
+        }
+
+
+def normalize_crs_label(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    upper = text.upper()
+    if "EPSG" in upper and "4326" in upper:
+        return "EPSG:4326"
+    if "WGS 84" in upper or "WGS_1984" in upper:
+        return "EPSG:4326"
+    return text[:240]
+
+
+def pixel_center(transform: tuple[float, float, float, float, float, float], row: int, col: int) -> tuple[float, float]:
+    a, b, c, d, e, f = transform
+    x = c + (col + 0.5) * a + (row + 0.5) * b
+    y = f + (col + 0.5) * d + (row + 0.5) * e
+    return float(x), float(y)
+
+
+def run_export_points_geojson(args: argparse.Namespace) -> int:
+
+    toward_path = Path(args.toward_tif)
+    away_path = Path(args.away_tif)
+    sigma_path = Path(args.sigma_tif)
+    output_path = Path(args.output)
+    summary_path = Path(args.summary_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+    run_id = str(args.run_id or "").strip()
+    date_start = str(args.date_start or "").strip()
+    date_end = str(args.date_end or "").strip()
+    reference_date = str(args.reference_date or "").strip()
+    admin_province = str(args.admin_province or "").strip()
+    admin_city = str(args.admin_city or "").strip()
+
+    fields = [
+        "run_id",
+        "row",
+        "col",
+        "lon",
+        "lat",
+        "los_rate_toward_mm_per_year",
+        "los_rate_away_mm_per_year",
+        "los_sigma_mm_per_year",
+        "date_start",
+        "date_end",
+        "reference_date",
+        "admin_province",
+        "admin_city",
+    ]
+
+    toward_meta = read_geotiff_float32(toward_path)
+    away_meta = read_geotiff_float32(away_path)
+    sigma_meta = read_geotiff_float32(sigma_path)
+    width = int(toward_meta["width"])
+    height = int(toward_meta["height"])
+    if (width, height) != (int(away_meta["width"]), int(away_meta["height"])):
+        raise RuntimeError("toward and away GeoTIFF dimensions do not match")
+    if (width, height) != (int(sigma_meta["width"]), int(sigma_meta["height"])):
+        raise RuntimeError("toward and sigma GeoTIFF dimensions do not match")
+
+    toward = np.asarray(toward_meta["array"], dtype=np.float32)
+    away = np.asarray(away_meta["array"], dtype=np.float32)
+    sigma = np.asarray(sigma_meta["array"], dtype=np.float32)
+    valid = np.isfinite(toward) & np.isfinite(away) & np.isfinite(sigma) & (sigma > 0.0)
+    if toward_meta.get("nodata") is not None:
+        valid &= toward != float(toward_meta["nodata"])
+    if away_meta.get("nodata") is not None:
+        valid &= away != float(away_meta["nodata"])
+    if sigma_meta.get("nodata") is not None:
+        valid &= sigma != float(sigma_meta["nodata"])
+
+    transform = tuple(float(value) for value in toward_meta["transform"])
+    feature_count = 0
+    with gzip.open(output_path, "wt", encoding="utf-8", compresslevel=6) as handle:
+        handle.write('{"type":"FeatureCollection","features":[\n')
+        first = True
+        for row in range(height):
+            cols = np.where(valid[row])[0]
+            for col in cols.tolist():
+                lon, lat = pixel_center(transform, row, int(col))
+                properties = {
+                    "run_id": run_id,
+                    "row": int(row),
+                    "col": int(col),
+                    "lon": lon,
+                    "lat": lat,
+                    "los_rate_toward_mm_per_year": float(toward[row, col]),
+                    "los_rate_away_mm_per_year": float(away[row, col]),
+                    "los_sigma_mm_per_year": float(sigma[row, col]),
+                    "date_start": date_start,
+                    "date_end": date_end,
+                    "reference_date": reference_date,
+                    "admin_province": admin_province,
+                    "admin_city": admin_city,
+                }
+                feature = {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "properties": properties,
+                }
+                if not first:
+                    handle.write(",\n")
+                handle.write(json.dumps(feature, ensure_ascii=False, separators=(",", ":")))
+                first = False
+                feature_count += 1
+        handle.write("\n]}\n")
+
+    crs = normalize_crs_label(toward_meta.get("crs"))
+
+    summary = {
+        "schema": "insar.gamma-sbas-point-vector-summary/v1",
+        "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "ready": output_path.is_file() and output_path.stat().st_size > 0,
+        "feature_count": feature_count,
+        "output_geojson_gz": str(output_path),
+        "output_size_bytes": output_path.stat().st_size if output_path.is_file() else 0,
+        "fields": fields,
+        "source_geotiffs": {
+            "los_rate_toward_mm_per_year": str(toward_path),
+            "los_rate_away_mm_per_year": str(away_path),
+            "los_sigma_mm_per_year": str(sigma_path),
+        },
+        "width": width,
+        "height": height,
+        "crs": crs,
+        "date_start": date_start,
+        "date_end": date_end,
+        "reference_date": reference_date,
+        "admin_region": {
+            "province": admin_province or None,
+            "city": admin_city or None,
+        },
+        "los_convention": "toward radar positive; away from radar negative",
+        "frontend_policy": "download_only; do not render full point GeoJSON in browser",
+    }
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    return 0
+
+
 def run_phase_to_los(args: argparse.Namespace) -> int:
     write_scaled_float32(Path(args.input), Path(args.output), float(args.scale))
     return 0
@@ -273,18 +585,10 @@ def run_monitor_points(args: argparse.Namespace) -> int:
                 }
             )
     else:
-        x, y = pick_auto_point(rate_toward, sigma)
-        lon, lat = radar_to_lonlat(x, y, dem_par, lookup)
-        selected_points.append(
-            {
-                "point_id": "auto_low_sigma_high_rate",
-                "selection": "automatic_low_sigma_high_rate_non_edge",
-                "range_pixel": x,
-                "azimuth_line": y,
-                "lon": lon,
-                "lat": lat,
-            }
-        )
+        auto_count = int(config.get("auto_count") or 5)
+        for point in pick_auto_points(rate_toward, sigma, count=max(1, min(auto_count, 12))):
+            lon, lat = radar_to_lonlat(int(point["range_pixel"]), int(point["azimuth_line"]), dem_par, lookup)
+            selected_points.append({**point, "lon": lon, "lat": lat})
 
     outputs: list[dict[str, Any]] = []
     for point in selected_points:
@@ -342,6 +646,20 @@ def build_parser() -> argparse.ArgumentParser:
     phase.add_argument("output")
     phase.add_argument("scale", type=float)
     phase.set_defaults(func=run_phase_to_los)
+
+    vector = subparsers.add_parser("export-points-geojson")
+    vector.add_argument("--toward-tif", required=True)
+    vector.add_argument("--away-tif", required=True)
+    vector.add_argument("--sigma-tif", required=True)
+    vector.add_argument("--output", required=True)
+    vector.add_argument("--summary-path", required=True)
+    vector.add_argument("--run-id", default="")
+    vector.add_argument("--date-start", default="")
+    vector.add_argument("--date-end", default="")
+    vector.add_argument("--reference-date", default="")
+    vector.add_argument("--admin-province", default="")
+    vector.add_argument("--admin-city", default="")
+    vector.set_defaults(func=run_export_points_geojson)
 
     monitor = subparsers.add_parser("monitor-points")
     monitor.add_argument("--monitor-config", required=True)

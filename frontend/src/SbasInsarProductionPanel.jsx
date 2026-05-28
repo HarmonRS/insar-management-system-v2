@@ -94,6 +94,62 @@ function formatBytes(value) {
   return `${current.toFixed(current >= 100 ? 0 : 1)} ${units[index]}`;
 }
 
+function normalizeBbox(bbox) {
+  if (!bbox || typeof bbox !== 'object') return null;
+  const minLon = Number(bbox.min_lon);
+  const minLat = Number(bbox.min_lat);
+  const maxLon = Number(bbox.max_lon);
+  const maxLat = Number(bbox.max_lat);
+  if (![minLon, minLat, maxLon, maxLat].every(Number.isFinite)) return null;
+  if (minLon >= maxLon || minLat >= maxLat) return null;
+  return { min_lon: minLon, min_lat: minLat, max_lon: maxLon, max_lat: maxLat };
+}
+
+function formatCoord(value, digits = 5) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '-';
+  return numeric.toFixed(digits);
+}
+
+function formatBbox(bbox) {
+  const normalized = normalizeBbox(bbox);
+  if (!normalized) return '-';
+  return [
+    formatCoord(normalized.min_lon),
+    formatCoord(normalized.min_lat),
+    formatCoord(normalized.max_lon),
+    formatCoord(normalized.max_lat),
+  ].join(', ');
+}
+
+function bboxCenter(bbox) {
+  const normalized = normalizeBbox(bbox);
+  if (!normalized) return null;
+  return {
+    lon: (normalized.min_lon + normalized.max_lon) / 2,
+    lat: (normalized.min_lat + normalized.max_lat) / 2,
+  };
+}
+
+function formatCenter(center) {
+  if (!center) return '-';
+  const lon = Number(center.lon);
+  const lat = Number(center.lat);
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return '-';
+  return `${formatCoord(lon)}, ${formatCoord(lat)}`;
+}
+
+function formatAdminRegion(region) {
+  if (!region || typeof region !== 'object') return '-';
+  return region.display_name || region.name || region.tree_id || '-';
+}
+
+function formatPercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '-';
+  return `${(numeric * 100).toFixed(numeric >= 0.1 ? 0 : 1)}%`;
+}
+
 function StatusBadge({ value }) {
   const okValues = new Set([
     'READY',
@@ -156,6 +212,276 @@ function RunArtifactLink({ runId, artifact }) {
   );
 }
 
+function LocationSummaryPanel({ coverage }) {
+  const bbox = normalizeBbox(coverage?.bbox);
+  const intersection = normalizeBbox(coverage?.bbox_intersection);
+  const center = coverage?.center || bboxCenter(bbox);
+  const adminRegion = coverage?.admin_region;
+  const monitorPoints = Array.isArray(coverage?.monitor_points) ? coverage.monitor_points : [];
+  return (
+    <div style={{ border: '1px solid #dbeafe', borderRadius: 8, padding: 10, background: '#eff6ff' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
+        <div style={valueStyle}>位置摘要</div>
+        <span style={mutedStyle}>center / admin region</span>
+      </div>
+      <div style={{ ...metricGridStyle, marginTop: 8 }}>
+        <Metric label="中心点" value={formatCenter(center)} />
+        <Metric label="行政区" value={formatAdminRegion(adminRegion)} />
+        <Metric label="Stack bbox" value={formatBbox(bbox)} />
+        <Metric label="交集 bbox" value={formatBbox(intersection)} />
+        <Metric label="单景范围数" value={`${(coverage?.scene_footprints_geojson?.features || []).length || coverage?.scene_bbox_count || 0}`} />
+        <Metric label="监测点" value={`${monitorPoints.length}`} />
+      </div>
+      {monitorPoints.length > 0 && (
+        <div style={{ ...mutedStyle, marginTop: 8, wordBreak: 'break-word' }}>
+          监测点：{monitorPoints.map(point => `${point.point_id || 'point'} (${formatCenter(point)})`).join('；')}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/*
+function UnusedSceneFootprintGeographicCoverageMap({ coverage }) {
+  const mapElementRef = useRef(null);
+  const mapRef = useRef(null);
+  const tileLayerRef = useRef(null);
+  const layerGroupRef = useRef(null);
+  const bbox = normalizeBbox(coverage?.bbox);
+  const monitorPoints = Array.isArray(coverage?.monitor_points) ? coverage.monitor_points : [];
+  const sceneFootprints = useMemo(
+    () => normalizeFeatureCollection(coverage?.scene_footprints_geojson),
+    [coverage],
+  );
+  const coverageGeojson = useMemo(
+    () => normalizeCoverageGeojson(coverage?.geojson),
+    [coverage],
+  );
+  const sceneFeatureCount = sceneFootprints.features.length;
+  const coverageFeatureCount = coverageGeojson.features.length;
+
+  useEffect(() => {
+    if (!mapElementRef.current || !bbox) return undefined;
+    if (!mapRef.current) {
+      mapRef.current = L.map(mapElementRef.current, {
+        attributionControl: false,
+        zoomControl: false,
+        scrollWheelZoom: false,
+        doubleClickZoom: false,
+        boxZoom: false,
+        keyboard: false,
+        dragging: true,
+      });
+      const baseLayer = getBaseLayerConfig(TILE_LAYER_DEFAULT_KEY);
+      tileLayerRef.current = L.tileLayer(baseLayer.url, {
+        ...TILE_LAYER_OPTIONS,
+        attribution: baseLayer.attribution,
+      }).addTo(mapRef.current);
+      layerGroupRef.current = L.layerGroup().addTo(mapRef.current);
+    }
+
+    const map = mapRef.current;
+    const layerGroup = layerGroupRef.current;
+    layerGroup.clearLayers();
+    const stackBounds = L.latLngBounds([bbox.min_lat, bbox.min_lon], [bbox.max_lat, bbox.max_lon]);
+
+    L.rectangle(stackBounds, {
+      color: '#475569',
+      weight: 1,
+      dashArray: '5 5',
+      fillOpacity: 0,
+    }).addTo(layerGroup);
+
+    let fitBounds = stackBounds;
+    if (sceneFeatureCount > 0) {
+      const sceneLayer = L.geoJSON(sceneFootprints, {
+        style: feature => {
+          const date = String(feature?.properties?.date || '');
+          const tone = date.endsWith('22') || date.endsWith('17') ? '#2563eb' : '#0891b2';
+          return {
+            color: tone,
+            weight: 1.6,
+            opacity: 0.9,
+            fillColor: tone,
+            fillOpacity: 0.12,
+          };
+        },
+        onEachFeature: (feature, layer) => {
+          const label = featureLabel(feature);
+          if (label) {
+            layer.bindTooltip(label, { sticky: true });
+          }
+        },
+      }).addTo(layerGroup);
+      const sceneBounds = sceneLayer.getBounds();
+      if (sceneBounds.isValid()) {
+        fitBounds = sceneBounds;
+      }
+    } else {
+      L.rectangle(stackBounds, {
+        color: '#2563eb',
+        weight: 2,
+        fillColor: '#38bdf8',
+        fillOpacity: 0.12,
+      }).addTo(layerGroup);
+    }
+
+    if (coverageFeatureCount > 0) {
+      L.geoJSON(coverageGeojson, {
+        style: coveragePolygonStyle,
+        pointToLayer: coveragePointMarker,
+        onEachFeature: (feature, layer) => {
+          const label = coverageFeatureLabel(feature);
+          if (label) {
+            layer.bindTooltip(label, { sticky: true });
+          }
+        },
+      }).addTo(layerGroup);
+    }
+
+    monitorPoints.forEach(point => {
+      const lon = Number(point.lon);
+      const lat = Number(point.lat);
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+      L.circleMarker([lat, lon], {
+        radius: 5,
+        color: '#7c3aed',
+        weight: 2,
+        fillColor: '#ffffff',
+        fillOpacity: 1,
+      })
+        .bindTooltip(String(point.point_id || 'monitor point'), { direction: 'top' })
+        .addTo(layerGroup);
+    });
+
+    map.fitBounds(fitBounds.pad(0.12), { animate: false, maxZoom: 12 });
+    window.setTimeout(() => map.invalidateSize(), 0);
+    return undefined;
+  }, [bbox, coverageFeatureCount, coverageGeojson, monitorPoints, sceneFeatureCount, sceneFootprints]);
+
+  useEffect(() => () => {
+    if (mapRef.current) {
+      mapRef.current.remove();
+      mapRef.current = null;
+      tileLayerRef.current = null;
+      layerGroupRef.current = null;
+    }
+  }, []);
+
+  if (!bbox) {
+    return (
+      <div
+        style={{
+          height: 180,
+          display: 'grid',
+          placeItems: 'center',
+          border: '1px solid #d8dee8',
+          borderRadius: 8,
+          background: '#f8fafc',
+          color: '#64748b',
+          fontSize: 12,
+        }}
+      >
+        暂无可展示的地理范围
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div
+        ref={mapElementRef}
+        style={{
+          height: 180,
+          border: '1px solid #d8dee8',
+          borderRadius: 8,
+          overflow: 'hidden',
+          background: '#eef2f7',
+        }}
+      />
+      <div style={{ ...mutedStyle, display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 6 }}>
+        <span><strong style={{ color: '#2563eb' }}>Blue</strong> scene footprints ({sceneFeatureCount})</span>
+        <span><strong style={{ color: '#16a34a' }}>Green dashed</strong> coverage GeoJSON ({coverageFeatureCount})</span>
+        <span><strong style={{ color: '#475569' }}>Gray dashed</strong> outer bbox</span>
+        <span><strong style={{ color: '#7c3aed' }}>Purple</strong> monitor points</span>
+      </div>
+    </div>
+  );
+}
+
+function UnusedGeographicCoveragePanel({ coverage }) {
+  const bbox = normalizeBbox(coverage?.bbox);
+  const intersection = normalizeBbox(coverage?.bbox_intersection);
+  const center = coverage?.center || bboxCenter(bbox);
+  const monitorPoints = Array.isArray(coverage?.monitor_points) ? coverage.monitor_points : [];
+  const geojsonText = coverage?.geojson ? JSON.stringify(coverage.geojson) : '';
+
+  if (!bbox) {
+    return (
+      <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, background: '#f8fafc' }}>
+        <div style={valueStyle}>地理范围</div>
+        <div style={{ ...mutedStyle, marginTop: 6 }}>
+          当前 Run 尚未找到 LT1 元数据 bbox。后续按行政区/AOI 生产时会在这里显示范围。
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ border: '1px solid #99f6e4', borderRadius: 8, padding: 10, background: '#f0fdfa' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
+        <div style={valueStyle}>地理范围</div>
+        <span style={mutedStyle}>EPSG:4326 / GeoJSON</span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(240px, 360px) minmax(0, 1fr)', gap: 10, marginTop: 8 }}>
+        <SceneFootprintGeographicCoverageMap coverage={coverage} />
+        <div style={{ display: 'grid', gap: 8 }}>
+          <div style={metricGridStyle}>
+            <Metric label="Stack bbox" value={formatBbox(bbox)} />
+            <Metric label="交集 bbox" value={formatBbox(intersection)} />
+            <Metric
+              label="中心点"
+              value={center ? `${formatCoord(center.lon)}, ${formatCoord(center.lat)}` : '-'}
+            />
+            <Metric label="单景范围数" value={`${(coverage?.scene_footprints_geojson?.features || []).length || coverage?.scene_bbox_count || 0}`} />
+            <Metric label="范围来源" value={(coverage?.scene_footprints_geojson?.features || []).length > 0 ? 'scene GeoJSON' : 'stack bbox'} />
+            <Metric label="监测点" value={`${monitorPoints.length}`} />
+          </div>
+          {monitorPoints.length > 0 && (
+            <div style={{ ...mutedStyle, wordBreak: 'break-word' }}>
+              监测点：{monitorPoints.map(point => `${point.point_id || 'point'} (${formatCoord(point.lon)}, ${formatCoord(point.lat)})`).join('；')}
+            </div>
+          )}
+          {geojsonText && (
+            <details>
+              <summary style={{ ...mutedStyle, cursor: 'pointer', fontWeight: 650 }}>查看 GeoJSON</summary>
+              <pre
+                style={{
+                  margin: '6px 0 0',
+                  maxHeight: 120,
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  border: '1px solid #ccfbf1',
+                  borderRadius: 8,
+                  padding: 8,
+                  background: '#ffffff',
+                  color: '#334155',
+                  fontSize: 11,
+                  lineHeight: 1.45,
+                }}
+              >
+                {geojsonText}
+              </pre>
+            </details>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+*/
+
 export default function SbasInsarProductionPanel({ readOnly = false }) {
   const [capabilities, setCapabilities] = useState(null);
   const [runs, setRuns] = useState([]);
@@ -170,6 +496,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
   const [auditLoading, setAuditLoading] = useState(false);
   const [stackAudit, setStackAudit] = useState(null);
   const [submitLoading, setSubmitLoading] = useState(false);
+  const [stackAdminRegionQuery, setStackAdminRegionQuery] = useState('');
   const [baselineAuditLoading, setBaselineAuditLoading] = useState(false);
   const [itabDecisionLoading, setItabDecisionLoading] = useState(false);
   const [coregistrationLoading, setCoregistrationLoading] = useState(false);
@@ -187,6 +514,20 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [workflowJobLoading, setWorkflowJobLoading] = useState(false);
   const [workflowJob, setWorkflowJob] = useState(null);
+
+  const stackDiscoveryPayload = useMemo(() => {
+    const adminRegion = stackAdminRegionQuery.trim();
+    return {
+      min_scenes: 3,
+      require_orbits: true,
+      include_scenes: false,
+      limit: 30,
+      discovery_mode: adminRegion ? 'aoi' : 'strict',
+      admin_region: adminRegion || undefined,
+      min_aoi_coverage_ratio: 0.01,
+      min_common_overlap_ratio: 0,
+    };
+  }, [stackAdminRegionQuery]);
 
   const loadProductionRuns = useCallback(async () => {
     setLoading(true);
@@ -240,22 +581,17 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     setError('');
     setStackAudit(null);
     try {
-      const data = await discoverSbasInsarStacks({
-        min_scenes: 3,
-        require_orbits: true,
-        include_scenes: false,
-        limit: 30,
-      });
+      const data = await discoverSbasInsarStacks(stackDiscoveryPayload);
       const items = Array.isArray(data?.items) ? data.items : [];
       setStackCandidates(items);
-      setSelectedStackId(current => current || items[0]?.stack_id || '');
+      setSelectedStackId(items[0]?.stack_id || '');
     } catch (exc) {
       setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR 栈发现失败');
       setStackCandidates([]);
     } finally {
       setDiscovering(false);
     }
-  }, []);
+  }, [stackDiscoveryPayload]);
 
   const handleAuditStack = useCallback(async stackId => {
     if (!stackId) return;
@@ -263,8 +599,8 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     setError('');
     try {
       const data = await auditSbasInsarStack(stackId, {
-        min_scenes: 3,
-        require_orbits: true,
+        ...stackDiscoveryPayload,
+        include_scenes: true,
       });
       setStackAudit(data);
     } catch (exc) {
@@ -273,7 +609,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     } finally {
       setAuditLoading(false);
     }
-  }, []);
+  }, [stackDiscoveryPayload]);
 
   const handleSubmitRun = useCallback(async () => {
     if (!selectedStackId || readOnly) return;
@@ -282,13 +618,12 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     try {
       const candidate = stackCandidates.find(item => item.stack_id === selectedStackId);
       const data = await submitSbasInsarRun(selectedStackId, {
+        ...stackDiscoveryPayload,
         run_label: candidate
-          ? `${candidate.satellite || 'LT1'} ${candidate.relative_orbit || ''} ${candidate.center_bucket || ''}`.trim()
+          ? `${candidate.satellite || 'LT1'} ${formatAdminRegion(candidate.admin_region)} relOrbit ${candidate.relative_orbit || ''}`.trim()
           : undefined,
-        min_scenes: 3,
-        require_orbits: true,
         dry_run: false,
-        monitor_point_strategy: 'auto_low_sigma_high_rate',
+        monitor_point_strategy: 'auto_representative_points',
       });
       const runId = data?.run?.run_id;
       const runData = await listSbasInsarRuns();
@@ -303,7 +638,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     } finally {
       setSubmitLoading(false);
     }
-  }, [readOnly, selectedStackId, stackCandidates]);
+  }, [readOnly, selectedStackId, stackCandidates, stackDiscoveryPayload]);
 
   const workflowPayload = useMemo(() => ({
     force: false,
@@ -586,6 +921,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
   const iptaTimeseriesPlan = runManifest.ipta_timeseries || null;
   const publishProductsPlan = runManifest.publish_products || null;
   const monitorProductsPlan = runManifest.monitor_point_products || null;
+  const runGeographicCoverage = runDetail?.geographic_coverage || null;
   const runPrimaryPreview = (
     runArtifacts.find(item => item.key === 'los_rate_toward_m_per_year_hls_geo_preview_png')
     || runArtifacts.find(item => item.key === 'los_rate_toward_mm_per_year_geo_preview_png')
@@ -662,12 +998,32 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
       <section style={sectionStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
           <div>
-            <h3 style={{ margin: 0, fontSize: 15, color: '#0f172a' }}>候选 SBAS 序列发现</h3>
+            <h3 style={{ margin: 0, fontSize: 15, color: '#0f172a' }}>SBAS 生产区域</h3>
             <div style={{ ...mutedStyle, marginTop: 5 }}>
-              直接扫描本地 LT1 数据池，按平台、相对轨道、升降轨、模式、极化、接收站和中心桶硬分组，并检查精轨 TXT。
+              按生产行政区查找覆盖同一目标区域的 LT1 时序候选，并检查日期密度、精轨和公共重叠范围。
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <input
+              value={stackAdminRegionQuery}
+              onChange={event => {
+                setStackAdminRegionQuery(event.target.value);
+                setStackCandidates([]);
+                setSelectedStackId('');
+                setStackAudit(null);
+              }}
+              onKeyDown={event => {
+                if (event.key === 'Enter') handleDiscoverStacks();
+              }}
+              placeholder="输入行政区，例如 牡丹江 / 洛阳"
+              style={{
+                border: '1px solid #cbd5e1',
+                borderRadius: 8,
+                padding: '8px 10px',
+                fontSize: 12,
+                minWidth: 160,
+              }}
+            />
             <button
               type="button"
               onClick={handleDiscoverStacks}
@@ -683,7 +1039,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                 whiteSpace: 'nowrap',
               }}
             >
-              {discovering ? '发现中' : '发现序列'}
+              {discovering ? '查找中' : '查找候选'}
             </button>
             <button
               type="button"
@@ -742,7 +1098,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                       <strong style={{ color: '#0f172a', fontSize: 13 }}>
-                        {item.satellite} / relOrbit {item.relative_orbit} / {item.center_bucket}
+                        {item.satellite || 'LT1'} / {item.orbit_direction || '-'} / relOrbit {item.relative_orbit || '-'}
                       </strong>
                       <StatusBadge value={item.status} />
                     </div>
@@ -750,18 +1106,37 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                       {item.date_start} 至 {item.date_end}，可用 {item.usable_scene_count}/{item.scene_count} 景，
                       缺精轨 {item.missing_orbit_count}，最大间隔 {item.max_temporal_gap_days} 天
                     </div>
+                    <div style={{ ...mutedStyle, marginTop: 4 }}>
+                      行政区：{formatAdminRegion(item.admin_region)}；公共重叠 {formatPercent(item.common_overlap_ratio)}
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 4 }}>
+                      覆盖 {formatPercent(item.aoi_overlap_ratio_mean)}；中心点 {formatCenter(item.center)}
+                    </div>
                   </button>
                 );
               })}
             </div>
             <div style={{ display: 'grid', gap: 10 }}>
               {selectedStack && (
-                <div style={metricGridStyle}>
-                  <Metric label="平台/模式" value={`${selectedStack.satellite || '-'} / ${selectedStack.imaging_mode || '-'}`} />
-                  <Metric label="轨道方向" value={selectedStack.orbit_direction || '-'} />
-                  <Metric label="极化/接收站" value={`${selectedStack.polarization || '-'} / ${selectedStack.receiving_station || '-'}`} />
-                  <Metric label="建议参考日期" value={selectedStack.reference_date || '-'} />
-                </div>
+                <>
+                  <div style={metricGridStyle}>
+                    <Metric label="平台/模式" value={`${selectedStack.satellite || '-'} / ${selectedStack.imaging_mode || '-'}`} />
+                    <Metric label="轨道方向" value={selectedStack.orbit_direction || '-'} />
+                    <Metric label="极化/接收站" value={`${selectedStack.polarization || '-'} / ${selectedStack.receiving_station || '-'}`} />
+                    <Metric label="建议参考日期" value={selectedStack.reference_date || '-'} />
+                    <Metric label="公共重叠" value={formatPercent(selectedStack.common_overlap_ratio)} />
+                    <Metric label="AOI 覆盖" value={formatPercent(selectedStack.aoi_overlap_ratio_mean)} />
+                  </div>
+                  <LocationSummaryPanel
+                    coverage={{
+                      bbox: selectedStack.bbox || selectedStack.bbox_intersection,
+                      bbox_intersection: selectedStack.bbox_intersection,
+                      center: selectedStack.center || bboxCenter(selectedStack.bbox || selectedStack.bbox_intersection),
+                      admin_region: selectedStack.admin_region,
+                      scene_bbox_count: selectedStack.usable_scene_count || selectedStack.scene_count || 0,
+                    }}
+                  />
+                </>
               )}
               {stackAudit && (
                 <div style={{ border: '1px solid #dbeafe', borderRadius: 8, padding: 10, background: '#eff6ff' }}>
@@ -826,7 +1201,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                     <strong style={{ color: '#0f172a', fontSize: 13 }}>
-                      {item.platform || 'LT1'} / relOrbit {item.relative_orbit || '-'} / {item.center_bucket || '-'}
+                      {formatAdminRegion(item.admin_region)} / {item.platform || 'LT1'} / relOrbit {item.relative_orbit || '-'}
                     </strong>
                     <StatusBadge value={item.status} />
                   </div>
@@ -836,6 +1211,11 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                 </button>
               );
             })}
+            {runs.length > 0 && (
+              <div style={{ ...mutedStyle, padding: '2px 0 6px' }}>
+                当前 Run 列表已补充中心点行政区；筛选入口优先放在候选序列发现阶段。
+              </div>
+            )}
             {!loading && runs.length === 0 && (
               <div style={{ ...mutedStyle, padding: '10px 0' }}>
                 暂无计划 Run。先发现序列，再创建计划 Run。
@@ -853,6 +1233,8 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                   <Metric label="场景/配对" value={`${run.scene_count || 0} / ${run.pair_count || 0}`} />
                   <Metric label="下一阶段" value={run.next_stage || '-'} />
                 </div>
+
+                <LocationSummaryPanel coverage={runGeographicCoverage} />
 
                 {!readOnly && (
                   <div style={{ border: '1px solid #bbf7d0', borderRadius: 8, padding: 10, background: '#f0fdf4' }}>

@@ -298,6 +298,14 @@ async def _check_timeseries_result_catalog() -> Dict[str, Any]:
     )
 
 
+async def _check_sbas_insar_result_catalog() -> Dict[str, Any]:
+    return await _check_catalog(
+        catalog_name="sbas_insar",
+        storage_root=os.path.join(settings.GAMMA_SBAS_WORK_ROOT, "runs"),
+        enabled=bool(settings.GAMMA_SBAS_ENABLED),
+    )
+
+
 async def _check_psinsar_result_catalog() -> Dict[str, Any]:
     return await _check_timeseries_result_catalog()
 
@@ -472,6 +480,7 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("timeseries_result_catalog", {}) or payload.get("psinsar_result_catalog", {}) or {}
     )
     psinsar_result_catalog = timeseries_result_catalog
+    sbas_insar_result_catalog = payload.get("sbas_insar_result_catalog", {}) or {}
     dinsar_bridge = payload.get("dinsar_bridge", {}) or {}
     source_roots = payload.get("source_roots", {}) or {}
     sar_analysis_ready = payload.get("sar_analysis_ready", {}) or {}
@@ -486,6 +495,7 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     sanitized_dinsar_catalog = _sanitize_catalog_status(dinsar_result_catalog)
     sanitized_timeseries_catalog = _sanitize_catalog_status(timeseries_result_catalog)
     sanitized_psinsar_catalog = sanitized_timeseries_catalog
+    sanitized_sbas_insar_catalog = _sanitize_catalog_status(sbas_insar_result_catalog)
     sanitized_dinsar_bridge = _sanitize_bridge_status(dinsar_bridge)
     sanitized_source_roots = _sanitize_source_roots_status(source_roots)
     sanitized_sar_analysis_ready = _sanitize_sar_analysis_ready_status(sar_analysis_ready)
@@ -511,10 +521,12 @@ def _sanitize_health_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         "dinsar_result_catalog": sanitized_dinsar_catalog,
         "timeseries_result_catalog": sanitized_timeseries_catalog,
         "psinsar_result_catalog": sanitized_psinsar_catalog,
+        "sbas_insar_result_catalog": sanitized_sbas_insar_catalog,
         "catalogs": {
             "dinsar": sanitized_dinsar_catalog,
             "timeseries": sanitized_timeseries_catalog,
             "psinsar": sanitized_psinsar_catalog,
+            "sbas_insar": sanitized_sbas_insar_catalog,
         },
         "dinsar_bridge": sanitized_dinsar_bridge,
         "source_roots": sanitized_source_roots,
@@ -1340,6 +1352,7 @@ async def get_health_status(
     result_catalog_status = await _check_result_catalog()
     timeseries_result_catalog_status = await _check_timeseries_result_catalog()
     psinsar_result_catalog_status = timeseries_result_catalog_status
+    sbas_insar_result_catalog_status = await _check_sbas_insar_result_catalog()
     dinsar_bridge_status = await _check_dinsar_bridge()
     source_roots_status = await _check_source_roots()
     sar_analysis_ready_status = await _check_sar_analysis_ready()
@@ -1366,6 +1379,7 @@ async def get_health_status(
             wsl_runtime_status.get("ok"),
             pairing_system_status.get("ok"),
             (not settings.TIMESERIES_ENABLED) or timeseries_result_catalog_status.get("ok"),
+            (not settings.GAMMA_SBAS_ENABLED) or sbas_insar_result_catalog_status.get("ok"),
         ]
     )
 
@@ -1378,10 +1392,12 @@ async def get_health_status(
         "dinsar_result_catalog": result_catalog_status,
         "timeseries_result_catalog": timeseries_result_catalog_status,
         "psinsar_result_catalog": psinsar_result_catalog_status,
+        "sbas_insar_result_catalog": sbas_insar_result_catalog_status,
         "catalogs": {
             "dinsar": result_catalog_status,
             "timeseries": timeseries_result_catalog_status,
             "psinsar": psinsar_result_catalog_status,
+            "sbas_insar": sbas_insar_result_catalog_status,
         },
         "dinsar_bridge": dinsar_bridge_status,
         "source_roots": source_roots_status,

@@ -497,6 +497,120 @@ Recommended order:
 
 The first user-visible win is step 1-2: the operator can immediately see whether a Run covers the intended location.
 
+## 10.1 Implementation Note 2026-05-27
+
+Implemented the first slice after commit `9f0ba32`:
+
+```text
+backend/app/services/sbas_insar_production_service.py
+frontend/src/SbasInsarProductionPanel.jsx
+```
+
+Backend now returns `geographic_coverage` from `GET /api/sbas-insar-production/runs/{run_id}`. The field is derived from `stack_manifest.json`, `rdc_dem_summary.json`, and `monitor_points_summary.json` without changing the Gamma expert workflow outputs.
+
+The returned structure includes:
+
+```text
+bbox
+bbox_intersection
+center
+scene_bbox_count
+scene_footprints_geojson
+dem_coverage
+dem_covers_stack_bbox
+dem_covers_stack_center
+monitor_points
+geojson FeatureCollection
+```
+
+Frontend now displays the coverage block in two places:
+
+```text
+candidate stack discovery detail
+selected production Run detail
+```
+
+The mini-map uses the existing Leaflet/offline tile configuration and draws:
+
+```text
+stack bbox rectangle
+DEM coverage rectangle when available
+monitor point markers when available
+```
+
+Validation against `sbas_7537cc71c998`:
+
+```text
+geographic_coverage.bbox = 128.7690438245,43.7486321624,129.6293024728,44.3582486206
+geojson feature count = 5
+monitor point = auto_low_sigma_high_rate, 129.10207098755,44.15041727515
+backend AST syntax check passed with configured Python
+frontend npm run build passed
+```
+
+Remaining result-management work starts at catalog registration and a separate SBAS products page.
+
+## 10.2 Implementation Note 2026-05-27 Result Catalog
+
+Implemented the SBAS result-management slice:
+
+```text
+backend/app/services/sbas_insar_catalog_service.py
+backend/app/routers/sbas_insar_products.py
+frontend/src/api/sbasInsarProducts.js
+frontend/src/SbasInsarProductsPanel.jsx
+```
+
+Backend behavior:
+
+```text
+catalog_name = sbas_insar
+storage root = GAMMA_SBAS_WORK_ROOT/runs
+source of truth = completed Gamma SBAS run folders
+startup bootstrap = scan publish-ready runs and rebuild index when stale
+manual rebuild = POST /api/sbas-insar-products/rebuild through job queue
+list/detail = GET /api/sbas-insar-products and /{id}
+asset serving = /api/sbas-insar-products/{id}/assets/{asset_id}
+```
+
+The catalog registers only database metadata and file pointers. It does not copy the large Gamma outputs.
+
+Important registered assets:
+
+```text
+LOS velocity geocoded preview
+LOS sigma geocoded preview
+LOS velocity GeoTIFF, toward radar positive
+LOS velocity GeoTIFF, away from radar positive
+LOS sigma GeoTIFF
+Gamma ts_rate and sigma_rate GeoTIFFs
+monitor-point PNG/CSV/metadata
+run, stack, workflow, product, quality, and monitor summaries
+```
+
+Frontend behavior:
+
+```text
+Production Management -> SBAS-InSAR 结果
+catalog health cards
+searchable result list
+result detail
+coverage map with stack bbox, DEM bbox, and monitor points
+velocity/sigma/monitor preview panels
+quality statistics
+asset download/open links
+issue list
+```
+
+Known next slices:
+
+```text
+AOI / administrative-region filter for list and discovery
+GeoTIFF raster overlay or server-side tile generation
+multi-monitor-point comparison view
+explicit orbit-trend/detrend quality diagnostics
+```
+
 ## 11. Validation
 
 Use `sbas_7537cc71c998` as the first validation run.
@@ -516,7 +630,37 @@ AOI filter returns this product when AOI intersects bbox
 AOI filter excludes this product when AOI is far away
 ```
 
-## 12. Open Questions
+## 12. 2026-05-27 Center-Region UI Closeout
+
+The gray footprint maps are no longer the primary SBAS UI contract. Production planning and result management now show a location summary instead:
+
+```text
+center lon/lat
+center administrative region
+stack bbox and common-overlap bbox as text
+scene footprint count
+monitor point count
+```
+
+Administrative lookup uses the existing `backend/geojson` AOI region data. The lookup starts with center-point containment, repairs invalid administrative geometries where possible, and falls back to a clear unavailable/not-matched state instead of blocking SBAS production.
+
+The SBAS result catalog now extracts dates from `stack_manifest.scenes[*].date`. This fixes the old list symptom:
+
+```text
+before: - 至 - / 0景 / 6对
+after : 20240422 至 20250908 / 7景 / 6对
+```
+
+The current validation run `sbas_7537cc71c998` rebuilt successfully into the result catalog and matched:
+
+```text
+center = 129.1949239855143, 44.053833584014285
+admin region = 黑龙江省 / 牡丹江市
+date range = 20240422 至 20250908
+scene/pair count = 7 / 6
+```
+
+## 13. Open Questions
 
 1. Administrative-region naming should start with center-point lookup or intersection lookup?
    Recommendation: center-point lookup first, intersection later.

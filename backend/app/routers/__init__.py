@@ -20,6 +20,7 @@ from . import (
     orbit,
     pairing,
     ps_products,
+    sbas_insar_products,
     radar,
     root_registry,
     sbas_insar_production,
@@ -55,6 +56,7 @@ def include_all_routers(router: APIRouter) -> None:
     router.include_router(dinsar_products.router)
     router.include_router(dinsar_production.router)
     router.include_router(sbas_insar_production.router)
+    router.include_router(sbas_insar_products.router)
     router.include_router(timeseries_production.router)
     router.include_router(ps_products.router)
     router.include_router(ai.router)

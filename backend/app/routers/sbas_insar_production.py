@@ -6,7 +6,7 @@ import subprocess
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..services.job_queue_service import job_queue_service
 from ..services.sbas_insar_production_service import sbas_insar_production_service
@@ -14,6 +14,19 @@ from ..services.task_service import task_service
 
 
 router = APIRouter(prefix="/sbas-insar-production", tags=["sbas-insar-production"])
+
+
+class SbasAoiBbox(BaseModel):
+    min_lon: float = Field(ge=-180, le=180)
+    min_lat: float = Field(ge=-90, le=90)
+    max_lon: float = Field(ge=-180, le=180)
+    max_lat: float = Field(ge=-90, le=90)
+
+    @model_validator(mode="after")
+    def _validate_order(self):
+        if self.min_lon >= self.max_lon or self.min_lat >= self.max_lat:
+            raise ValueError("aoi_bbox min values must be smaller than max values")
+        return self
 
 
 class SbasStackDiscoverRequest(BaseModel):
@@ -26,6 +39,11 @@ class SbasStackDiscoverRequest(BaseModel):
     platform: str | None = Field(default=None, max_length=16)
     relative_orbit: str | None = Field(default=None, max_length=32)
     orbit_direction: str | None = Field(default=None, max_length=32)
+    admin_region: str | None = Field(default=None, max_length=120)
+    discovery_mode: str = Field(default="strict", pattern="^(strict|aoi)$")
+    aoi_bbox: SbasAoiBbox | None = None
+    min_aoi_coverage_ratio: float = Field(default=0.01, ge=0, le=1)
+    min_common_overlap_ratio: float = Field(default=0.0, ge=0, le=1)
 
     @field_validator("source_roots", "orbit_roots", mode="before")
     @classmethod
@@ -39,13 +57,19 @@ class SbasStackDiscoverRequest(BaseModel):
         cleaned = [str(item or "").strip() for item in items if str(item or "").strip()]
         return cleaned or None
 
-    @field_validator("platform", "relative_orbit", "orbit_direction", mode="before")
+    @field_validator("platform", "relative_orbit", "orbit_direction", "admin_region", mode="before")
     @classmethod
     def _normalize_optional_text(cls, value):
         if value is None:
             return None
         text = str(value).strip()
         return text or None
+
+    @field_validator("discovery_mode", mode="before")
+    @classmethod
+    def _normalize_discovery_mode(cls, value):
+        text = str(value or "strict").strip().lower()
+        return text or "strict"
 
 
 class SbasMonitorPoint(BaseModel):
@@ -58,7 +82,7 @@ class SbasMonitorPoint(BaseModel):
 class SbasRunSubmitRequest(SbasStackDiscoverRequest):
     run_label: str | None = Field(default=None, max_length=120)
     dry_run: bool = True
-    monitor_point_strategy: str = Field(default="auto_low_sigma_high_rate", max_length=64)
+    monitor_point_strategy: str = Field(default="auto_representative_points", max_length=64)
     monitor_points: list[SbasMonitorPoint] | None = None
 
 
@@ -160,6 +184,11 @@ async def discover_sbas_insar_stacks(request: SbasStackDiscoverRequest):
             platform=request.platform,
             relative_orbit=request.relative_orbit,
             orbit_direction=request.orbit_direction,
+            admin_region=request.admin_region,
+            discovery_mode=request.discovery_mode,
+            aoi_bbox=request.aoi_bbox.model_dump() if request.aoi_bbox else None,
+            min_aoi_coverage_ratio=request.min_aoi_coverage_ratio,
+            min_common_overlap_ratio=request.min_common_overlap_ratio,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -175,6 +204,11 @@ async def audit_sbas_insar_stack(stack_id: str, request: SbasStackDiscoverReques
             orbit_roots=request.orbit_roots,
             min_scenes=request.min_scenes,
             require_orbits=request.require_orbits,
+            discovery_mode=request.discovery_mode,
+            admin_region=request.admin_region,
+            aoi_bbox=request.aoi_bbox.model_dump() if request.aoi_bbox else None,
+            min_aoi_coverage_ratio=request.min_aoi_coverage_ratio,
+            min_common_overlap_ratio=request.min_common_overlap_ratio,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -193,6 +227,11 @@ async def submit_sbas_insar_run(stack_id: str, request: SbasRunSubmitRequest):
             orbit_roots=request.orbit_roots,
             min_scenes=request.min_scenes,
             require_orbits=request.require_orbits,
+            discovery_mode=request.discovery_mode,
+            admin_region=request.admin_region,
+            aoi_bbox=request.aoi_bbox.model_dump() if request.aoi_bbox else None,
+            min_aoi_coverage_ratio=request.min_aoi_coverage_ratio,
+            min_common_overlap_ratio=request.min_common_overlap_ratio,
             monitor_points=[
                 point.model_dump(exclude_none=True)
                 for point in (request.monitor_points or [])

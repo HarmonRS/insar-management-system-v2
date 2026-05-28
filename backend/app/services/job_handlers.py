@@ -37,6 +37,7 @@ from .engine_lock_service import engine_lock_service
 from .envi_service import build_envi_runner_command, get_envi_runner_cwd, get_envi_runner_env
 from .psinsar_catalog_service import psinsar_catalog_service
 from .result_catalog_service import result_catalog_service
+from .sbas_insar_catalog_service import sbas_insar_catalog_service
 from .task_service import task_service
 from .timeseries_service import (
     JOB_TYPE_TIMESERIES_MATERIALIZE,
@@ -90,6 +91,7 @@ JOB_TYPE_PYINT_RUN = "PYINT_RUN"
 JOB_TYPE_PUBLISH_DINSAR_PRODUCTS = "PUBLISH_DINSAR_PRODUCTS"
 JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
+JOB_TYPE_REBUILD_SBAS_INSAR_CATALOG = "REBUILD_SBAS_INSAR_CATALOG"
 JOB_TYPE_SCAN_ASSET_INVENTORY = "SCAN_ASSET_INVENTORY"
 JOB_TYPE_SBAS_COREGISTRATION = "SBAS_COREGISTRATION"
 JOB_TYPE_SBAS_RDC_DEM = "SBAS_RDC_DEM"
@@ -4188,6 +4190,30 @@ async def _handle_rebuild_psinsar_catalog(job: SystemJobORM) -> None:
         )
 
 
+async def _handle_rebuild_sbas_insar_catalog(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("REBUILD_SBAS_INSAR_CATALOG requires task_id for progress tracking.")
+    payload = job.payload or {}
+    full_rebuild = bool(payload.get("full_rebuild", True))
+
+    await task_service.start_task(job.task_id, message="Rebuilding SBAS-InSAR result catalog...")
+    async with AsyncSessionLocal() as db:
+        result = await sbas_insar_catalog_service.rebuild_catalog(
+            db,
+            full_rebuild=full_rebuild,
+        )
+        await task_service.update_task(
+            job.task_id,
+            status="COMPLETED",
+            progress=100,
+            message=(
+                f"SBAS-InSAR result catalog rebuilt: runs={result.get('run_count', 0)}, "
+                f"registered={result.get('registered', 0)}, failed={result.get('failed', 0)}, "
+                f"issues={result.get('issue_count', 0)}"
+            ),
+        )
+
+
 async def _handle_sbas_coregistration(job: SystemJobORM) -> None:
     if not job.task_id:
         raise ValueError("SBAS_COREGISTRATION requires task_id for progress tracking.")
@@ -4623,6 +4649,7 @@ _HANDLERS = {
     JOB_TYPE_TIMESERIES_EXPORT_PUBLISH: _handle_timeseries_export_publish,
     JOB_TYPE_TIMESERIES_REGISTER_PRODUCT: _handle_timeseries_register_product,
     JOB_TYPE_REBUILD_PSINSAR_CATALOG: _handle_rebuild_psinsar_catalog,
+    JOB_TYPE_REBUILD_SBAS_INSAR_CATALOG: _handle_rebuild_sbas_insar_catalog,
     JOB_TYPE_COPY_DATA: _handle_copy_data,
     JOB_TYPE_UNPACK: _handle_unpack_archives,
     JOB_TYPE_UNPACK_SENTINEL1: _handle_unpack_sentinel1,

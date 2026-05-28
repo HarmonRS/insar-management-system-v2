@@ -71,6 +71,11 @@ export const PRODUCTION_WORKSPACE_VIEWS = [
     description: 'Gamma IPTA SBAS stack production, velocity maps, quality metrics, and monitor-point curves',
   },
   {
+    key: 'sbas_insar_products',
+    label: 'SBAS-InSAR 结果',
+    description: 'Gamma SBAS LOS velocity, uncertainty, coverage and monitoring-point product catalog',
+  },
+  {
     key: 'dinsar_products',
     label: 'D-InSAR 产物',
     description: '结果提取、标准目录发布与产物编目',
@@ -82,7 +87,7 @@ export const PRODUCTION_WORKSPACE_ENTRY_TO_VIEW = Object.freeze({
   dinsar_production: 'dinsar_runs',
   dinsar_products: 'dinsar_products',
   ps_production: 'sbas_insar_production',
-  ps_products: 'sbas_insar_production',
+  ps_products: 'sbas_insar_products',
 });
 
 export const PRODUCTION_WORKSPACE_ROUTE_TABS = new Set([
