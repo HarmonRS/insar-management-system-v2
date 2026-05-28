@@ -13,12 +13,13 @@
 - D-InSAR 引擎：
   - `sarscape`，运行在 Windows + IDL/ENVI
   - `isce2`，运行在 WSL2 共享运行时
-- 时序 InSAR：
-  - 当前前端名称为“时序 InSAR”
-  - 当前默认接入为 SBAS 流程
+- SBAS-InSAR：
+  - 当前主线为 Gamma DIFF + IPTA SBAS
+  - 独立生产入口为 `/api/sbas-insar-production`
+  - 独立结果入口为 `/api/sbas-insar-products`
 - Gamma / PyINT：
-  - 运行时接口已预留
-  - Gamma 本体采用固定安装目录，Python 胶水共享 WSL 环境
+  - Gamma 本体采用固定安装目录
+  - Python 胶水共享 WSL 环境
 
 ## 2. 结果目录
 
@@ -42,7 +43,7 @@ RESULT_QUARANTINE_ROOT=D:\production_results\_quarantine
   D-InSAR 产物发布根目录。
 
 - `TIMESERIES_PRODUCT_DIR`
-  时序 InSAR 产物发布根目录。
+  时序类产物发布根目录；当前 SBAS 结果默认位于其下的 `sbas` 子目录。
 
 - `RESULT_QUARANTINE_ROOT`
   异常产物、待人工处理产物的隔离目录。
@@ -56,9 +57,8 @@ D:\production_results
 │     └─ runs
 │        └─ run_<timestamp>_<engine>_<profile>_<seq>_<suffix>
 ├─ timeseries
-│  └─ <stack_key>
-│     └─ runs
-│        └─ run_<timestamp>_<engine>_<profile>_<seq>_<suffix>
+│  └─ sbas
+│     └─ <managed SBAS result bundles>
 └─ _quarantine
 ```
 
@@ -138,30 +138,38 @@ PYINT_RUNTIME_ID=gamma_pyint_runtime_v1
   使用共享 python，runner 为 `deploy/wsl/runners/gamma_pyint_runner.py`
   Gamma 固定环境脚本为 `deploy/wsl/profiles/gamma_env.sh`
 
-### 3.6 ISCE2 / 时序 InSAR
+### 3.6 ISCE2 D-InSAR 与旧时序兼容
 
 ```env
-ISCE2_ENABLED=true
+ISCE2_ENABLED=false
 ISCE2_WSL_DISTRO=Ubuntu-24.04
 ISCE2_PYTHON=/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python
 
-TIMESERIES_ENABLED=true
+TIMESERIES_ENABLED=false
 TIMESERIES_ENV_NAME=insar_wsl_v1
 TIMESERIES_PYTHON=/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python
 ```
 
 说明：
 
-- 目前现场共享运行时已经对齐到 `insar_wsl_v1`。
-- 当前时序入口默认接入 SBAS 工作流，因此时序链路仍然依赖 ISCE2 / MintPy 实验脚本集合。
+- ISCE2 可作为 D-InSAR 引擎启用。
+- 旧 ISCE2/MintPy 时序生产链默认关闭，不再作为 SBAS 生产入口。
+- 如果必须做历史链路对比，需要显式开启 `TIMESERIES_ENABLED=true` 并提供完整旧脚本路径。
 
-### 3.7 Gamma / PyINT
+### 3.7 Gamma / PyINT / SBAS
 
 ```env
 PYINT_ENABLED=true
 PYINT_WSL_DISTRO=Ubuntu-24.04
 PYINT_WSL_PYTHON=/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python
 PYINT_GAMMA_ENV_SCRIPT=D:\Code\Insar_management_system_v2\deploy\wsl\profiles\gamma_env.sh
+
+GAMMA_SBAS_ENABLED=true
+GAMMA_SBAS_WSL_DISTRO=Ubuntu-24.04
+GAMMA_SBAS_PYTHON=/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python
+GAMMA_SBAS_ENV_SCRIPT=D:\Code\Insar_management_system_v2\deploy\wsl\profiles\gamma_env.sh
+GAMMA_SBAS_SOURCE_ROOTS=D:\LuTan1_Image_Pool
+GAMMA_SBAS_ORBIT_ROOTS=D:\orbit_pools\envi
 ```
 
 说明：
@@ -199,8 +207,9 @@ python run_worker.py
 4. `manifest_inventory_service.sync_manifest_roots()`
 5. `result_catalog_service.bootstrap_catalog_on_startup_clean()`
 6. `psinsar_catalog_service.bootstrap_catalog_on_startup_clean()`
-7. `pairing_state_service.bootstrap_pairing_cache_state()`
-8. `get_health_status(include_external=False)`
+7. `sbas_insar_catalog_service.bootstrap_catalog_on_startup_clean()`
+8. `pairing_state_service.bootstrap_pairing_cache_state()`
+9. `get_health_status(include_external=False)`
 
 这套链路要求：
 
@@ -244,6 +253,7 @@ DB_SCHEMA_RESET_CONFIRM=true
 - `database`
 - `dinsar_result_catalog`
 - `timeseries_result_catalog`
+- `sbas_insar_result_catalog`
 - `dinsar_bridge`
 - `source_roots`
 - `product_packages`
@@ -295,14 +305,13 @@ VITE_TILE_SERVER_TOKEN=change_me
 
 1. 打开前端并确认地图、生产管理和运维自检可正常进入。
 2. 访问 `GET /api/health`，确认 database / catalog / product_packages / wsl_runtime 为 `ok`。
-3. 触发一次实际生产任务，确认结果能发布到 `DINSAR_PRODUCT_DIR` 或 `TIMESERIES_PRODUCT_DIR`，并被 catalog 收录。
+3. 触发一次实际生产任务，确认 D-InSAR 或 SBAS 结果能被对应 catalog 收录。
 
 ## 11. 相关文档
 
 - [../README.md](../README.md)
-- [CURRENT_STATUS_20260425.md](CURRENT_STATUS_20260425.md)
-- [DATABASE_SELF_MAINTENANCE_AUDIT_20260425.md](DATABASE_SELF_MAINTENANCE_AUDIT_20260425.md)
 - [PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md](PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md)
+- [SBAS_INSAR_CURRENT_WORKFLOW.md](SBAS_INSAR_CURRENT_WORKFLOW.md)
 - [WSL_RUNTIME_REFACTOR_DESIGN_20260422.md](WSL_RUNTIME_REFACTOR_DESIGN_20260422.md)
 
 ## DEM Sidecar Migration Warning

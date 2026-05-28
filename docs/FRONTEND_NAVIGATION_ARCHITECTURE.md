@@ -69,6 +69,7 @@ This is a workspace group, not a multi-tab planning tree.
 └─ 生产管理 (`production_management`)
    ├─ D-InSAR运行 (`dinsar_runs`)
    ├─ SBAS-InSAR Production (`sbas_insar_production`)
+   ├─ SBAS-InSAR结果 (`sbas_insar_products`)
    └─ D-InSAR产物 (`dinsar_products`)
 ```
 
