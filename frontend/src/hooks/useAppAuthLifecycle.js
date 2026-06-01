@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import apiClient from '../api/client';
 import { getHealth } from '../api/health';
 
@@ -28,22 +28,41 @@ export default function useAppAuthLifecycle({
   setAllData,
   setRadarPagination,
 }) {
-  const fetchCurrentUser = useCallback(async () => {
+  const authGenerationRef = useRef(0);
+
+  const fetchCurrentUser = useCallback(async (options = {}) => {
+    const { clearOnFailure = true } = options;
+    const requestGeneration = authGenerationRef.current;
     try {
-      const response = await apiClient.get('/auth/me');
-      setCurrentUser(response.data || null);
+      const response = await apiClient.get('/auth/me', {
+        skipAuthReset: !clearOnFailure,
+        authGeneration: requestGeneration,
+      });
+      if (requestGeneration === authGenerationRef.current) {
+        setCurrentUser(response.data || null);
+      }
     } catch {
-      setCurrentUser(null);
+      if (clearOnFailure && requestGeneration === authGenerationRef.current) {
+        setCurrentUser(null);
+      }
     } finally {
-      setAuthChecked(true);
+      if (requestGeneration === authGenerationRef.current || !clearOnFailure) {
+        setAuthChecked(true);
+      }
     }
   }, [setCurrentUser, setAuthChecked]);
 
-  const handleLoginSuccess = useCallback(async () => {
-    await fetchCurrentUser();
-  }, [fetchCurrentUser]);
+  const handleLoginSuccess = useCallback(async (userFromLogin = null) => {
+    authGenerationRef.current += 1;
+    if (userFromLogin) {
+      setCurrentUser(userFromLogin);
+      setAuthChecked(true);
+    }
+    await fetchCurrentUser({ clearOnFailure: !userFromLogin });
+  }, [fetchCurrentUser, setCurrentUser, setAuthChecked]);
 
   const handleLogout = useCallback(async () => {
+    authGenerationRef.current += 1;
     try {
       await apiClient.post('/auth/logout');
     } catch (error) {
@@ -127,7 +146,9 @@ export default function useAppAuthLifecycle({
     const interceptorId = apiClient.interceptors.response.use(
       (response) => response,
       (error) => {
-        if (error?.response?.status === 401) {
+        const requestGeneration = error?.config?.authGeneration;
+        const staleAuthFailure = typeof requestGeneration === 'number' && requestGeneration < authGenerationRef.current;
+        if (error?.response?.status === 401 && !error?.config?.skipAuthReset && !staleAuthFailure) {
           radarSearchRequestSeqRef.current += 1;
           setHasRadarSearched(false);
           if (aoeLayerRef.current) {

@@ -35,13 +35,13 @@ const LIST_PAGE_SIZE = 20;
 const VIEWS = [
   { key: 'extract', label: '水体提取' },
   { key: 'detect', label: '洪涝检测' },
-  { key: 'impact', label: '套合分析' },
-  { key: 'results', label: '结果与任务' },
+  { key: 'impact', label: '影响评估' },
+  { key: 'results', label: '成果管理' },
 ];
 
 const SENSOR_ROWS = [
-  { name: 'LT-1', status: '精密链路可用', tone: 'ok', capability: 'ENVI/SARscape' },
-  { name: 'GF3', status: '快速路线可用', tone: 'warn', capability: 'Python/GDAL + Otsu' },
+  { name: 'LT-1', status: 'Gamma 标准化可用', tone: 'ok', capability: 'ENVI/SARscape' },
+  { name: 'GF3', status: '分析就绪链路可用', tone: 'ok', capability: 'SARscape + GDAL' },
   { name: 'Sentinel-1', status: '待接入', tone: 'muted', capability: '导入适配器' },
 ];
 
@@ -305,7 +305,7 @@ function SceneRow({ scene, readOnly, onShowMap, onExtractWater, onReset }) {
           <button type="button" style={buttonStyle(coverageVisible ? 'success' : 'quiet', !scene.coverage_polygon)} disabled={!scene.coverage_polygon} onClick={handleToggleCoverage}>
             {coverageVisible ? '清除范围' : '显示范围'}
           </button>
-          <button type="button" style={buttonStyle('primary', readOnly || !canExtract)} disabled={readOnly || !canExtract} onClick={() => onExtractWater(scene)}>提取水体</button>
+          <button type="button" style={buttonStyle('primary', readOnly || !canExtract)} disabled={readOnly || !canExtract} onClick={() => onExtractWater(scene)}>执行提取</button>
           {isActiveStatus(scene.status) && (
             <button type="button" style={buttonStyle('danger', readOnly)} disabled={readOnly} onClick={() => onReset(scene)}>重置</button>
           )}
@@ -321,7 +321,7 @@ function WaterResultRow({ item, onShowMap }) {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'center' }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            <strong>水体 #{item.id}</strong>
+            <strong>水体提取 #{item.id}</strong>
             <StatusBadge status={item.status} />
             {item.scene_id && <span style={{ color: palette.muted }}>场景 #{item.scene_id}</span>}
             {item.satellite && <span style={{ color: palette.muted }}>{item.satellite}</span>}
@@ -335,7 +335,7 @@ function WaterResultRow({ item, onShowMap }) {
           </div>
           {item.error_msg && <div style={{ color: palette.red, fontSize: 11, marginTop: 6 }}>{item.error_msg}</div>}
         </div>
-        <button type="button" style={buttonStyle('secondary', asStatus(item.status) !== 'DONE')} disabled={asStatus(item.status) !== 'DONE'} onClick={() => onShowMap(item)}>上图</button>
+        <button type="button" style={buttonStyle('secondary', asStatus(item.status) !== 'DONE')} disabled={asStatus(item.status) !== 'DONE'} onClick={() => onShowMap(item)}>显示图层</button>
       </div>
     </div>
   );
@@ -347,17 +347,17 @@ function FloodProductRow({ product, onOpenManifest }) {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'center' }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-            <strong>{product.product_id || `产品 #${product.id}`}</strong>
+            <strong>{product.product_id || `成果 #${product.id}`}</strong>
             <StatusBadge status={product.status} />
-            {product.detection_id && <span style={{ color: palette.muted }}>洪涝 #{product.detection_id}</span>}
+            {product.detection_id && <span style={{ color: palette.muted }}>洪涝检测 #{product.detection_id}</span>}
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, marginTop: 8 }}>
-            <KeyValue label="洪涝面积" value={formatArea(product.flood_area_km2 || product.summary?.flood_area_km2)} strong />
+            <KeyValue label="新增淹没面积" value={formatArea(product.flood_area_km2 || product.summary?.flood_area_km2)} strong />
             <KeyValue label="影响面积" value={formatArea(product.affected_area_km2)} />
-            <KeyValue label="生成时间" value={formatYmd(product.created_at, 'zh')} />
+            <KeyValue label="发布时间" value={formatYmd(product.created_at, 'zh')} />
           </div>
         </div>
-        <button type="button" style={buttonStyle('secondary')} onClick={() => onOpenManifest(product)}>Manifest</button>
+        <button type="button" style={buttonStyle('secondary')} onClick={() => onOpenManifest(product)}>查看清单</button>
       </div>
     </div>
   );
@@ -372,18 +372,18 @@ function FloodEventRow({ event, mapLayerVis, mapLoading, productBusy, onShowMap,
     <div style={rowStyle}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0 }}>
-          <strong>洪涝 #{event.id}</strong>
+          <strong>洪涝检测 #{event.id}</strong>
           <StatusBadge status={event.status} />
           <span style={{ color: palette.muted }}>{event.pre_satellite || event.post_satellite || '-'}</span>
         </div>
         <button type="button" style={buttonStyle('secondary', !done || mapLoading)} disabled={!done || mapLoading} onClick={() => onShowMap(event)}>
-          {mapLoading ? '加载中' : '上图'}
+          {mapLoading ? '显示中' : '显示图层'}
         </button>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8, marginTop: 10 }}>
         <KeyValue label="灾前" value={preDate} />
         <KeyValue label="灾后" value={postDate} />
-        <KeyValue label="洪涝面积" value={formatArea(event.flood_area_km2)} strong />
+        <KeyValue label="新增淹没面积" value={formatArea(event.flood_area_km2)} strong />
         <KeyValue label="稳定水体" value={formatArea(event.stable_water_area_km2)} />
       </div>
       {event.error_msg && <div style={{ color: palette.red, fontSize: 11, marginTop: 8 }}>{event.error_msg}</div>}
@@ -400,17 +400,17 @@ function FloodEventRow({ event, mapLayerVis, mapLoading, productBusy, onShowMap,
               style={buttonStyle(layers[key] ? 'success' : 'quiet', false, { padding: '3px 8px', fontSize: 11 })}
               onClick={() => onToggleLayer(event.id, key, !layers[key])}
             >
-              {layers[key] ? '已显示' : '已隐藏'} {label}
+              {layers[key] ? '隐藏' : '显示'}{label}
             </button>
           ))}
           {onSelectImpact && (
             <button type="button" style={buttonStyle('secondary', false, { padding: '3px 8px', fontSize: 11 })} onClick={() => onSelectImpact(event)}>
-              套合分析
+              影响评估
             </button>
           )}
           {onCreateProduct && (
             <button type="button" style={buttonStyle('primary', productBusy, { padding: '3px 8px', fontSize: 11 })} disabled={productBusy} onClick={() => onCreateProduct(event)}>
-              {productBusy ? '生成中' : '生成产品'}
+              {productBusy ? '发布中' : '发布成果'}
             </button>
           )}
         </div>
@@ -566,7 +566,7 @@ export default function FloodAnalysisWorkspace({
     } catch (error) {
       setScenes([]);
       setScenesTotal(0);
-      showMessage('error', `水体场景加载失败：${getErrorText(error)}`);
+      showMessage('error', `分析就绪场景加载失败：${getErrorText(error)}`);
     } finally {
       setScenesLoading(false);
     }
@@ -582,7 +582,7 @@ export default function FloodAnalysisWorkspace({
     } catch (error) {
       setWaterResults([]);
       setWaterTotal(0);
-      showMessage('error', `水体结果加载失败：${getErrorText(error)}`);
+      showMessage('error', `水体提取成果加载失败：${getErrorText(error)}`);
     } finally {
       setWaterLoading(false);
     }
@@ -595,7 +595,7 @@ export default function FloodAnalysisWorkspace({
       setFloodEvents(res.items || []);
     } catch (error) {
       setFloodEvents([]);
-      showMessage('error', `洪涝结果加载失败：${getErrorText(error)}`);
+      showMessage('error', `洪涝检测成果加载失败：${getErrorText(error)}`);
     } finally {
       setFloodLoading(false);
     }
@@ -608,7 +608,7 @@ export default function FloodAnalysisWorkspace({
       setFloodProducts(res.items || []);
     } catch (error) {
       setFloodProducts([]);
-      showMessage('error', `洪涝产品加载失败：${getErrorText(error)}`);
+      showMessage('error', `发布成果加载失败：${getErrorText(error)}`);
     } finally {
       setProductLoading(false);
     }
@@ -735,15 +735,15 @@ export default function FloodAnalysisWorkspace({
   const handleSubmitPreprocess = async () => {
     if (readOnly || selectedRadars.length === 0) return;
     setActionBusy('geocode');
-    showMessage('info', `正在提交 ${selectedRadars.length} 景水体预处理任务...`);
-    onTaskStart?.(null, '正在提交水体预处理任务...');
+    showMessage('info', `正在提交 ${selectedRadars.length} 景分析就绪影像生成任务...`);
+    onTaskStart?.(null, '正在提交分析就绪影像生成任务...');
     let ok = 0;
     let fail = 0;
     for (const radar of selectedRadars) {
       try {
         const res = await submitFloodPreprocess({ radar_data_id: radar.id });
         ok += 1;
-        if (res.data?.task_id) onTaskStart?.(res.data.task_id, '水体预处理任务已启动');
+        if (res.data?.task_id) onTaskStart?.(res.data.task_id, '分析就绪影像生成任务已启动');
       } catch {
         fail += 1;
       }
@@ -751,7 +751,7 @@ export default function FloodAnalysisWorkspace({
     setActionBusy('');
     setSelectedRadars([]);
     await refreshAll();
-    showMessage(fail ? 'warn' : 'success', fail ? `提交完成：${ok} 成功，${fail} 失败。` : `已提交 ${ok} 个水体预处理任务。`);
+    showMessage(fail ? 'warn' : 'success', fail ? `提交完成：${ok} 成功，${fail} 失败。` : `已提交 ${ok} 个分析就绪影像生成任务。`);
   };
 
   const handleResetScene = async (scene) => {
@@ -794,9 +794,9 @@ export default function FloodAnalysisWorkspace({
         { id: `water_${item.id}`, label: `水体提取 #${item.id}` },
         { classified: preview },
       );
-      showMessage('success', `水体提取 #${item.id} 已加载到地图。`);
+      showMessage('success', `水体提取 #${item.id} 已显示在地图中。`);
     } catch (error) {
-      showMessage('error', `水体图层加载失败：${getErrorText(error)}`);
+      showMessage('error', `水体图层显示失败：${getErrorText(error)}`);
     } finally {
       setMapLoadingId(null);
     }
@@ -887,9 +887,9 @@ export default function FloodAnalysisWorkspace({
           classified: !!layers.classified,
         },
       }));
-      showMessage('success', `洪涝结果 #${event.id} 已加载到地图。`);
+      showMessage('success', `洪涝检测 #${event.id} 已显示在地图中。`);
     } catch (error) {
-      showMessage('error', `洪涝图层加载失败：${getErrorText(error)}`);
+      showMessage('error', `洪涝图层显示失败：${getErrorText(error)}`);
     } finally {
       setMapLoadingId(null);
     }
@@ -897,20 +897,20 @@ export default function FloodAnalysisWorkspace({
 
   const handleShowPairCoverage = (pair) => {
     if (!pair?.pre?.coverage_polygon || !pair?.post?.coverage_polygon) {
-      showMessage('warn', '该候选配对缺少覆盖范围，无法上图。');
+      showMessage('warn', '该候选配对缺少覆盖范围，无法显示。');
       return;
     }
     floodPanel.onShowFloodPairOnMap?.(pair);
-    showMessage('success', '候选配对覆盖范围已加载到地图。');
+    showMessage('success', '候选配对覆盖范围已显示。');
   };
 
   const handleShowFloodVector = () => {
     if (!impactResult?.flood_vector_geojson) {
-      showMessage('warn', '该套合结果没有可用洪涝矢量。');
+      showMessage('warn', '该影响评估结果没有可用洪涝范围矢量。');
       return;
     }
     floodPanel.onShowFloodVectorOnMap?.(impactResult);
-    showMessage('success', '洪涝矢量已加载到地图。');
+    showMessage('success', '洪涝范围矢量已显示。');
   };
 
   const loadImpactResult = useCallback(async (detectionId, { silent = false } = {}) => {
@@ -920,11 +920,11 @@ export default function FloodAnalysisWorkspace({
       const data = await getFloodImpact(detectionId);
       setImpactResult(data);
       if (!silent && data?.warnings?.includes?.('overlay has not been run')) {
-        showMessage('warn', '该洪涝结果尚未运行套合分析。');
+        showMessage('warn', '该洪涝检测尚未执行影响评估。');
       }
     } catch (error) {
       setImpactResult(null);
-      if (!silent) showMessage('error', `套合结果加载失败：${getErrorText(error)}`);
+      if (!silent) showMessage('error', `影响评估结果加载失败：${getErrorText(error)}`);
     } finally {
       setImpactLoading(false);
     }
@@ -937,9 +937,9 @@ export default function FloodAnalysisWorkspace({
       await runFloodOverlay(selectedImpactEvent.id, { near_threshold_m: 500 });
       await loadImpactResult(selectedImpactEvent.id, { silent: true });
       await loadFloodEvents();
-      showMessage('success', `洪涝结果 #${selectedImpactEvent.id} 套合分析已完成。`);
+      showMessage('success', `洪涝检测 #${selectedImpactEvent.id} 影响评估已完成。`);
     } catch (error) {
-      showMessage('error', `套合分析失败：${getErrorText(error)}`);
+      showMessage('error', `影响评估失败：${getErrorText(error)}`);
     } finally {
       setOverlayRunning(false);
     }
@@ -951,10 +951,10 @@ export default function FloodAnalysisWorkspace({
     try {
       await createFloodProduct(event.id);
       await loadFloodProducts();
-      showMessage('success', `洪涝结果 #${event.id} 产品已生成。`);
+      showMessage('success', `洪涝检测 #${event.id} 成果已发布。`);
       setResultMode('products');
     } catch (error) {
-      showMessage('error', `产品生成失败：${getErrorText(error)}`);
+      showMessage('error', `成果发布失败：${getErrorText(error)}`);
     } finally {
       setProductBusyId(null);
     }
@@ -963,9 +963,9 @@ export default function FloodAnalysisWorkspace({
   const handleOpenProductManifest = async (product) => {
     try {
       const manifest = await getFloodProductManifest(product.id || product.product_id);
-      showMessage('success', `Manifest 已读取：${manifest?.schema || product.product_id || product.id}`);
+      showMessage('success', `成果清单已读取：${manifest?.schema || product.product_id || product.id}`);
     } catch (error) {
-      showMessage('error', `Manifest 读取失败：${getErrorText(error)}`);
+      showMessage('error', `成果清单读取失败：${getErrorText(error)}`);
     }
   };
 
@@ -1004,10 +1004,10 @@ export default function FloodAnalysisWorkspace({
           <button type="button" style={buttonStyle('secondary', actionBusy === 'refresh')} disabled={actionBusy === 'refresh'} onClick={refreshAll}>刷新</button>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8, marginTop: 12 }}>
-          <KeyValue label="可提取场景" value={String(readyScenes.length)} strong />
-          <KeyValue label="水体结果" value={String(waterTotal)} strong />
-          <KeyValue label="洪涝结果" value={String(floodEvents.length)} strong />
-          <KeyValue label="运行中" value={String(runningCount)} strong />
+          <KeyValue label="分析就绪场景" value={String(readyScenes.length)} strong />
+          <KeyValue label="水体提取成果" value={String(waterTotal)} strong />
+          <KeyValue label="洪涝检测成果" value={String(floodEvents.length)} strong />
+          <KeyValue label="运行任务" value={String(runningCount)} strong />
         </div>
       </header>
 
@@ -1059,7 +1059,7 @@ export default function FloodAnalysisWorkspace({
         <main>
           <section style={{ ...sectionStyle, borderTop: 'none' }}>
             <SectionHeader
-              title="入库影像"
+              title="源影像筛选"
               actions={(
                 <>
                   <button type="button" style={buttonStyle('primary', radarLoading)} disabled={radarLoading} onClick={() => runRadarSearch(0)}>
@@ -1124,7 +1124,7 @@ export default function FloodAnalysisWorkspace({
                           <strong>{item.satellite || '-'}</strong>
                           <span style={{ color: palette.muted }}>{formatYmd(item.imaging_date, language)}</span>
                           <span style={{ color: palette.subtle }}>ID {item.id}</span>
-                          {done && <StatusBadge tone="ok">已预处理</StatusBadge>}
+                          {done && <StatusBadge tone="ok">已标准化</StatusBadge>}
                           {active && <StatusBadge tone="info">处理中</StatusBadge>}
                         </div>
                         <div style={{ color: palette.subtle, fontSize: 11, marginTop: 4 }}>
@@ -1173,17 +1173,17 @@ export default function FloodAnalysisWorkspace({
               <div style={{ marginTop: 10, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                 <span style={{ color: palette.text2, fontSize: 12 }}>已选 {selectedRadars.length} 景</span>
                 <button type="button" style={buttonStyle('primary', readOnly || actionBusy === 'geocode')} disabled={readOnly || actionBusy === 'geocode'} onClick={handleSubmitPreprocess}>
-                  {actionBusy === 'geocode' ? '提交中' : '提交水体预处理'}
+                  {actionBusy === 'geocode' ? '提交中' : '生成分析就绪影像'}
                 </button>
               </div>
             )}
           </section>
 
           <section style={sectionStyle}>
-            <SectionHeader title={`可提取场景 (${scenesTotal})`} actions={<button type="button" style={buttonStyle('quiet', scenesLoading)} disabled={scenesLoading} onClick={() => loadScenes(scenesPage)}>刷新场景</button>} />
+            <SectionHeader title={`分析就绪场景 (${scenesTotal})`} actions={<button type="button" style={buttonStyle('quiet', scenesLoading)} disabled={scenesLoading} onClick={() => loadScenes(scenesPage)}>刷新场景</button>} />
             <div style={{ display: 'grid', gap: 8 }}>
               {scenesLoading && <EmptyState>场景加载中...</EmptyState>}
-              {!scenesLoading && scenes.length === 0 && <EmptyState>暂无水体预处理场景。</EmptyState>}
+              {!scenesLoading && scenes.length === 0 && <EmptyState>暂无分析就绪场景。</EmptyState>}
               {!scenesLoading && scenes.map(scene => (
                 <SceneRow
                   key={scene.id}
@@ -1205,10 +1205,10 @@ export default function FloodAnalysisWorkspace({
           </section>
 
           <section style={sectionStyle}>
-            <SectionHeader title={`水体提取结果 (${waterTotal})`} actions={<button type="button" style={buttonStyle('quiet', waterLoading)} disabled={waterLoading} onClick={() => loadWaterResults(waterPage)}>刷新结果</button>} />
+            <SectionHeader title={`水体提取成果 (${waterTotal})`} actions={<button type="button" style={buttonStyle('quiet', waterLoading)} disabled={waterLoading} onClick={() => loadWaterResults(waterPage)}>刷新结果</button>} />
             <div style={{ display: 'grid', gap: 8 }}>
-              {waterLoading && <EmptyState>水体结果加载中...</EmptyState>}
-              {!waterLoading && waterResults.length === 0 && <EmptyState>暂无水体提取结果。</EmptyState>}
+              {waterLoading && <EmptyState>水体提取成果加载中...</EmptyState>}
+              {!waterLoading && waterResults.length === 0 && <EmptyState>暂无水体提取成果。</EmptyState>}
               {!waterLoading && waterResults.map(item => (
                 <WaterResultRow key={item.id} item={item} onShowMap={handleShowWaterResult} />
               ))}
@@ -1233,7 +1233,7 @@ export default function FloodAnalysisWorkspace({
                 <>
                   <button type="button" style={buttonStyle('primary', pairSearching)} disabled={pairSearching} onClick={handleFindPairs}>{pairSearching ? '推荐中' : '推荐配对'}</button>
                   <button type="button" style={buttonStyle('success', readOnly || !selectedPair || actionBusy === 'flood_detect')} disabled={readOnly || !selectedPair || actionBusy === 'flood_detect'} onClick={handleSubmitFloodDetection}>
-                    {actionBusy === 'flood_detect' ? '提交中' : '提交检测'}
+                    {actionBusy === 'flood_detect' ? '提交中' : '提交洪涝检测'}
                   </button>
                 </>
               )}
@@ -1330,7 +1330,7 @@ export default function FloodAnalysisWorkspace({
                           }
                         }}
                       >
-                        预览覆盖
+                        显示覆盖范围
                       </span>
                     </div>
                   </button>
@@ -1340,10 +1340,10 @@ export default function FloodAnalysisWorkspace({
           </section>
 
           <section style={sectionStyle}>
-            <SectionHeader title="近期洪涝结果" actions={<button type="button" style={buttonStyle('quiet', floodLoading)} disabled={floodLoading} onClick={loadFloodEvents}>刷新结果</button>} />
+            <SectionHeader title="洪涝检测成果" actions={<button type="button" style={buttonStyle('quiet', floodLoading)} disabled={floodLoading} onClick={loadFloodEvents}>刷新结果</button>} />
             <div style={{ display: 'grid', gap: 8 }}>
-              {floodLoading && <EmptyState>洪涝结果加载中...</EmptyState>}
-              {!floodLoading && floodEvents.length === 0 && <EmptyState>暂无洪涝检测结果。</EmptyState>}
+              {floodLoading && <EmptyState>洪涝检测成果加载中...</EmptyState>}
+              {!floodLoading && floodEvents.length === 0 && <EmptyState>暂无洪涝检测成果。</EmptyState>}
               {!floodLoading && floodEvents.slice(0, 6).map(event => (
                 <FloodEventRow
                   key={event.id}
@@ -1366,16 +1366,16 @@ export default function FloodAnalysisWorkspace({
         <main>
           <section style={{ ...sectionStyle, borderTop: 'none' }}>
             <SectionHeader
-              title="套合对象"
+              title="影响评估对象"
               actions={<button type="button" style={buttonStyle('quiet', impactLoading)} disabled={impactLoading || !selectedImpactEvent} onClick={() => selectedImpactEvent && loadImpactResult(selectedImpactEvent.id)}>刷新结果</button>}
             />
             <div style={{ display: 'grid', gap: 8 }}>
               {[
-                ['洪涝分类栅格', selectedImpactEvent ? `结果 #${selectedImpactEvent.id}` : '请选择结果', selectedImpactEvent ? 'ok' : 'muted'],
-                ['洪涝矢量化', impactResult?.warnings?.includes?.('overlay has not been run') ? '未生成' : (impactResult ? '已生成' : '待运行'), impactResult && !impactResult?.warnings?.includes?.('overlay has not been run') ? 'ok' : 'warn'],
+                ['分类栅格', selectedImpactEvent ? `检测 #${selectedImpactEvent.id}` : '请选择成果', selectedImpactEvent ? 'ok' : 'muted'],
+                ['洪涝范围矢量', impactResult?.warnings?.includes?.('overlay has not been run') ? '未生成' : (impactResult ? '已生成' : '待评估'), impactResult && !impactResult?.warnings?.includes?.('overlay has not been run') ? 'ok' : 'warn'],
                 ['灾害点命中', impactResult ? `${impactResult.hazard_points?.inside_flood?.length || 0} 个` : '待运行', impactResult ? 'ok' : 'muted'],
                 ['近洪涝风险点', impactResult ? `${impactResult.hazard_points?.near_flood?.length || 0} 个` : '待运行', impactResult ? 'info' : 'muted'],
-                ['DInSAR关联', impactResult ? `${impactResult.dinsar_products?.length || 0} 个` : '待运行', impactResult ? 'info' : 'muted'],
+                ['D-InSAR 关联', impactResult ? `${impactResult.dinsar_products?.length || 0} 个` : '待运行', impactResult ? 'info' : 'muted'],
                 ['行政区统计', impactResult?.affected_aois?.length ? `${impactResult.affected_aois.length} 个` : '暂无数据', impactResult ? 'muted' : 'muted'],
               ].map(([name, status, tone]) => (
                 <div key={name} style={{ ...rowStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
@@ -1387,9 +1387,9 @@ export default function FloodAnalysisWorkspace({
           </section>
 
           <section style={sectionStyle}>
-            <SectionHeader title="选择洪涝结果" />
+            <SectionHeader title="选择洪涝检测成果" />
             <div style={{ display: 'grid', gap: 8 }}>
-              {doneFloodEvents.length === 0 && <EmptyState>暂无已完成洪涝结果。</EmptyState>}
+              {doneFloodEvents.length === 0 && <EmptyState>暂无已完成洪涝检测成果。</EmptyState>}
               {doneFloodEvents.map(event => {
                 const active = String(selectedImpactEvent?.id) === String(event.id);
                 return (
@@ -1406,39 +1406,39 @@ export default function FloodAnalysisWorkspace({
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
-                      <strong>洪涝 #{event.id}</strong>
+                      <strong>洪涝检测 #{event.id}</strong>
                       <StatusBadge tone={active ? 'info' : 'muted'}>{active ? '当前' : '可选'}</StatusBadge>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, marginTop: 8 }}>
                       <KeyValue label="灾前" value={formatYmd(event.pre_imaging_date, language)} />
                       <KeyValue label="灾后" value={formatYmd(event.post_imaging_date, language)} />
-                      <KeyValue label="洪涝面积" value={formatArea(event.flood_area_km2)} strong />
+                      <KeyValue label="新增淹没面积" value={formatArea(event.flood_area_km2)} strong />
                     </div>
                   </button>
                 );
               })}
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
-              <button type="button" style={buttonStyle('secondary', !selectedImpactEvent)} disabled={!selectedImpactEvent} onClick={() => selectedImpactEvent && handleShowFloodEvent(selectedImpactEvent)}>加载洪涝图层</button>
-              <button type="button" style={buttonStyle('secondary', !impactResult?.flood_vector_geojson)} disabled={!impactResult?.flood_vector_geojson} onClick={handleShowFloodVector}>加载洪涝矢量</button>
+              <button type="button" style={buttonStyle('secondary', !selectedImpactEvent)} disabled={!selectedImpactEvent} onClick={() => selectedImpactEvent && handleShowFloodEvent(selectedImpactEvent)}>显示分类图层</button>
+              <button type="button" style={buttonStyle('secondary', !impactResult?.flood_vector_geojson)} disabled={!impactResult?.flood_vector_geojson} onClick={handleShowFloodVector}>显示洪涝范围</button>
               <button type="button" style={buttonStyle('primary', readOnly || !selectedImpactEvent || overlayRunning)} disabled={readOnly || !selectedImpactEvent || overlayRunning} onClick={handleRunOverlay}>
-                {overlayRunning ? '套合中' : '运行套合分析'}
+                {overlayRunning ? '评估中' : '执行影响评估'}
               </button>
               <button type="button" style={buttonStyle('quiet', true)} disabled>导出影响清单</button>
             </div>
           </section>
 
           <section style={sectionStyle}>
-            <SectionHeader title="套合结果" />
-            {impactLoading && <EmptyState>套合结果加载中...</EmptyState>}
-            {!impactLoading && !impactResult && <EmptyState>选择一个已完成的洪涝结果后运行套合分析。</EmptyState>}
+            <SectionHeader title="影响评估结果" />
+            {impactLoading && <EmptyState>影响评估结果加载中...</EmptyState>}
+            {!impactLoading && !impactResult && <EmptyState>选择一个已完成的洪涝检测成果后执行影响评估。</EmptyState>}
             {!impactLoading && impactResult && (
               <div style={{ display: 'grid', gap: 10 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 8 }}>
-                  <KeyValue label="洪涝面积" value={formatArea(impactResult.flood_area_km2)} strong />
+                  <KeyValue label="新增淹没面积" value={formatArea(impactResult.flood_area_km2)} strong />
                   <KeyValue label="命中灾害点" value={String(impactResult.hazard_points?.inside_flood?.length || 0)} strong />
                   <KeyValue label="近洪涝风险点" value={String(impactResult.hazard_points?.near_flood?.length || 0)} />
-                  <KeyValue label="DInSAR产品" value={String(impactResult.dinsar_products?.length || 0)} />
+                  <KeyValue label="D-InSAR 产品" value={String(impactResult.dinsar_products?.length || 0)} />
                   <KeyValue label="影响行政区" value={String(impactResult.affected_aois?.length || 0)} />
                 </div>
                 {impactResult.warnings?.length > 0 && (
@@ -1490,19 +1490,19 @@ export default function FloodAnalysisWorkspace({
         <main>
           <section style={{ ...sectionStyle, borderTop: 'none' }}>
             <SectionHeader
-              title="结果列表"
+              title="成果列表"
               actions={(
                 <>
-                  <button type="button" style={buttonStyle(resultMode === 'flood' ? 'primary' : 'quiet')} onClick={() => setResultMode('flood')}>洪涝</button>
-                  <button type="button" style={buttonStyle(resultMode === 'water' ? 'primary' : 'quiet')} onClick={() => setResultMode('water')}>水体</button>
-                  <button type="button" style={buttonStyle(resultMode === 'products' ? 'primary' : 'quiet')} onClick={() => setResultMode('products')}>产品</button>
+                  <button type="button" style={buttonStyle(resultMode === 'flood' ? 'primary' : 'quiet')} onClick={() => setResultMode('flood')}>洪涝检测</button>
+                  <button type="button" style={buttonStyle(resultMode === 'water' ? 'primary' : 'quiet')} onClick={() => setResultMode('water')}>水体提取</button>
+                  <button type="button" style={buttonStyle(resultMode === 'products' ? 'primary' : 'quiet')} onClick={() => setResultMode('products')}>发布成果</button>
                   <button type="button" style={buttonStyle('secondary')} onClick={refreshAll}>刷新</button>
                 </>
               )}
             />
             {resultMode === 'flood' && (
               <div style={{ display: 'grid', gap: 8 }}>
-                {floodEvents.length === 0 && <EmptyState>暂无洪涝检测结果。</EmptyState>}
+                {floodEvents.length === 0 && <EmptyState>暂无洪涝检测成果。</EmptyState>}
                 {floodEvents.map(event => (
                   <FloodEventRow
                     key={event.id}
@@ -1520,7 +1520,7 @@ export default function FloodAnalysisWorkspace({
             )}
             {resultMode === 'water' && (
               <div style={{ display: 'grid', gap: 8 }}>
-                {waterResults.length === 0 && <EmptyState>暂无水体提取结果。</EmptyState>}
+                {waterResults.length === 0 && <EmptyState>暂无水体提取成果。</EmptyState>}
                 {waterResults.map(item => (
                   <WaterResultRow key={item.id} item={item} onShowMap={handleShowWaterResult} />
                 ))}
@@ -1528,8 +1528,8 @@ export default function FloodAnalysisWorkspace({
             )}
             {resultMode === 'products' && (
               <div style={{ display: 'grid', gap: 8 }}>
-                {productLoading && <EmptyState>洪涝产品加载中...</EmptyState>}
-                {!productLoading && floodProducts.length === 0 && <EmptyState>暂无洪涝产品。可在洪涝结果行点击“生成产品”。</EmptyState>}
+                {productLoading && <EmptyState>发布成果加载中...</EmptyState>}
+                {!productLoading && floodProducts.length === 0 && <EmptyState>暂无发布成果。可在洪涝检测成果中点击“发布成果”。</EmptyState>}
                 {!productLoading && floodProducts.map(product => (
                   <FloodProductRow key={product.id || product.product_id} product={product} onOpenManifest={handleOpenProductManifest} />
                 ))}
@@ -1538,9 +1538,9 @@ export default function FloodAnalysisWorkspace({
           </section>
 
           <section style={sectionStyle}>
-            <SectionHeader title="产品出口" />
+            <SectionHeader title="成果发布" />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
-              <button type="button" style={buttonStyle('secondary')} onClick={() => setResultMode('products')}>产品列表</button>
+              <button type="button" style={buttonStyle('secondary')} onClick={() => setResultMode('products')}>发布成果列表</button>
               <button type="button" style={buttonStyle('quiet', true)} disabled>GeoJSON 导出</button>
               <button type="button" style={buttonStyle('quiet', true)} disabled>报告</button>
             </div>

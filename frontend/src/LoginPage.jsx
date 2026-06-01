@@ -1,11 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import axios from 'axios';
-
-
-const apiClient = axios.create({
-  baseURL: '/api',
-  withCredentials: true,
-});
+import apiClient from './api/client';
 
 
 const LoginPage = ({ onLoginSuccess }) => {
@@ -32,15 +26,22 @@ const LoginPage = ({ onLoginSuccess }) => {
     setLoading(true);
     setMessage('');
     try {
-      await apiClient.post('/auth/login', {
-        username,
+      const response = await apiClient.post('/auth/login', {
+        username: username.trim(),
         password,
       });
       if (onLoginSuccess) {
-        await onLoginSuccess();
+        await onLoginSuccess(response.data?.user || null);
       }
     } catch (error) {
-      setMessage(error.response?.data?.detail || '登录失败，请检查用户名和密码。');
+      const status = error.response?.status;
+      if (status === 401) {
+        setMessage('用户名或密码不正确。');
+      } else if (status === 429) {
+        setMessage(error.response?.data?.detail || '登录尝试过于频繁，请稍后再试。');
+      } else {
+        setMessage(error.response?.data?.detail || '登录请求失败，请稍后重试。');
+      }
     } finally {
       setLoading(false);
     }
