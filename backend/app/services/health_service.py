@@ -879,6 +879,36 @@ def _probe_directory_status(path: str) -> Dict[str, Any]:
     return payload
 
 
+def _probe_file_status(path: str) -> Dict[str, Any]:
+    normalized = str(path or "").strip()
+    payload = {
+        "path": normalized,
+        "exists": False,
+        "accessible": False,
+        "error": None,
+    }
+    if not normalized:
+        payload["error"] = "empty path"
+        return payload
+
+    try:
+        if os.path.isfile(normalized):
+            payload["exists"] = True
+            try:
+                with open(normalized, "rb") as stream:
+                    stream.read(1)
+                payload["accessible"] = True
+            except Exception as exc:
+                payload["error"] = str(exc)
+            return payload
+
+        os.stat(normalized)
+        payload["error"] = "path exists but is not a file"
+    except Exception as exc:
+        payload["error"] = str(exc)
+    return payload
+
+
 async def _check_source_roots() -> Dict[str, Any]:
     items = []
 
@@ -908,9 +938,32 @@ async def _check_source_roots() -> Dict[str, Any]:
         status["role"] = "gf3_l1a_source"
         items.append(status)
 
+    for path in split_env_paths(settings.GF3_SARSCAPE_NATIVE_DIRS):
+        status = _probe_directory_status(path)
+        status["role"] = "gf3_sarscape_native"
+        items.append(status)
+
     for path in split_env_paths(settings.GF3_STORAGE_DIRS):
         status = _probe_directory_status(path)
         status["role"] = "gf3_l2_storage"
+        items.append(status)
+
+    wrapper_exe = str(settings.GF3_SARSCAPE_WRAPPER_EXE or "").strip()
+    if wrapper_exe:
+        status = _probe_file_status(wrapper_exe)
+        status["role"] = "gf3_sarscape_wrapper"
+        items.append(status)
+
+    idlrt_path = str(settings.GF3_SARSCAPE_IDLRT_PATH or "").strip()
+    if idlrt_path:
+        status = _probe_file_status(idlrt_path)
+        status["role"] = "gf3_sarscape_idlrt"
+        items.append(status)
+
+    dem_path = str(settings.GF3_SARSCAPE_DEM_PATH or settings.GF3_GEO_DEM_PATH or "").strip()
+    if dem_path:
+        status = _probe_file_status(dem_path)
+        status["role"] = "gf3_sarscape_dem"
         items.append(status)
 
     configured_count = len(items)

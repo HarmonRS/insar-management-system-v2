@@ -15,6 +15,7 @@
 import os
 import time
 import json
+from collections import deque
 from typing import Tuple, Optional, Dict, Any, List
 from PIL import Image
 import rasterio
@@ -334,6 +335,55 @@ class ImageService:
         """
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         image.save(output_path, format='WEBP', quality=quality)
+
+    @staticmethod
+    def make_edge_dark_transparent(
+        image: Image.Image,
+        *,
+        threshold: int = 6,
+    ) -> Image.Image:
+        """Make edge-connected near-black preview background transparent."""
+        rgba = image.convert("RGBA")
+        arr = np.array(rgba, dtype=np.uint8, copy=True)
+        if arr.ndim != 3 or arr.shape[2] < 4:
+            return rgba
+
+        alpha = arr[:, :, 3]
+        dark = (alpha > 0) & (arr[:, :, :3].max(axis=2) <= int(threshold))
+        if not dark.any():
+            return rgba
+
+        h, w = dark.shape
+        edge = np.zeros_like(dark, dtype=bool)
+        edge[0, :] = dark[0, :]
+        edge[h - 1, :] = dark[h - 1, :]
+        edge[:, 0] |= dark[:, 0]
+        edge[:, w - 1] |= dark[:, w - 1]
+        if not edge.any():
+            return rgba
+
+        visited = np.zeros_like(dark, dtype=bool)
+        ys, xs = np.where(edge)
+        queue = deque(zip(ys.tolist(), xs.tolist()))
+        visited[ys, xs] = True
+
+        while queue:
+            y, x = queue.popleft()
+            if y > 0 and dark[y - 1, x] and not visited[y - 1, x]:
+                visited[y - 1, x] = True
+                queue.append((y - 1, x))
+            if y + 1 < h and dark[y + 1, x] and not visited[y + 1, x]:
+                visited[y + 1, x] = True
+                queue.append((y + 1, x))
+            if x > 0 and dark[y, x - 1] and not visited[y, x - 1]:
+                visited[y, x - 1] = True
+                queue.append((y, x - 1))
+            if x + 1 < w and dark[y, x + 1] and not visited[y, x + 1]:
+                visited[y, x + 1] = True
+                queue.append((y, x + 1))
+
+        arr[:, :, 3][visited] = 0
+        return Image.fromarray(arr, "RGBA")
     
     @staticmethod
     def create_cached_image(
@@ -497,12 +547,12 @@ class ImageService:
 
     @staticmethod
     def _warp_preview_to_geo_bbox(
-        source_rgb: np.ndarray,
+        source_rgba: np.ndarray,
         inverse_h: np.ndarray,
         bbox: Tuple[float, float, float, float],
         out_size: Tuple[int, int],
     ) -> np.ndarray:
-        src_h, src_w = source_rgb.shape[:2]
+        src_h, src_w = source_rgba.shape[:2]
         out_w, out_h = out_size
         min_lon, min_lat, max_lon, max_lat = bbox
         lon_span = max_lon - min_lon
@@ -557,7 +607,7 @@ class ImageService:
             du = (u_valid - x0).astype(np.float32)
             dv = (v_valid - y0).astype(np.float32)
 
-            src_float = source_rgb.astype(np.float32, copy=False)
+            src_float = source_rgba.astype(np.float32, copy=False)
             s00 = src_float[y0, x0]
             s10 = src_float[y0, x1]
             s01 = src_float[y1, x0]
@@ -568,15 +618,14 @@ class ImageService:
                 + s01 * (1 - du)[:, None] * dv[:, None]
                 + s11 * du[:, None] * dv[:, None]
             )
-            rgb = np.clip(samples, 0, 255).astype(np.uint8)
+            rgba = np.clip(samples, 0, 255).astype(np.uint8)
         else:
             nearest_x = np.clip(np.round(u_valid).astype(np.int32), 0, src_w - 1)
             nearest_y = np.clip(np.round(v_valid).astype(np.int32), 0, src_h - 1)
-            rgb = source_rgb[nearest_y, nearest_x]
+            rgba = source_rgba[nearest_y, nearest_x]
 
         flat = output.reshape(-1, 4)
-        flat[valid_idx, :3] = rgb
-        flat[valid_idx, 3] = 255
+        flat[valid_idx] = rgba
         return output
 
     @staticmethod
@@ -608,9 +657,10 @@ class ImageService:
                 return False, "invalid_bbox"
 
             with Image.open(source_image_path) as image:
-                source_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+                source = ImageService.make_edge_dark_transparent(image)
+                source_rgba = np.asarray(source, dtype=np.uint8)
 
-            src_h, src_w = source_rgb.shape[:2]
+            src_h, src_w = source_rgba.shape[:2]
             if src_h < 1 or src_w < 1:
                 return False, "invalid_source_image_size"
 
@@ -633,7 +683,7 @@ class ImageService:
                 return False, "homography_invert_failed"
 
             warped_rgba = ImageService._warp_preview_to_geo_bbox(
-                source_rgb=source_rgb,
+                source_rgba=source_rgba,
                 inverse_h=inverse_h,
                 bbox=bbox,
                 out_size=out_size,
@@ -672,7 +722,7 @@ class ImageService:
             )
 
             with Image.open(source_image_path) as image:
-                image = image.convert("RGB")
+                image = ImageService.make_edge_dark_transparent(image)
                 image.thumbnail(max_size, Image.Resampling.LANCZOS)
                 ImageService.save_image_as_webp(image, cache_path, quality=82)
             return True

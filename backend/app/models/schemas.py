@@ -210,12 +210,12 @@ class RadarData(BaseModel):
     has_orbit_data: bool
     orbit_file_path: Optional[str] = None
     is_envi_processed: bool = False
-    coverage_polygon: List[Tuple[float, float]]
+    coverage_polygon: Optional[List[Tuple[float, float]]] = None
 
-    min_lon: float
-    min_lat: float
-    max_lon: float
-    max_lat: float
+    min_lon: Optional[float] = None
+    min_lat: Optional[float] = None
+    max_lon: Optional[float] = None
+    max_lat: Optional[float] = None
     preview_cache_status: str = "NONE"
     preview_cache_version: Optional[str] = None
     preview_cache_updated_at: Optional[datetime] = None
@@ -236,7 +236,7 @@ class RadarData(BaseModel):
 
     @computed_field
     @property
-    def coverage_bbox(self) -> Tuple[float, float, float, float]:
+    def coverage_bbox(self) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
         """A computed property to provide the bbox tuple, used by existing logic."""
         return (self.min_lon, self.min_lat, self.max_lon, self.max_lat)
 

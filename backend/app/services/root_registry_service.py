@@ -263,6 +263,15 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
         )
     )
     specs.extend(
+        _iter_multi_root_specs(
+            env_var="GF3_SARSCAPE_NATIVE_DIRS",
+            paths=split_env_paths(settings.GF3_SARSCAPE_NATIVE_DIRS),
+            root_role="source_pool_gf3_sarscape_native",
+            display_prefix="GF3 SARscape Native Pool",
+            scan_mode="scene_directory",
+        )
+    )
+    specs.extend(
         _iter_single_root_specs(
             env_var="SAR_ANALYSIS_READY_ROOT",
             path=settings.SAR_ANALYSIS_READY_ROOT,

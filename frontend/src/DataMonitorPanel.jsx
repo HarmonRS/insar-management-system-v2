@@ -9,7 +9,14 @@ const DEFAULT_MONITOR_CONFIG = {
   dinsar_dirs: [],
   gf3_archive_source_dirs: [],
   gf3_source_dirs: [],
+  gf3_sarscape_native_dirs: [],
   gf3_storage_dirs: [],
+  gf3_sarscape_wrapper_exe: '',
+  gf3_sarscape_idlrt_path: '',
+  gf3_sarscape_dem_path: '',
+  gf3_sarscape_polarizations: 'HH,HV',
+  gf3_sarscape_auto_standardize: true,
+  gf3_sarscape_clean_after_success: true,
   s1_source_dirs: [],
   s1_storage_dirs: [],
   s1_orbit_dirs: [],
@@ -68,6 +75,9 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const [s1Message, setS1Message] = useState('');
   const [gf3UnpackLoading, setGf3UnpackLoading] = useState(false);
   const [gf3ProcessLoading, setGf3ProcessLoading] = useState(false);
+  const [gf3SarscapeProduceLoading, setGf3SarscapeProduceLoading] = useState(false);
+  const [gf3SarscapeSyncLoading, setGf3SarscapeSyncLoading] = useState(false);
+  const [gf3SarscapeCleanLoading, setGf3SarscapeCleanLoading] = useState(false);
   const [gf3ScanLoading, setGf3ScanLoading] = useState(false);
   const [gf3Message, setGf3Message] = useState('');
   const logEndRef = useRef(null);
@@ -87,7 +97,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   );
   const s1ActiveTask = displayActiveTasks.find((task) => task.task_type === 'UNPACK_SENTINEL1');
   const gf3ActiveTask = displayActiveTasks.find((task) =>
-    ['GF3_UNPACK', 'GF3_BATCH_PROCESS'].includes(task.task_type)
+    ['GF3_UNPACK', 'GF3_BATCH_PROCESS', 'GF3_SARSCAPE_PRODUCE', 'GF3_SARSCAPE_SYNC', 'GF3_SARSCAPE_CLEAN'].includes(task.task_type)
   );
 
   useEffect(() => {
@@ -120,6 +130,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
           s1_orbit_dirs: toArray(data?.s1_orbit_dirs),
           gf3_archive_source_dirs: toArray(data?.gf3_archive_source_dirs),
           gf3_source_dirs: toArray(data?.gf3_source_dirs),
+          gf3_sarscape_native_dirs: toArray(data?.gf3_sarscape_native_dirs),
           gf3_storage_dirs: toArray(data?.gf3_storage_dirs),
         });
         setConfigLoaded(true);
@@ -289,7 +300,10 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const hasS1OrbitDirs = config.s1_orbit_dirs.length > 0;
   const hasGf3ArchiveSourceDirs = config.gf3_archive_source_dirs.length > 0;
   const hasGf3SourceDirs = config.gf3_source_dirs.length > 0;
+  const hasGf3SarscapeNativeDirs = config.gf3_sarscape_native_dirs.length > 0;
   const hasGf3StorageDirs = config.gf3_storage_dirs.length > 0;
+  const hasGf3SarscapeWrapper = typeof config.gf3_sarscape_wrapper_exe === 'string' && config.gf3_sarscape_wrapper_exe.trim() !== '';
+  const hasGf3SarscapeDem = typeof config.gf3_sarscape_dem_path === 'string' && config.gf3_sarscape_dem_path.trim() !== '';
 
   const canRunRadar = !readOnly && configLoaded && hasRadarDirs;
   const canRunOrbit = !readOnly && configLoaded && hasOrbitDir;
@@ -299,6 +313,9 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const canRunGf3Scan = !readOnly && configLoaded && hasGf3StorageDirs;
   const canRunGf3Unpack = !readOnly && configLoaded && hasGf3ArchiveSourceDirs && hasGf3SourceDirs;
   const canRunGf3Process = !readOnly && configLoaded && hasGf3SourceDirs;
+  const canRunGf3SarscapeProduce = !readOnly && configLoaded && hasGf3ArchiveSourceDirs && hasGf3SarscapeNativeDirs && hasGf3StorageDirs && hasGf3SarscapeWrapper && hasGf3SarscapeDem;
+  const canRunGf3SarscapeSync = !readOnly && configLoaded && hasGf3SarscapeNativeDirs && hasGf3StorageDirs;
+  const canRunGf3SarscapeClean = !readOnly && configLoaded && hasGf3SarscapeNativeDirs && hasGf3StorageDirs;
   const canOpenUnpackDialog = !readOnly && unpackConfig.source_dirs.length > 0;
 
   const handleS1Run = async () => {
@@ -449,6 +466,111 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
       setGf3Message(`失败：${err.message || '未知错误'}`);
     } finally {
       setGf3UnpackLoading(false);
+    }
+  };
+
+  const handleGf3SarscapeProduce = async () => {
+    if (readOnly) {
+      setGf3Message('当前账户为只读模式，无法触发 GF3 SARscape 生产。');
+      return;
+    }
+    setGf3SarscapeProduceLoading(true);
+    setGf3Message('GF3 SARscape 生产链路启动中...');
+    try {
+      const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-produce`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      });
+      const data = await parseJsonSafe(res, {});
+      if (res.ok) {
+        setGf3Message(data.message || 'GF3 SARscape 生产任务已启动');
+        if (onTaskStart) {
+          onTaskStart(data.task_id, 'GF3 SARscape 生产链路已启动。', {
+            nonBlocking: true,
+            taskType: 'GF3_SARSCAPE_PRODUCE',
+          });
+        }
+      } else {
+        setGf3Message(`失败：${data.detail || '未知错误'}`);
+      }
+    } catch (err) {
+      setGf3Message(`失败：${err.message || '未知错误'}`);
+    } finally {
+      setGf3SarscapeProduceLoading(false);
+    }
+  };
+
+  const handleGf3SarscapeSync = async () => {
+    if (readOnly) {
+      setGf3Message('当前账户为只读模式，无法触发 GF3 SARscape 标准化。');
+      return;
+    }
+    setGf3SarscapeSyncLoading(true);
+    setGf3Message('GF3 SARscape 原生结果标准化启动中...');
+    try {
+      const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-sync`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      });
+      const data = await parseJsonSafe(res, {});
+      if (res.ok) {
+        setGf3Message(data.message || 'GF3 SARscape 标准化任务已启动');
+        if (onTaskStart) {
+          onTaskStart(data.task_id, 'GF3 SARscape 原生结果标准化已启动。', {
+            nonBlocking: true,
+            taskType: 'GF3_SARSCAPE_SYNC',
+          });
+        }
+      } else {
+        setGf3Message(`失败：${data.detail || '未知错误'}`);
+      }
+    } catch (err) {
+      setGf3Message(`失败：${err.message || '未知错误'}`);
+    } finally {
+      setGf3SarscapeSyncLoading(false);
+    }
+  };
+
+  const handleGf3SarscapeClean = async () => {
+    if (readOnly) {
+      setGf3Message('当前账户为只读模式，无法触发 GF3 SARscape 清理。');
+      return;
+    }
+    setGf3SarscapeCleanLoading(true);
+    setGf3Message('GF3 SARscape 中间数据清理启动中...');
+    try {
+      const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-clean`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ dry_run: false, require_standardized: true }),
+      });
+      const data = await parseJsonSafe(res, {});
+      if (res.ok) {
+        setGf3Message(data.message || 'GF3 SARscape 清理任务已启动');
+        if (onTaskStart) {
+          onTaskStart(data.task_id, 'GF3 SARscape 中间数据清理已启动。', {
+            nonBlocking: true,
+            taskType: 'GF3_SARSCAPE_CLEAN',
+          });
+        }
+      } else {
+        setGf3Message(`失败：${data.detail || '未知错误'}`);
+      }
+    } catch (err) {
+      setGf3Message(`失败：${err.message || '未知错误'}`);
+    } finally {
+      setGf3SarscapeCleanLoading(false);
     }
   };
 
@@ -676,6 +798,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
             <div style={rowStyle}><span style={labelStyle}>S1 精轨</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_orbit_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>GF3 压缩包</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_archive_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>GF3 来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_source_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>GF3 原生</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_sarscape_native_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>GF3 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>D-InSAR 结果</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.dinsar_dirs)}</span></div>
           </div>
@@ -769,7 +892,11 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
           <div style={{ ...gridStyle, marginBottom: '8px' }}>
             <div style={rowStyle}><span style={labelStyle}>压缩包来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_archive_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>L1A 来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_source_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>SARscape 原生</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_sarscape_native_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>L2 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>Wrapper</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_wrapper_exe || '未配置'}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>SARscape DEM</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_dem_path || '未配置'}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>极化</span><span>{config.gf3_sarscape_polarizations || 'HH,HV'}</span></div>
           </div>
           <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
             <button
@@ -785,6 +912,27 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
               style={actionBtnStyle(gf3ProcessLoading, readOnly || !canRunGf3Process)}
             >
               {gf3ProcessLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 预处理')}
+            </button>
+            <button
+              onClick={handleGf3SarscapeProduce}
+              disabled={gf3SarscapeProduceLoading || readOnly || !canRunGf3SarscapeProduce}
+              style={actionBtnStyle(gf3SarscapeProduceLoading, readOnly || !canRunGf3SarscapeProduce)}
+            >
+              {gf3SarscapeProduceLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 SARscape 生产')}
+            </button>
+            <button
+              onClick={handleGf3SarscapeSync}
+              disabled={gf3SarscapeSyncLoading || readOnly || !canRunGf3SarscapeSync}
+              style={actionBtnStyle(gf3SarscapeSyncLoading, readOnly || !canRunGf3SarscapeSync)}
+            >
+              {gf3SarscapeSyncLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 SARscape 入库')}
+            </button>
+            <button
+              onClick={handleGf3SarscapeClean}
+              disabled={gf3SarscapeCleanLoading || readOnly || !canRunGf3SarscapeClean}
+              style={actionBtnStyle(gf3SarscapeCleanLoading, readOnly || !canRunGf3SarscapeClean)}
+            >
+              {gf3SarscapeCleanLoading ? '运行中...' : (readOnly ? '只读模式' : '清理 GF3 中间')}
             </button>
             <button
               onClick={handleGf3Scan}

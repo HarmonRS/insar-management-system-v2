@@ -72,6 +72,11 @@ export default function useRadarSearch({
         );
     };
 
+    const getSatelliteFallbackForGroup = (groupKey) => {
+        const group = SATELLITE_GROUPS.find((item) => item.key === groupKey);
+        return Array.isArray(group?.prefixes) && group.prefixes.length > 0 ? group.prefixes[0] : '';
+    };
+
     const fetchRadarImagingDates = useCallback(async () => {
         try {
             const response = await apiClient.get('/radar-data/imaging-dates');
@@ -131,33 +136,6 @@ export default function useRadarSearch({
             setRadarSearchOptionsLoading(false);
         }
     }, [setRadarSearchOptions, setRadarSearchOptionsLoading]);
-
-    const changeSatelliteGroup = useCallback((groupKey) => {
-        setSelectedSatelliteGroup(groupKey);
-        // Clear sub-filters that may be invalid for the new satellite group
-        setRadarSearchDraft((prev) => ({
-            ...prev,
-            satellite: '',
-            imaging_mode: '',
-            polarization: '',
-            satellite_mode: '',
-            receiving_station: '',
-            orbit_circle: '',
-            acquisition_time_utc: '',
-            product_type: '',
-            product_level: '',
-            product_unique_id: '',
-            orbit_direction: '',
-        }));
-        if (groupKey === 'all') {
-            fetchRadarSearchOptions([]);
-        } else {
-            const matched = getSatellitesForGroup(groupKey);
-            if (matched.length > 0) {
-                fetchRadarSearchOptions(matched);
-            }
-        }
-    }, [setSelectedSatelliteGroup, setRadarSearchDraft, fetchRadarSearchOptions]);
 
     const processAndSetAllData = useCallback((data) => {
         const nameCounts = {};
@@ -294,6 +272,8 @@ export default function useRadarSearch({
             const matched = getSatellitesForGroup(selectedSatelliteGroup);
             if (matched.length > 0) {
                 draftWithSatelliteGroup.satellite = matched.join(',');
+            } else {
+                draftWithSatelliteGroup.satellite = getSatelliteFallbackForGroup(selectedSatelliteGroup);
             }
         }
         const normalizedCriteria = normalizeRadarSearchCriteria(draftWithSatelliteGroup, RADAR_SEARCH_DEFAULTS);
@@ -352,6 +332,78 @@ export default function useRadarSearch({
         setRadarSearchAppliedRegionTreeId, setRadarSearchAoiToken,
         setHasRadarSearched, setRadarSearchFiles,
         clearRadarSearchResults, fetchAllData,
+    ]);
+
+    const changeSatelliteGroup = useCallback(async (groupKey) => {
+        const nextGroupKey = groupKey || 'all';
+        setSelectedSatelliteGroup(nextGroupKey);
+        const clearedDraft = {
+            ...radarSearchDraft,
+            satellite: '',
+            imaging_mode: '',
+            polarization: '',
+            satellite_mode: '',
+            receiving_station: '',
+            orbit_circle: '',
+            acquisition_time_utc: '',
+            product_type: '',
+            product_level: '',
+            product_unique_id: '',
+            orbit_direction: '',
+        };
+        setRadarSearchDraft(clearedDraft);
+
+        let matched = [];
+        let satelliteFilter = '';
+        if (nextGroupKey === 'all') {
+            fetchRadarSearchOptions([]);
+        } else {
+            matched = getSatellitesForGroup(nextGroupKey);
+            satelliteFilter = matched.length > 0
+                ? matched.join(',')
+                : getSatelliteFallbackForGroup(nextGroupKey);
+            if (matched.length > 0) {
+                fetchRadarSearchOptions(matched);
+            }
+        }
+
+        const normalizedCriteria = normalizeRadarSearchCriteria(
+            {
+                ...clearedDraft,
+                satellite: nextGroupKey === 'all' ? '' : satelliteFilter,
+            },
+            RADAR_SEARCH_DEFAULTS
+        );
+        const requestId = radarSearchRequestSeqRef.current + 1;
+        radarSearchRequestSeqRef.current = requestId;
+        setRadarSearchApplied(normalizedCriteria);
+        setRadarSearchAppliedAoiMode('none');
+        setRadarSearchAppliedRegionTreeId('');
+        setRadarSearchAoiMode('none');
+        setRadarSearchAoiToken('');
+        setHasRadarSearched(true);
+        setIsLoading(true);
+        clearRadarSearchResults({ limit: radarPagination.limit });
+        try {
+            await fetchAllData({
+                limit: radarPagination.limit,
+                offset: 0,
+                criteria: normalizedCriteria,
+                aoiMode: 'none',
+                regionTreeId: '',
+                files: null,
+                aoiToken: '',
+                requestId,
+            });
+        } finally {
+            setIsLoading(false);
+        }
+    }, [
+        radarSearchDraft, radarPagination.limit, radarSearchRequestSeqRef,
+        setSelectedSatelliteGroup, setRadarSearchDraft, setRadarSearchApplied,
+        setRadarSearchAppliedAoiMode, setRadarSearchAppliedRegionTreeId,
+        setRadarSearchAoiMode, setRadarSearchAoiToken, setHasRadarSearched,
+        setIsLoading, clearRadarSearchResults, fetchAllData, fetchRadarSearchOptions,
     ]);
 
     const resetRadarSearch = useCallback(() => {

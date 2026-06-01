@@ -207,7 +207,16 @@ class Settings(BaseSettings):
     GF3_ARCHIVE_EXTS: str = ".zip,.tar,.tar.gz,.tgz"
     GF3_UNPACK_DELETE_ARCHIVE: bool = True
     GF3_SOURCE_DIRS: str = ""
+    GF3_SARSCAPE_NATIVE_DIRS: str = ""
     GF3_STORAGE_DIRS: str = ""
+    GF3_SARSCAPE_WRAPPER_EXE: str = ""
+    GF3_SARSCAPE_IDLRT_PATH: str = r"C:\Program Files\Harris\ENVI56\IDL88\bin\bin.x86_64\idlrt.exe"
+    GF3_SARSCAPE_DEM_PATH: str = ""
+    GF3_SARSCAPE_POLARIZATIONS: str = "HH,HV"
+    GF3_SARSCAPE_KEEP_EXTRACTED: bool = True
+    GF3_SARSCAPE_AUTO_STANDARDIZE: bool = True
+    GF3_SARSCAPE_CLEAN_AFTER_SUCCESS: bool = True
+    GF3_SARSCAPE_PRODUCE_TIMEOUT_SECONDS: int = 0
 
     MONITOR_ORBIT_DIR: str = ""
     ORBIT_POOL_ENVI: str = ""
@@ -991,6 +1000,15 @@ def validate_runtime_config() -> dict[str, Any]:
     _check_path(label="IDL_EXECUTABLE", value=settings.IDL_EXECUTABLE, errors=errors, warnings=warnings, expect_file=True)
     _check_path(label="IDL_WORKBENCH_PATH", value=settings.IDL_WORKBENCH_PATH, errors=errors, warnings=warnings, expect_file=True)
     _check_path(label="GF3_GEO_DEM_PATH", value=settings.GF3_GEO_DEM_PATH, errors=errors, warnings=warnings, expect_file=True)
+    _check_path(label="GF3_SARSCAPE_WRAPPER_EXE", value=settings.GF3_SARSCAPE_WRAPPER_EXE, errors=errors, warnings=warnings, expect_file=True)
+    _check_path(label="GF3_SARSCAPE_IDLRT_PATH", value=settings.GF3_SARSCAPE_IDLRT_PATH, errors=errors, warnings=warnings, expect_file=True)
+    _check_path(
+        label="GF3_SARSCAPE_DEM_PATH",
+        value=(settings.GF3_SARSCAPE_DEM_PATH or settings.GF3_GEO_DEM_PATH),
+        errors=errors,
+        warnings=warnings,
+        expect_file=True,
+    )
     _check_path(label="SRTM_DEM_DIR", value=settings.SRTM_DEM_DIR, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="WATER_RESULTS_DIR", value=settings.WATER_RESULTS_DIR, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="SAR_ANALYSIS_READY_ROOT", value=settings.SAR_ANALYSIS_READY_ROOT, errors=errors, warnings=warnings, expect_file=False)
@@ -1024,6 +1042,7 @@ def validate_runtime_config() -> dict[str, Any]:
         ("MONITOR_DINSAR_DIRS", settings.MONITOR_DINSAR_DIRS),
         ("GF3_ARCHIVE_SOURCE_DIRS", settings.GF3_ARCHIVE_SOURCE_DIRS),
         ("GF3_SOURCE_DIRS", settings.GF3_SOURCE_DIRS),
+        ("GF3_SARSCAPE_NATIVE_DIRS", settings.GF3_SARSCAPE_NATIVE_DIRS),
         ("GF3_STORAGE_DIRS", settings.GF3_STORAGE_DIRS),
     ):
         values = split_env_paths(raw_value)

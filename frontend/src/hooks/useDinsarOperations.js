@@ -11,7 +11,7 @@ import { normalizePagePayload } from '../utils/appHelpers';
 import { normalizeTaskStatus } from '../utils/appUiHelpers';
 import { DEFAULT_LIST_PAGE_SIZE } from '../config/appConstants';
 
-const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES', 'UNPACK_SENTINEL1', 'GF3_UNPACK', 'SCAN_ASSET_INVENTORY', 'COPY_DATA']);
+const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES', 'UNPACK_SENTINEL1', 'GF3_UNPACK', 'GF3_SARSCAPE_PRODUCE', 'GF3_SARSCAPE_SYNC', 'GF3_SARSCAPE_CLEAN', 'SCAN_ASSET_INVENTORY', 'COPY_DATA']);
 
 export default function useDinsarOperations({
     onCleanupDinsarLayers,
@@ -234,6 +234,28 @@ export default function useDinsarOperations({
                 addLog('success', taskInfo.message || 'GF3 解包完成。');
             } else if (taskStatus === 'FAILED') {
                 addLog('error', `GF3 解包失败: ${taskInfo.message || '未知错误'}`);
+            }
+        } else if (taskInfo.task_type === 'GF3_SARSCAPE_PRODUCE') {
+            if (taskStatus === 'COMPLETED') {
+                addLog('success', taskInfo.message || 'GF3 SARscape 生产链完成。');
+                addLog('info', '正在同步 GF3 生产后的数据视图...');
+                void syncRadarViewsAfterUnpack();
+            } else if (taskStatus === 'FAILED') {
+                addLog('error', `GF3 SARscape 生产失败: ${taskInfo.message || '未知错误'}`);
+            }
+        } else if (taskInfo.task_type === 'GF3_SARSCAPE_SYNC') {
+            if (taskStatus === 'COMPLETED') {
+                addLog('success', taskInfo.message || 'GF3 SARscape 标准化完成。');
+                addLog('info', '正在同步 GF3 标准化后的数据视图...');
+                void syncRadarViewsAfterUnpack();
+            } else if (taskStatus === 'FAILED') {
+                addLog('error', `GF3 SARscape 标准化失败: ${taskInfo.message || '未知错误'}`);
+            }
+        } else if (taskInfo.task_type === 'GF3_SARSCAPE_CLEAN') {
+            if (taskStatus === 'COMPLETED') {
+                addLog('success', taskInfo.message || 'GF3 SARscape 中间数据清理完成。');
+            } else if (taskStatus === 'FAILED') {
+                addLog('error', `GF3 SARscape 中间数据清理失败: ${taskInfo.message || '未知错误'}`);
             }
         }
     };

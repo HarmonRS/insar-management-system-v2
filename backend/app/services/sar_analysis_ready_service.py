@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import settings
 from ..models import RadarDataORM, SARSceneGeoORM
 from ..utils import normalize_satellite_family
+from .image_service import image_service
 
 _SAFE_TEXT_RE = re.compile(r"[^0-9A-Za-z._-]+")
 _POLARIZATION_PRIORITY = ("HH", "VV", "HV", "VH")
@@ -82,7 +83,25 @@ def scene_analysis_dir(
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as stream:
-        json.dump(payload, stream, ensure_ascii=False, indent=2, default=str)
+        json.dump(_json_safe(payload), stream, ensure_ascii=False, indent=2, default=str, allow_nan=False)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _link_or_copy(source: Path, target: Path) -> str:
@@ -171,7 +190,7 @@ def _raster_quality(path: Path) -> dict[str, Any]:
                 "top": bounds.top,
             },
             "transform": list(transform)[:6],
-            "nodata": src.nodata,
+            "nodata": _finite_float(src.nodata),
             "valid_sample_count": int(valid.size),
             "valid_sample_percent": float(valid.size / sampled.size) if sampled.size else 0.0,
         }
@@ -231,6 +250,7 @@ def _build_preview_png(source: Path, target: Path) -> str | None:
     if valid.size:
         p2, p98 = np.nanpercentile(valid, [2, 98])
         normalized = np.clip((data - p2) / max(p98 - p2, 1e-6), 0, 1)
+        normalized = np.where(np.isfinite(normalized), normalized, 0)
         gray = (normalized * 255).astype("uint8")
     else:
         gray = np.zeros(data.shape, dtype="uint8")
@@ -238,6 +258,31 @@ def _build_preview_png(source: Path, target: Path) -> str | None:
     rgba = np.stack([gray, gray, gray, alpha], axis=-1)
     Image.fromarray(rgba, "RGBA").save(target)
     return str(target)
+
+
+def _build_preview_from_existing(source: Path | None, target: Path) -> str | None:
+    if source is None or not source.is_file():
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with Image.open(source) as img:
+            preview = img.copy()
+            resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+            preview.thumbnail((1600, 1600), resampling)
+            if preview.mode in {"1", "I", "I;16", "F"}:
+                preview = preview.convert("L")
+            elif preview.mode not in {"L", "LA", "RGB", "RGBA"}:
+                preview = preview.convert("RGB")
+            preview = image_service.make_edge_dark_transparent(preview)
+            preview.save(target, "PNG")
+        return str(target)
+    except Exception:
+        return None
 
 
 async def _get_or_create_scene(db: AsyncSession, radar_id: int) -> SARSceneGeoORM:
@@ -262,6 +307,7 @@ async def register_analysis_ready_tif(
     backscatter_unit: str,
     polarization: str | None = None,
     metadata: dict[str, Any] | None = None,
+    preview_source_path: str | None = None,
     copy_mode: str = "link_or_copy",
 ) -> dict[str, Any]:
     source = Path(os.path.normpath(str(source_tif_path or "").strip()))
@@ -283,7 +329,10 @@ async def register_analysis_ready_tif(
         transfer = _link_or_copy(source, target_tif)
 
     quality = _raster_quality(target_tif)
-    preview_path = _build_preview_png(target_tif, out_dir / "preview.png")
+    preview_source = Path(os.path.normpath(preview_source_path)) if preview_source_path else None
+    preview_path = _build_preview_from_existing(preview_source, out_dir / "preview.png")
+    if not preview_path:
+        preview_path = _build_preview_png(target_tif, out_dir / "preview.png")
     manifest = {
         "scene_id": scene.id,
         "radar_data_id": scene.radar_data_id,
@@ -296,6 +345,7 @@ async def register_analysis_ready_tif(
         "backscatter_unit": backscatter_unit,
         "polarization": polarization,
         "transfer": transfer,
+        "preview_source_path": str(preview_source) if preview_path and preview_source else None,
         "metadata": metadata or {},
         "quality": quality,
     }
@@ -309,14 +359,9 @@ async def register_analysis_ready_tif(
     scene.analysis_engine = engine
     scene.analysis_profile = profile
     scene.analysis_backscatter_unit = backscatter_unit
-    nodata_value = quality.get("nodata")
-    scene.analysis_nodata_value = (
-        float(nodata_value)
-        if nodata_value is not None
-        else float(settings.SAR_ANALYSIS_NODATA_VALUE)
-    )
-    scene.analysis_metadata_json = {**(metadata or {}), "manifest_path": str(out_dir / "manifest.json")}
-    scene.analysis_quality_json = quality
+    scene.analysis_nodata_value = _finite_float(quality.get("nodata")) or float(settings.SAR_ANALYSIS_NODATA_VALUE)
+    scene.analysis_metadata_json = _json_safe({**(metadata or {}), "manifest_path": str(out_dir / "manifest.json")})
+    scene.analysis_quality_json = _json_safe(quality)
     scene.pixel_size_m = _pixel_size_m_from_quality(quality) or scene.pixel_size_m
     scene.status = "DONE"
     scene.error_msg = None

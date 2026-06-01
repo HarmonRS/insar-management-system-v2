@@ -132,6 +132,7 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
             <option value="all">全部卫星族</option>
             <option value="S1">Sentinel-1</option>
             <option value="LT1">LT-1</option>
+            <option value="GF3">GF3</option>
           </select>
           <button type="button" onClick={() => refresh()} disabled={loading}>刷新</button>
           <button type="button" onClick={handleScan} disabled={readOnly || scanLoading}>扫描资产</button>

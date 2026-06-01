@@ -26,6 +26,12 @@ const getTaskTypeLabel = (taskType) => {
       return 'GF3 解包';
     case 'GF3_BATCH_PROCESS':
       return 'GF3 预处理';
+    case 'GF3_SARSCAPE_PRODUCE':
+      return 'GF3 SARscape 生产';
+    case 'GF3_SARSCAPE_SYNC':
+      return 'GF3 SARscape 入库';
+    case 'GF3_SARSCAPE_CLEAN':
+      return 'GF3 中间清理';
     case 'SCAN_ASSET_INVENTORY':
       return '资产库存扫描';
     case 'IDL_IMPORT':

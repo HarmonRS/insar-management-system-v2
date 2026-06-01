@@ -43,7 +43,14 @@ class MonitorConfig(BaseModel):
     dinsar_dirs: List[str] = []
     gf3_archive_source_dirs: List[str] = []
     gf3_source_dirs: List[str] = []
+    gf3_sarscape_native_dirs: List[str] = []
     gf3_storage_dirs: List[str] = []
+    gf3_sarscape_wrapper_exe: Optional[str] = None
+    gf3_sarscape_idlrt_path: Optional[str] = None
+    gf3_sarscape_dem_path: Optional[str] = None
+    gf3_sarscape_polarizations: Optional[str] = None
+    gf3_sarscape_auto_standardize: bool = True
+    gf3_sarscape_clean_after_success: bool = True
     # Manual-only: config is read from .env
 
 
@@ -56,6 +63,26 @@ class GF3UnpackConfig(BaseModel):
 
 class GF3UnpackRunRequest(BaseModel):
     max_files_per_run: Optional[int] = Field(default=None, ge=0)
+
+
+class GF3SarscapeSyncRequest(BaseModel):
+    force: bool = False
+    register: bool = True
+
+
+class GF3SarscapeProduceRequest(BaseModel):
+    max_archives_per_run: Optional[int] = Field(default=None, ge=0)
+    auto_standardize: Optional[bool] = None
+    clean_after_success: Optional[bool] = None
+    force_standardize: bool = False
+    register: bool = True
+    cleanup_dry_run: bool = False
+
+
+class GF3SarscapeCleanRequest(BaseModel):
+    dry_run: bool = False
+    require_standardized: bool = True
+    max_scenes: Optional[int] = Field(default=None, ge=0)
 
 
 @router.post("/monitor/config")
@@ -148,6 +175,138 @@ async def run_gf3_batch_process(admin_user: AuthUserORM = Depends(_require_admin
         )
         return {
             "message": "GF3 批量处理任务已提交",
+            "task_id": task_id,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/monitor/gf3-sarscape-sync", status_code=202)
+async def run_gf3_sarscape_sync(
+    request_data: GF3SarscapeSyncRequest | None = None,
+    admin_user: AuthUserORM = Depends(_require_admin),
+):
+    """
+    扫描 GF3 SARscape 原生 _geo 二进制池，转换为标准 GeoTIFF，并登记入库。
+    """
+    gf3_native_dirs = MONITOR_CONFIG.get("gf3_sarscape_native_dirs") or []
+    gf3_storage_dirs = MONITOR_CONFIG.get("gf3_storage_dirs") or []
+    if not gf3_native_dirs:
+        raise HTTPException(status_code=400, detail="GF3_SARSCAPE_NATIVE_DIRS is not configured.")
+    if not gf3_storage_dirs:
+        raise HTTPException(status_code=400, detail="GF3_STORAGE_DIRS is not configured.")
+
+    options = request_data or GF3SarscapeSyncRequest()
+    task_type = "GF3_SARSCAPE_SYNC"
+    task_name = "GF3 SARscape 原生结果标准化"
+    payload = {
+        "native_dirs": gf3_native_dirs,
+        "storage_root": gf3_storage_dirs[0],
+        "force": bool(options.force),
+        "register": bool(options.register),
+    }
+
+    try:
+        task_id = await task_service.create_task(task_type, task_name, params=payload)
+        await job_queue_service.create_job(task_type, payload=payload, task_id=task_id)
+        return {
+            "message": "GF3 SARscape 原生结果标准化任务已提交",
+            "task_id": task_id,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/monitor/gf3-sarscape-produce", status_code=202)
+async def run_gf3_sarscape_produce(
+    request_data: GF3SarscapeProduceRequest | None = None,
+    admin_user: AuthUserORM = Depends(_require_admin),
+):
+    """
+    Run GF3 raw archives through the SARscape wrapper, standardize outputs, and optionally clean intermediates.
+    """
+    gf3_archive_source_dirs = MONITOR_CONFIG.get("gf3_archive_source_dirs") or []
+    gf3_native_dirs = MONITOR_CONFIG.get("gf3_sarscape_native_dirs") or []
+    gf3_storage_dirs = MONITOR_CONFIG.get("gf3_storage_dirs") or []
+    if not gf3_archive_source_dirs:
+        raise HTTPException(status_code=400, detail="GF3_ARCHIVE_SOURCE_DIRS is not configured.")
+    if not gf3_native_dirs:
+        raise HTTPException(status_code=400, detail="GF3_SARSCAPE_NATIVE_DIRS is not configured.")
+    if not gf3_storage_dirs:
+        raise HTTPException(status_code=400, detail="GF3_STORAGE_DIRS is not configured.")
+    if not settings.GF3_SARSCAPE_WRAPPER_EXE:
+        raise HTTPException(status_code=400, detail="GF3_SARSCAPE_WRAPPER_EXE is not configured.")
+    if not (settings.GF3_SARSCAPE_DEM_PATH or settings.GF3_GEO_DEM_PATH):
+        raise HTTPException(status_code=400, detail="GF3_SARSCAPE_DEM_PATH or GF3_GEO_DEM_PATH is not configured.")
+
+    options = request_data or GF3SarscapeProduceRequest()
+    task_type = "GF3_SARSCAPE_PRODUCE"
+    task_name = "GF3 SARscape production"
+    auto_standardize = settings.GF3_SARSCAPE_AUTO_STANDARDIZE if options.auto_standardize is None else bool(options.auto_standardize)
+    clean_after_success = settings.GF3_SARSCAPE_CLEAN_AFTER_SUCCESS if options.clean_after_success is None else bool(options.clean_after_success)
+    payload = {
+        "source_dirs": gf3_archive_source_dirs,
+        "native_dirs": gf3_native_dirs,
+        "native_root": gf3_native_dirs[0],
+        "storage_root": gf3_storage_dirs[0],
+        "wrapper_exe": settings.GF3_SARSCAPE_WRAPPER_EXE,
+        "idlrt_path": settings.GF3_SARSCAPE_IDLRT_PATH,
+        "dem_path": settings.GF3_SARSCAPE_DEM_PATH or settings.GF3_GEO_DEM_PATH,
+        "polarizations": settings.GF3_SARSCAPE_POLARIZATIONS,
+        "archive_exts": split_env_paths(settings.GF3_ARCHIVE_EXTS),
+        "max_archives_per_run": int(options.max_archives_per_run or 0),
+        "timeout_seconds": int(settings.GF3_SARSCAPE_PRODUCE_TIMEOUT_SECONDS or 0),
+        "keep_extracted": bool(settings.GF3_SARSCAPE_KEEP_EXTRACTED),
+        "auto_standardize": bool(auto_standardize),
+        "clean_after_success": bool(clean_after_success),
+        "force_standardize": bool(options.force_standardize),
+        "register": bool(options.register),
+        "cleanup_require_standardized": True,
+        "cleanup_dry_run": bool(options.cleanup_dry_run),
+    }
+
+    try:
+        task_id = await task_service.create_task(task_type, task_name, params=payload)
+        await job_queue_service.create_job(task_type, payload=payload, task_id=task_id)
+        return {
+            "message": "GF3 SARscape production task submitted",
+            "task_id": task_id,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/monitor/gf3-sarscape-clean", status_code=202)
+async def run_gf3_sarscape_clean(
+    request_data: GF3SarscapeCleanRequest | None = None,
+    admin_user: AuthUserORM = Depends(_require_admin),
+):
+    """
+    Clean SARscape intermediate files from GF3 native pool after standard GeoTIFFs exist.
+    """
+    gf3_native_dirs = MONITOR_CONFIG.get("gf3_sarscape_native_dirs") or []
+    gf3_storage_dirs = MONITOR_CONFIG.get("gf3_storage_dirs") or []
+    if not gf3_native_dirs:
+        raise HTTPException(status_code=400, detail="GF3_SARSCAPE_NATIVE_DIRS is not configured.")
+    if not gf3_storage_dirs:
+        raise HTTPException(status_code=400, detail="GF3_STORAGE_DIRS is not configured.")
+
+    options = request_data or GF3SarscapeCleanRequest()
+    task_type = "GF3_SARSCAPE_CLEAN"
+    task_name = "GF3 SARscape native cleanup"
+    payload = {
+        "native_dirs": gf3_native_dirs,
+        "storage_root": gf3_storage_dirs[0],
+        "dry_run": bool(options.dry_run),
+        "require_standardized": bool(options.require_standardized),
+        "max_scenes": int(options.max_scenes or 0),
+    }
+
+    try:
+        task_id = await task_service.create_task(task_type, task_name, params=payload)
+        await job_queue_service.create_job(task_type, payload=payload, task_id=task_id)
+        return {
+            "message": "GF3 SARscape cleanup task submitted",
             "task_id": task_id,
         }
     except ValueError as e:

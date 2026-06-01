@@ -1358,12 +1358,27 @@ function App() {
         }
     }, []);
 
-    const updateRadarPreviewVisibility = useCallback((item, shouldBeVisible) => {
+    const updateRadarPreviewVisibility = useCallback(async (item, shouldBeVisible) => {
         if (!item || !mapRef.current) return;
         const itemId = item.id;
         const layer = radarPreviewLayersRef.current[itemId];
 
         if (shouldBeVisible) {
+            const refreshedStatus = await fetchRadarPreviewStatus(itemId, { silent: true });
+            if (refreshedStatus) {
+                item = {
+                    ...item,
+                    previewStatus: normalizePreviewStatus(refreshedStatus.status),
+                    previewFallbackInUse: !!refreshedStatus.fallback_in_use,
+                    previewHasGeoCache: !!refreshedStatus.has_geo_cache,
+                    previewHasRawCache: !!refreshedStatus.has_raw_cache,
+                    previewSourceFound: !!refreshedStatus.source_found,
+                    previewMessage: refreshedStatus.message || '',
+                    previewError: refreshedStatus.error || '',
+                    previewCacheKey: refreshedStatus.cache_updated_at || item.previewCacheKey || `${Date.now()}-${itemId}`,
+                };
+            }
+
             if (layer) {
                 if (!mapRef.current.hasLayer(layer)) {
                     layer.addTo(mapRef.current);
@@ -1393,7 +1408,6 @@ function App() {
 
             radarPreviewLayersRef.current[itemId] = previewLayer;
             previewLayer.addTo(mapRef.current);
-            fetchRadarPreviewStatus(itemId, { silent: true });
         } else if (layer) {
             layer.remove();
             delete radarPreviewLayersRef.current[itemId];
