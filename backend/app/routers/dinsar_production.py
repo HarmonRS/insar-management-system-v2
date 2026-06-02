@@ -232,12 +232,6 @@ async def submit_run(
                 status_code=400,
                 detail=f"PyINT 输入资产预检未通过: {detail or '请先修复阻塞项。'}",
             )
-        if not pyint_preview.get("allow_submit"):
-            detail = summarize_preview_blockers(pyint_preview)
-            raise HTTPException(
-                status_code=400,
-                detail=f"PyINT 输入资产预检未通过: {detail or '请先修复阻塞项。'}",
-            )
 
     payload = {
         "engine_code": req.engine_code,

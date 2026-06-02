@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 import os
 from typing import List, Optional
 
@@ -258,4 +259,5 @@ async def get_dinsar_product_preview(
     preview_path = str(detail.get("preview_path") or "").strip()
     if not preview_path or not os.path.isfile(preview_path):
         raise HTTPException(status_code=404, detail="Preview not found")
-    return FileResponse(preview_path, media_type="image/webp")
+    media_type = mimetypes.guess_type(preview_path)[0] or "application/octet-stream"
+    return FileResponse(preview_path, media_type=media_type)

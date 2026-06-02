@@ -78,6 +78,8 @@ HIGH_RISK_WRITE_PATH_PREFIXES = (
     "/api/scan-data",
     "/api/scan-dinsar-results",
     "/api/dinsar-results/",
+    "/api/dinsar-production",
+    "/api/sbas-insar-production",
     "/api/ai/",
     "/api/idl/launch-workbench",
     "/api/idl/worker/",

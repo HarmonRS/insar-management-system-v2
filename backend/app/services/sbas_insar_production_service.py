@@ -794,6 +794,12 @@ class SbasInsarProductionService:
     ) -> dict[str, Any]:
         source_paths = self._resolve_source_roots(source_roots)
         orbit_paths = self._resolve_orbit_roots(orbit_roots)
+        root_warnings = self._build_root_resolution_warnings(
+            source_roots=source_roots,
+            orbit_roots=orbit_roots,
+            source_paths=source_paths,
+            orbit_paths=orbit_paths,
+        )
         normalized_mode = self._normalize_discovery_mode(discovery_mode)
         min_aoi_coverage_ratio = max(0.0, min(1.0, float(min_aoi_coverage_ratio or 0.0)))
         min_common_overlap_ratio = max(0.0, min(1.0, float(min_common_overlap_ratio or 0.0)))
@@ -818,6 +824,8 @@ class SbasInsarProductionService:
         if not force_refresh:
             cached = self._read_discovery_cache(cache_key)
             if cached is not None:
+                cached = dict(cached)
+                cached["warnings"] = root_warnings
                 return cached
 
         scenes: list[dict[str, Any]] = []
@@ -919,6 +927,7 @@ class SbasInsarProductionService:
             "scene_count": len(scenes),
             "candidate_count": len(candidates),
             "errors": errors[:50],
+            "warnings": root_warnings,
             "items": candidates,
         }
         snapshot_path = self._write_runtime_json(
@@ -3698,6 +3707,58 @@ class SbasInsarProductionService:
             raw_values = [r"D:\orbit_pools\envi"]
         return self._dedupe_existing_dirs(raw_values)
 
+    def _build_root_resolution_warnings(
+        self,
+        *,
+        source_roots: list[str] | None,
+        orbit_roots: list[str] | None,
+        source_paths: list[Path],
+        orbit_paths: list[Path],
+    ) -> list[dict[str, Any]]:
+        warnings: list[dict[str, Any]] = []
+        source_requested = source_roots or self._split_config_paths(settings.GAMMA_SBAS_SOURCE_ROOTS) or [r"D:\LuTan1_Image_Pool"]
+        orbit_requested = orbit_roots or self._split_config_paths(settings.GAMMA_SBAS_ORBIT_ROOTS) or [r"D:\orbit_pools\envi"]
+
+        source_missing = self._missing_root_values(source_requested)
+        orbit_missing = self._missing_root_values(orbit_requested)
+        if source_missing:
+            warnings.append(
+                {
+                    "code": "SOURCE_ROOTS_NOT_FOUND",
+                    "message": "Some configured SBAS source roots do not exist and were ignored.",
+                    "requested_roots": source_requested,
+                    "missing_roots": source_missing,
+                    "resolved_roots": [str(path) for path in source_paths],
+                }
+            )
+        if orbit_missing:
+            warnings.append(
+                {
+                    "code": "ORBIT_ROOTS_NOT_FOUND",
+                    "message": "Some configured SBAS orbit roots do not exist and were ignored.",
+                    "requested_roots": orbit_requested,
+                    "missing_roots": orbit_missing,
+                    "resolved_roots": [str(path) for path in orbit_paths],
+                }
+            )
+        if source_requested and not source_paths:
+            warnings.append(
+                {
+                    "code": "NO_VALID_SOURCE_ROOTS",
+                    "message": "No valid SBAS source roots were resolved; discovery will return no scenes.",
+                    "requested_roots": source_requested,
+                }
+            )
+        if orbit_requested and not orbit_paths:
+            warnings.append(
+                {
+                    "code": "NO_VALID_ORBIT_ROOTS",
+                    "message": "No valid SBAS orbit roots were resolved; orbit matching will be unavailable.",
+                    "requested_roots": orbit_requested,
+                }
+            )
+        return warnings
+
     @staticmethod
     def _discovery_cache_key(
         *,
@@ -3784,6 +3845,22 @@ class SbasInsarProductionService:
                 seen.add(key)
                 roots.append(path)
         return roots
+
+    @staticmethod
+    def _missing_root_values(values: list[str]) -> list[str]:
+        missing: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip().strip('"').strip("'")
+            if not text:
+                continue
+            key = os.path.normcase(text)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not SbasInsarProductionService._existing_path_variants(text):
+                missing.append(text)
+        return missing
 
     @staticmethod
     def _existing_path_variants(value: str) -> list[Path]:

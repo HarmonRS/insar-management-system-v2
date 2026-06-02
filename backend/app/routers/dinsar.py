@@ -106,19 +106,6 @@ def _is_postgresql_session(db: AsyncSession) -> bool:
         return (dialect_name or "").lower() == "postgresql"
     except Exception:
         return False
-    """
-    try:
-        scan_dirs = list(request.results_directories) if request else []
-        if not scan_dirs:
-            scan_dirs = _get_default_dinsar_scan_dirs()
-        if not scan_dirs:
-            raise HTTPException(status_code=400, detail="未提供结果目录，且 MONITOR_DINSAR_DIRS 未配置。")
-        bind = db.get_bind()
-        dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
-        return (dialect_name or "").lower() == "postgresql"
-    except Exception:
-        return False
-    """
 
 
 async def _apply_list_query_statement_timeout(db: AsyncSession) -> None:
@@ -249,6 +236,8 @@ async def scan_dinsar_results_endpoint(
         )
         await db.commit()
         return {"message": "D-InSAR 统一扫描任务已进入队列", "task_id": task_id}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
