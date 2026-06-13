@@ -687,7 +687,7 @@ class PyintEngine(DinsarEngine):
             available = True
         else:
             critical_failed = [check for check in report.checks if not check.ok and not check.skipped]
-            status = "degraded" if critical_failed else "unavailable"
+            status = "unavailable" if critical_failed else "degraded"
             available = False
         return EngineAvailability(
             engine_code=self.engine_code,

@@ -9,6 +9,8 @@ import {
 } from './api/ai';
 import { getDinsarResults } from './api/dinsar';
 import AiDiagnosisModal from './components/AiDiagnosisModal';
+import TaskStatusPanel from './components/tasks/TaskStatusPanel';
+import useTaskMonitor from './hooks/useTaskMonitor';
 
 const cardStyle = {
   background: '#fff',
@@ -20,6 +22,12 @@ const cardStyle = {
 
 export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
   const { en } = useI18n();
+  const aiTaskMonitor = useTaskMonitor({
+    taskTypes: ['AI_ANALYZE'],
+    showRecent: true,
+    recentLimit: 1,
+    pollRecentMs: 10000,
+  });
 
   // 状态
   const [aiStatus, setAiStatus] = useState(null);
@@ -209,6 +217,16 @@ export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
             {en ? 'Create Diagnosis' : '创建诊断'}
           </h3>
 
+          <TaskStatusPanel
+            title={en ? 'AI Diagnosis Task' : 'AI 诊断任务'}
+            activeTasks={aiTaskMonitor.activeTasks}
+            recentTasks={aiTaskMonitor.recentTasks}
+            latestTask={aiTaskMonitor.latestTask}
+            isBusy={aiTaskMonitor.isBusy}
+            idleText={en ? 'No AI diagnosis task is running.' : '当前没有正在执行的 AI 诊断任务。'}
+            compact
+          />
+
           {/* D-InSAR Result Selection */}
           <div style={{ marginBottom: '12px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
@@ -345,20 +363,20 @@ export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
           {/* Submit Button */}
           <button
             onClick={handleCreateDiagnosis}
-            disabled={loading || !selectedResultId || !aiStatus?.ollama_online}
+            disabled={loading || aiTaskMonitor.isBusy || !selectedResultId || !aiStatus?.ollama_online}
             style={{
               width: '100%',
               padding: '8px',
-              backgroundColor: loading || !selectedResultId || !aiStatus?.ollama_online ? '#cbd5e0' : '#3182ce',
+              backgroundColor: loading || aiTaskMonitor.isBusy || !selectedResultId || !aiStatus?.ollama_online ? '#cbd5e0' : '#3182ce',
               color: '#fff',
               border: 'none',
               borderRadius: '4px',
               fontSize: '14px',
               fontWeight: 500,
-              cursor: loading || !selectedResultId || !aiStatus?.ollama_online ? 'not-allowed' : 'pointer',
+              cursor: loading || aiTaskMonitor.isBusy || !selectedResultId || !aiStatus?.ollama_online ? 'not-allowed' : 'pointer',
             }}
           >
-            {loading ? (en ? 'Creating...' : '创建中...') : (en ? 'Create Diagnosis' : '创建诊断')}
+            {loading || aiTaskMonitor.isBusy ? (en ? 'Creating...' : '创建中...') : (en ? 'Create Diagnosis' : '创建诊断')}
           </button>
 
           {/* Message */}

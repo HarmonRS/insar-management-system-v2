@@ -29,7 +29,7 @@ export const usePairingStore = create((set) => ({
         master_date_to: '',
         slave_date_from: '',
         slave_date_to: '',
-        strategy: 'all',
+        strategy: 'sbas',
         num_connections: 1,
         reference_image_id: null,
         allowed_satellites: null,

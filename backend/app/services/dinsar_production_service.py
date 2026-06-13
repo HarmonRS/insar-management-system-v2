@@ -25,6 +25,8 @@ from ..models import (
     WorkflowRunORM,
     WorkflowStepORM,
 )
+from ..utils import normalize_satellite_family
+from .dinsar_naming import build_fallback_pair_key
 from .envi_service import RUNTIME_DIR, _collect_task_folders, _resolve_dinsar_pair_identity, _to_local_path
 from .task_service import task_service
 from .workflow_service import workflow_service
@@ -33,6 +35,7 @@ from .workflow_service import workflow_service
 TASK_TYPE_DINSAR_PRODUCTION = "IDL_RUN_DINSAR"
 TASK_TYPE_ISCE2_DINSAR_PRODUCTION = "ISCE2_RUN"
 TASK_TYPE_PYINT_DINSAR_PRODUCTION = "PYINT_RUN"
+TASK_TYPE_LANDSAR_DINSAR_PRODUCTION = "LANDSAR_RUN"
 RUN_STATUS_PENDING = "PENDING"
 RUN_STATUS_RUNNING = "RUNNING"
 RUN_STATUS_COMPLETED = "COMPLETED"
@@ -83,6 +86,8 @@ def _task_type_for_engine(engine_code: str) -> str:
         return TASK_TYPE_ISCE2_DINSAR_PRODUCTION
     if normalized in {"pyint", "gamma"}:
         return TASK_TYPE_PYINT_DINSAR_PRODUCTION
+    if normalized == "landsar":
+        return TASK_TYPE_LANDSAR_DINSAR_PRODUCTION
     raise ValueError(f"Unsupported engine for D-InSAR production run: {engine_code}")
 
 
@@ -94,6 +99,8 @@ def _workflow_name_for_engine(engine_code: str) -> str:
         return "dinsar_isce2_production"
     if normalized in {"pyint", "gamma"}:
         return "dinsar_pyint_gamma_production"
+    if normalized == "landsar":
+        return "dinsar_landsar_production"
     raise ValueError(f"Unsupported engine for D-InSAR production run: {engine_code}")
 
 
@@ -105,6 +112,8 @@ def _workflow_step_name_for_engine(engine_code: str) -> str:
         return "Execute ISCE2 D-InSAR items"
     if normalized in {"pyint", "gamma"}:
         return "Execute PyINT/Gamma D-InSAR items"
+    if normalized == "landsar":
+        return "Execute LandSAR D-InSAR items"
     raise ValueError(f"Unsupported engine for D-InSAR production run: {engine_code}")
 
 
@@ -150,6 +159,33 @@ def _looks_like_task_dir(path: str) -> bool:
     return os.path.isdir(os.path.join(path, "master")) and os.path.isdir(os.path.join(path, "slave"))
 
 
+def _looks_like_landsar_task_dir(path: str) -> bool:
+    return os.path.isdir(os.path.join(path, "Input_Data"))
+
+
+def _looks_like_landsar_raw_task_dir(path: str) -> bool:
+    normalized = os.path.normpath(os.path.abspath(_to_local_path(path)))
+    master_dir = os.path.join(normalized, "master")
+    slave_dir = os.path.join(normalized, "slave")
+    if not os.path.isdir(master_dir) or not os.path.isdir(slave_dir):
+        return False
+
+    def _has_lt1_file(directory: str) -> bool:
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
+                    name = entry.name.lower()
+                    if name.startswith("lt1") and name.endswith((".xml", ".tif", ".tiff")):
+                        return True
+        except OSError:
+            return False
+        return False
+
+    return _has_lt1_file(master_dir) and _has_lt1_file(slave_dir)
+
+
 def _normalize_rerun_mode(value: Optional[str]) -> str:
     normalized = str(value or "").strip().lower()
     if normalized in VALID_RERUN_MODES:
@@ -164,6 +200,64 @@ def _discover_run_items(root_dir: str) -> List[Dict[str, Any]]:
     for order_index, folder in enumerate(task_folders, start=1):
         task_name = os.path.basename(folder)
         task_alias, pair_key, pair_meta = _resolve_dinsar_pair_identity(folder, task_name)
+        items.append(
+            {
+                "order_index": order_index,
+                "task_name": task_name,
+                "task_alias": task_alias,
+                "pair_key": pair_key,
+                "pair_uid": pair_meta.get("pair_uid") or pair_meta.get("scene_pair_uid"),
+                "network_run_id": pair_meta.get("network_run_id"),
+                "network_edge_id": pair_meta.get("network_edge_id"),
+                "policy_version": pair_meta.get("policy_version"),
+                "selection_strategy": pair_meta.get("selection_strategy"),
+                "source_task_dir": folder,
+                "results_root_dir": os.path.join(settings.DINSAR_PRODUCT_DIR, pair_key),
+            }
+        )
+    return items
+
+
+def _discover_landsar_run_items(root_dir: str) -> List[Dict[str, Any]]:
+    if _looks_like_landsar_task_dir(root_dir) or _looks_like_landsar_raw_task_dir(root_dir):
+        task_folders = [root_dir]
+    else:
+        task_folders = [
+            folder
+            for folder in _collect_task_folders(root_dir)
+            if _looks_like_landsar_task_dir(folder) or _looks_like_landsar_raw_task_dir(folder)
+        ]
+
+    items: List[Dict[str, Any]] = []
+    try:
+        from ..dinsar_engines.landsar_engine import parse_lt1_slc_pair
+    except Exception:
+        parse_lt1_slc_pair = None
+
+    for order_index, folder in enumerate(task_folders, start=1):
+        task_name = os.path.basename(folder)
+        task_alias, pair_key, pair_meta = _resolve_dinsar_pair_identity(folder, task_name)
+        has_input_data = _looks_like_landsar_task_dir(folder)
+        has_raw_input = _looks_like_landsar_raw_task_dir(folder)
+        pair = (
+            parse_lt1_slc_pair(os.path.join(folder, "Input_Data"))
+            if parse_lt1_slc_pair is not None and has_input_data
+            else None
+        )
+        if parse_lt1_slc_pair is not None and has_input_data and not pair and not has_raw_input:
+            continue
+        if pair and not pair_meta.get("pair_key"):
+            pair_key = build_fallback_pair_key(
+                task_alias,
+                "||".join([pair["master_xml"], pair["slave_xml"]]),
+                satellite_family=normalize_satellite_family("lt1"),
+            )
+        elif not pair_meta.get("pair_key") and has_raw_input:
+            pair_key = build_fallback_pair_key(
+                task_alias,
+                folder,
+                satellite_family=normalize_satellite_family("lt1"),
+            )
         items.append(
             {
                 "order_index": order_index,
@@ -256,7 +350,12 @@ def _select_run_items(
     num_to_process: int,
     rerun_mode: Optional[str],
 ) -> Dict[str, Any]:
-    discovered_items = _discover_run_items(root_dir)
+    normalized_engine = str(engine_code or "").strip().lower()
+    discovered_items = (
+        _discover_landsar_run_items(root_dir)
+        if normalized_engine == "landsar"
+        else _discover_run_items(root_dir)
+    )
     normalized_mode = _normalize_rerun_mode(rerun_mode)
 
     skipped_completed_count = 0

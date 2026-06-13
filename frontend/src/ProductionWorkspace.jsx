@@ -69,7 +69,10 @@ export default function ProductionWorkspace({
   };
 
   const handleSbasProductQueued = taskId => {
-    onTaskStart?.(taskId, 'SBAS-InSAR result catalog task queued.');
+    onTaskStart?.(taskId, 'SBAS-InSAR result catalog task queued.', {
+      taskType: 'REBUILD_SBAS_INSAR_CATALOG',
+      nonBlocking: true,
+    });
   };
 
   return (
@@ -181,6 +184,7 @@ export default function ProductionWorkspace({
           {activeView === 'sbas_insar_production' && (
             <LazySbasInsarProductionPanel
               readOnly={readOnly}
+              onTaskStart={onTaskStart}
             />
           )}
           {activeView === 'sbas_insar_products' && (

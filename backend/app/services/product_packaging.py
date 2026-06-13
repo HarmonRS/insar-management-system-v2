@@ -17,7 +17,7 @@ def _clean_dict(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _kind_from_engine(engine_code: str) -> Optional[str]:
     normalized = str(engine_code or "").strip().lower()
-    if normalized in {"envi", "sarscape"}:
+    if normalized in {"envi", "sarscape", "landsar"}:
         return "windows"
     if normalized in {"isce2", "pyint", "gamma"}:
         return "wsl"

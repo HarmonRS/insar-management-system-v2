@@ -361,6 +361,16 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
     )
     specs.extend(
         _iter_single_root_specs(
+            env_var="LANDSAR_WORK_ROOT",
+            path=settings.LANDSAR_WORK_ROOT,
+            root_role="work_root_landsar",
+            display_name="LandSAR Work Root",
+            scan_mode="workspace",
+            owner_engine="landsar",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
             env_var="TIMESERIES_PRODUCT_DIR",
             path=settings.TIMESERIES_PRODUCT_DIR,
             root_role="publish_root_timeseries",

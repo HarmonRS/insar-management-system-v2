@@ -5,6 +5,7 @@
  * focusBatchAfterCreate, clearPsResults
  */
 import apiClient from '../api/client';
+import { getPairingHealth } from '../api/pairing';
 import {
     useUiStore, usePairingStore, useMapStore, useBatchStore, useAuthStore,
 } from '../store';
@@ -171,8 +172,42 @@ export default function usePairingLogic({
         setPairingAlert({ warnings: [], fallbackUsed: false });
 
         const formData = new FormData();
-        for (const key in pairingParams) {
-            const value = pairingParams[key];
+        const effectivePairingParams = { ...pairingParams };
+        if (!effectivePairingParams.strategy) {
+            effectivePairingParams.strategy = 'sbas';
+        }
+        if (effectivePairingParams.strategy === 'all') {
+            const hasDateWindow = Boolean(
+                effectivePairingParams.master_date_from
+                || effectivePairingParams.master_date_to
+                || effectivePairingParams.slave_date_from
+                || effectivePairingParams.slave_date_to
+            );
+            if (!hasDateWindow && pairingAoiMode !== 'region' && !pairingFiles?.length) {
+                addLog('warn', '全部配对可能返回大量结果。请先限定行政区、上传 AOI 或设置主/从影像时间范围。');
+                setIsLoading(false);
+                return;
+            }
+        }
+
+        try {
+            const pairingHealth = await getPairingHealth();
+            if (pairingHealth?.needs_rebuild || pairingHealth?.status !== 'READY') {
+                addLog(
+                    'warn',
+                    `配对基础当前状态为 ${pairingHealth?.status || 'UNKNOWN'}，dirty 场景 ${Number(pairingHealth?.dirty_scene_count || 0)}。请先在“配对规划”页执行“修复配对基础”。`
+                );
+                setIsLoading(false);
+                return;
+            }
+        } catch (error) {
+            addLog('warn', `配对基础状态检查失败: ${error.response?.data?.detail || error.message}`);
+            setIsLoading(false);
+            return;
+        }
+
+        for (const key in effectivePairingParams) {
+            const value = effectivePairingParams[key];
             // 跳过 null/undefined 值
             if (value === null || value === undefined) continue;
             // allowed_satellites 是数组，需要序列化为 JSON

@@ -55,6 +55,27 @@ const LAYER_DEFS = [
         label: { en: 'D-InSAR Displacement (m)', zh: 'D-InSAR 形变量 (m)' },
     },
     {
+        id: 'sbas_rate',
+        ref: 'sbasAnalysisLayersRef',
+        detect: (layers) => layers && Object.values(layers).some(item => item?.kind === 'rate'),
+        color: '#1d4ed8', type: 'colorbar',
+        label: { en: 'SBAS LOS Velocity (mm/yr)', zh: 'SBAS LOS 速率 (mm/yr)' },
+    },
+    {
+        id: 'sbas_overview',
+        ref: 'sbasAnalysisLayersRef',
+        detect: (layers) => layers && Object.values(layers).some(item => item?.kind === 'overview'),
+        color: '#7c3aed', type: 'polygon',
+        label: { en: 'SBAS Product Footprints', zh: 'SBAS 产品范围' },
+    },
+    {
+        id: 'sbas_points',
+        ref: 'sbasAnalysisLayersRef',
+        detect: (layers) => layers && Object.values(layers).some(item => item?.kind === 'points' || item?.kind === 'query'),
+        color: '#16a34a', type: 'circle',
+        label: { en: 'SBAS Monitoring Points', zh: 'SBAS 监测点' },
+    },
+    {
         id: 'water_scene',
         ref: 'waterSceneLayersRef',
         detect: (layers) => layers && Object.keys(layers).length > 0,

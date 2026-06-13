@@ -1,6 +1,0 @@
-recommonmark
-sphinx>=7
-myst-parser
-myst_nb
-sphinx_rtd_theme
-Jinja2

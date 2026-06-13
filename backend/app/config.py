@@ -273,6 +273,21 @@ class Settings(BaseSettings):
         "site-packages/isce/applications/stripmapApp.py"
     )
     ISCE2_PIPELINE_SCRIPT: str = ""
+    LANDSAR_ENABLED: bool = True
+    LANDSAR_HOME: str = ""
+    LANDSAR_CONSOLE_EXE: str = ""
+    LANDSAR_WORK_ROOT: str = ""
+    LANDSAR_LICENSE_MODE: str = "netVersion"
+    LANDSAR_LICENSE_HOST: str = "127.0.0.1"
+    LANDSAR_LICENSE_PORT: int = 6666
+    LANDSAR_CONFIG_ROW: str = ""
+    LANDSAR_CONFIG_AUTO_WRITE: bool = True
+    LANDSAR_AUTH_SERVER_EXE: str = ""
+    LANDSAR_AUTH_SERVER_AUTO_START: bool = True
+    LANDSAR_AUTH_SERVER_HOST: str = "127.0.0.1"
+    LANDSAR_AUTH_SERVER_PORT: int = 6666
+    LANDSAR_DEM_PATH: str = ""
+    LANDSAR_DINSAR_TIMEOUT_SECONDS: int = 43200
     PYINT_ENABLED: bool = False
     PYINT_WSL_DISTRO: str = ""
     PYINT_WSL_PYTHON: str = ""
@@ -328,13 +343,24 @@ class Settings(BaseSettings):
     GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT: str = ""
     GAMMA_SBAS_SOURCE_ROOTS: str = ""
     GAMMA_SBAS_ORBIT_ROOTS: str = ""
+    GAMMA_SBAS_DEM_PATH: str = ""
     GAMMA_SBAS_DEFAULT_RLKS: int = 8
     GAMMA_SBAS_DEFAULT_AZLKS: int = 8
     GAMMA_SBAS_DEFAULT_MB_MODE: int = 0
     GAMMA_SBAS_DEFAULT_REFERENCE_WINDOW: int = 16
     GAMMA_SBAS_AUTO_APPROVE_ITAB: bool = True
+    GAMMA_SBAS_MIN_COMMON_OVERLAP_RATIO: float = 0.30
     GAMMA_SBAS_STEP_TIMEOUT_SECONDS: int = 43200
     GAMMA_SBAS_WORKFLOW_TIMEOUT_SECONDS: int = 172800
+    LANDSAR_SBAS_ENABLED: bool = True
+    LANDSAR_SBAS_WORK_ROOT: str = ""
+    LANDSAR_SBAS_PRODUCT_ROOT: str = ""
+    LANDSAR_SBAS_DEM_PATH: str = ""
+    LANDSAR_SBAS_SOURCE_ROOTS: str = ""
+    LANDSAR_SBAS_TIMEOUT_SECONDS: int = 172800
+    LANDSAR_SBAS_MIN_SCENES: int = 3
+    LANDSAR_SBAS_PROID: str = "280039"
+    LANDSAR_SBAS_PROCESS_NAME: str = "SBAS Stream"
 
     JOB_WORKER_HEALTH_TIMEOUT: int = 60
     JOB_WORKER_JOB_HEARTBEAT_INTERVAL: float = 5.0
@@ -491,6 +517,42 @@ class Settings(BaseSettings):
                 "ISCE2_PIPELINE_SCRIPT",
                 _windows_path_to_wsl_mount(local_pipeline),
             )
+        if not self.LANDSAR_HOME:
+            object.__setattr__(
+                self,
+                "LANDSAR_HOME",
+                os.path.join(project_root, "third_party", "LandSAR", "dist", "LandSAR_Portable"),
+            )
+        if not self.LANDSAR_CONSOLE_EXE:
+            object.__setattr__(
+                self,
+                "LANDSAR_CONSOLE_EXE",
+                os.path.join(self.LANDSAR_HOME, "InSAR_Console.exe"),
+            )
+        if not self.LANDSAR_WORK_ROOT:
+            object.__setattr__(
+                self,
+                "LANDSAR_WORK_ROOT",
+                os.path.join(self.RESULT_PUBLISH_ROOT, "landsar_work"),
+            )
+        if not self.LANDSAR_AUTH_SERVER_EXE:
+            auth_server = os.path.join(
+                project_root,
+                "third_party",
+                "LandSAR",
+                "tools",
+                "_portable_release",
+                "LandSAR_auth_tools_win64",
+                "landsar_net_auth_server.exe",
+            )
+            object.__setattr__(self, "LANDSAR_AUTH_SERVER_EXE", auth_server)
+        if not self.LANDSAR_DEM_PATH:
+            landsar_dem = (
+                _clean_path_text(self.PYINT_PREPARED_DEM_PATH)
+                or _clean_path_text(self.ISCE2_DEM_PATH)
+                or _clean_path_text(self.IDL_DINSAR_DEM_BASE_FILE)
+            )
+            object.__setattr__(self, "LANDSAR_DEM_PATH", landsar_dem)
         if not self.WSL_DISTRO:
             fallback_distro = str(
                 self.ISCE2_WSL_DISTRO
@@ -667,6 +729,16 @@ class Settings(BaseSettings):
             )
         if not self.GAMMA_SBAS_ENV_SCRIPT:
             object.__setattr__(self, "GAMMA_SBAS_ENV_SCRIPT", self.PYINT_GAMMA_ENV_SCRIPT)
+        if not self.GAMMA_SBAS_DEM_PATH:
+            object.__setattr__(
+                self,
+                "GAMMA_SBAS_DEM_PATH",
+                self.LANDSAR_SBAS_DEM_PATH
+                or self.LANDSAR_DEM_PATH
+                or self.IDL_DINSAR_DEM_BASE_FILE
+                or self.ISCE2_DEM_PATH
+                or self.PYINT_PREPARED_DEM_PATH,
+            )
         if not self.GAMMA_SBAS_WORK_ROOT:
             object.__setattr__(
                 self,
@@ -716,6 +788,11 @@ class Settings(BaseSettings):
         )
         object.__setattr__(
             self,
+            "GAMMA_SBAS_MIN_COMMON_OVERLAP_RATIO",
+            min(1.0, max(0.0, float(self.GAMMA_SBAS_MIN_COMMON_OVERLAP_RATIO or 0.30))),
+        )
+        object.__setattr__(
+            self,
             "GAMMA_SBAS_STEP_TIMEOUT_SECONDS",
             max(60, int(self.GAMMA_SBAS_STEP_TIMEOUT_SECONDS or 43200)),
         )
@@ -724,6 +801,26 @@ class Settings(BaseSettings):
             "GAMMA_SBAS_WORKFLOW_TIMEOUT_SECONDS",
             max(self.GAMMA_SBAS_STEP_TIMEOUT_SECONDS, int(self.GAMMA_SBAS_WORKFLOW_TIMEOUT_SECONDS or 172800)),
         )
+        if not self.LANDSAR_SBAS_WORK_ROOT:
+            object.__setattr__(
+                self,
+                "LANDSAR_SBAS_WORK_ROOT",
+                os.path.join(self.LANDSAR_WORK_ROOT or os.path.join(self.RESULT_PUBLISH_ROOT, "landsar_work"), "sbas"),
+            )
+        if not self.LANDSAR_SBAS_PRODUCT_ROOT:
+            object.__setattr__(
+                self,
+                "LANDSAR_SBAS_PRODUCT_ROOT",
+                os.path.join(self.TIMESERIES_PRODUCT_DIR, "sbas_landsar"),
+            )
+        if not self.LANDSAR_SBAS_DEM_PATH:
+            object.__setattr__(self, "LANDSAR_SBAS_DEM_PATH", self.LANDSAR_DEM_PATH)
+        if not self.LANDSAR_SBAS_SOURCE_ROOTS:
+            object.__setattr__(self, "LANDSAR_SBAS_SOURCE_ROOTS", self.LANDSAR_WORK_ROOT or r"D:\LandSAR_Work")
+        object.__setattr__(self, "LANDSAR_SBAS_TIMEOUT_SECONDS", max(60, int(self.LANDSAR_SBAS_TIMEOUT_SECONDS or 172800)))
+        object.__setattr__(self, "LANDSAR_SBAS_MIN_SCENES", max(3, int(self.LANDSAR_SBAS_MIN_SCENES or 3)))
+        object.__setattr__(self, "LANDSAR_SBAS_PROID", _clean_path_text(self.LANDSAR_SBAS_PROID) or "280039")
+        object.__setattr__(self, "LANDSAR_SBAS_PROCESS_NAME", str(self.LANDSAR_SBAS_PROCESS_NAME or "").strip() or "SBAS Stream")
         if self.TIMESERIES_ENABLED:
             if not self.TIMESERIES_WSL_DISTRO:
                 object.__setattr__(self, "TIMESERIES_WSL_DISTRO", self.WSL_DISTRO or self.ISCE2_WSL_DISTRO)
@@ -856,10 +953,15 @@ class Settings(BaseSettings):
         os.makedirs(settings.PYINT_WORK_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_OUTPUT_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_DEM_ROOT, exist_ok=True)
+        if settings.LANDSAR_WORK_ROOT:
+            os.makedirs(settings.LANDSAR_WORK_ROOT, exist_ok=True)
         if settings.GAMMA_SBAS_ENABLED:
             os.makedirs(settings.GAMMA_SBAS_WORK_ROOT, exist_ok=True)
             os.makedirs(settings.GAMMA_SBAS_PRODUCT_ROOT, exist_ok=True)
             os.makedirs(settings.GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT, exist_ok=True)
+        if settings.LANDSAR_SBAS_ENABLED:
+            os.makedirs(settings.LANDSAR_SBAS_WORK_ROOT, exist_ok=True)
+            os.makedirs(settings.LANDSAR_SBAS_PRODUCT_ROOT, exist_ok=True)
         if settings.TIMESERIES_ENABLED and settings.TIMESERIES_WORK_ROOT:
             os.makedirs(settings.TIMESERIES_WORK_ROOT, exist_ok=True)
 
@@ -1026,6 +1128,7 @@ def validate_runtime_config() -> dict[str, Any]:
     _check_path(label="ORBIT_POOL_ISCE2", value=settings.ORBIT_POOL_ISCE2, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="RESULT_PUBLISH_ROOT", value=settings.RESULT_PUBLISH_ROOT, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="DINSAR_PRODUCT_DIR", value=settings.DINSAR_PRODUCT_DIR, errors=errors, warnings=warnings, expect_file=False)
+    _check_path(label="LANDSAR_WORK_ROOT", value=settings.LANDSAR_WORK_ROOT, errors=errors, warnings=warnings, expect_file=False)
     _check_path(
         label="TIMESERIES_PRODUCT_DIR",
         value=settings.TIMESERIES_PRODUCT_DIR,
@@ -1182,6 +1285,13 @@ def validate_runtime_config() -> dict[str, Any]:
             errors=errors,
             warnings=warnings,
             expect_file=False,
+        )
+        _check_path(
+            label="GAMMA_SBAS_DEM_PATH",
+            value=settings.GAMMA_SBAS_DEM_PATH,
+            errors=errors,
+            warnings=warnings,
+            expect_file=True,
         )
 
     if settings.ISCE2_ENABLED or settings.PYINT_ENABLED:

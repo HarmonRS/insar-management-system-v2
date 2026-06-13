@@ -24,6 +24,9 @@ export const listSbasInsarRuns = () =>
 export const getSbasInsarRun = runId =>
   apiClient.get(`/sbas-insar-production/runs/${encodeURIComponent(runId)}`).then(r => r.data);
 
+export const deleteSbasInsarRun = runId =>
+  apiClient.delete(`/sbas-insar-production/runs/${encodeURIComponent(runId)}`).then(r => r.data);
+
 export const prepareSbasInsarWorkflow = (runId, payload = {}) =>
   apiClient.post(`/sbas-insar-production/runs/${encodeURIComponent(runId)}/workflow`, payload).then(r => r.data);
 
@@ -62,3 +65,18 @@ export const submitSbasInsarIptaTimeseriesJob = (runId, payload = {}) =>
 
 export const getSbasInsarRunArtifactUrl = (runId, relativePath) =>
   `/api/sbas-insar-production/runs/${encodeURIComponent(runId)}/artifacts/${encodeArtifactPath(relativePath)}`;
+
+export const getLandsarSbasCapabilities = () =>
+  apiClient.get('/sbas-insar-production/landsar/capabilities').then(r => r.data);
+
+export const submitLandsarSbasAutoWorkflow = (payload = {}) =>
+  apiClient.post('/sbas-insar-production/landsar/workflows/auto', payload).then(r => r.data);
+
+export const listLandsarSbasRuns = () =>
+  apiClient.get('/sbas-insar-production/landsar/runs').then(r => r.data);
+
+export const getLandsarSbasRun = runId =>
+  apiClient.get(`/sbas-insar-production/landsar/runs/${encodeURIComponent(runId)}`).then(r => r.data);
+
+export const getLandsarSbasRunArtifactUrl = (runId, relativePath) =>
+  `/api/sbas-insar-production/landsar/runs/${encodeURIComponent(runId)}/artifacts/${encodeArtifactPath(relativePath)}`;

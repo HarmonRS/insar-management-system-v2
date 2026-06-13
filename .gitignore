@@ -59,6 +59,12 @@ backend/quality_model.pkl
 /IDL*.tmp
 /env_*.xyz
 .codex_tmp/
+.codex_tmp_*
+base.out
+tmp_dir_coreg_*/
+
+# Local third-party runtime bundles
+third_party/LandSAR/
 
 # Large local datasets / installers
 Data/

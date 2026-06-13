@@ -91,6 +91,7 @@ JOB_TYPE_GF3_SARSCAPE_SYNC = "GF3_SARSCAPE_SYNC"
 JOB_TYPE_GF3_SARSCAPE_CLEAN = "GF3_SARSCAPE_CLEAN"
 JOB_TYPE_ISCE2_RUN = "ISCE2_RUN"
 JOB_TYPE_PYINT_RUN = "PYINT_RUN"
+JOB_TYPE_LANDSAR_RUN = "LANDSAR_RUN"
 JOB_TYPE_PUBLISH_DINSAR_PRODUCTS = "PUBLISH_DINSAR_PRODUCTS"
 JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
@@ -101,6 +102,7 @@ JOB_TYPE_SBAS_RDC_DEM = "SBAS_RDC_DEM"
 JOB_TYPE_SBAS_INTERFEROGRAMS = "SBAS_INTERFEROGRAMS"
 JOB_TYPE_SBAS_IPTA_TIMESERIES = "SBAS_IPTA_TIMESERIES"
 JOB_TYPE_SBAS_GAMMA_WORKFLOW = "SBAS_GAMMA_WORKFLOW"
+JOB_TYPE_SBAS_LANDSAR_WORKFLOW = "SBAS_LANDSAR_WORKFLOW"
 
 COPY_ALLOWED_STATUSES = {"PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"}
 
@@ -2602,6 +2604,12 @@ async def _run_wsl_dinsar_production_controller(
 
                 managed_run_dir = os.path.normpath(execution.output_dir)
                 managed_native_output_dir = os.path.join(managed_run_dir, "native")
+                if engine_code == "landsar":
+                    landsar_work_root = str(getattr(settings, "LANDSAR_WORK_ROOT", "") or "").strip()
+                    if landsar_work_root:
+                        managed_native_output_dir = os.path.normpath(
+                            os.path.join(landsar_work_root, run_key, "native")
+                        )
                 managed_work_dir = os.path.join(managed_native_output_dir, "workflow")
                 managed_export_dir = os.path.join(managed_native_output_dir, "export")
                 managed_orbit_output_dir = os.path.join(managed_work_dir, "orbits")
@@ -2740,10 +2748,12 @@ async def _run_wsl_dinsar_production_controller(
                 task_result = ((detail.get("task_results") or [{}])[0]) if result else {}
 
                 try:
-                    if not result or not result.success or not bool(task_result.get("success", result.success if result else False)):
+                    result_error = str(result.error or "").strip() if result else ""
+                    result_success = bool(result.success) if result else False
+                    if not result or not result_success or not bool(task_result.get("success", result_success)):
                         error_message = (
                             str(task_result.get("error") or "").strip()
-                            or str(result.error or "").strip()
+                            or result_error
                             or run_exception_text
                             or str(task_result.get("stderr_tail") or "").strip()
                             or f"{engine_title} run failed."
@@ -2853,19 +2863,19 @@ async def _run_wsl_dinsar_production_controller(
                         await task_service.add_log(
                             job.task_id,
                             "INFO",
-                            f"WSL command [{item_label}]: {task_result.get('command')}",
+                            f"{engine_title} command [{item_label}]: {task_result.get('command')}",
                         )
                     if task_result.get("stdout_tail"):
                         await task_service.add_log(
                             job.task_id,
                             "INFO",
-                            f"WSL stdout tail [{item_label}]:\n{task_result.get('stdout_tail')}",
+                            f"{engine_title} stdout tail [{item_label}]:\n{task_result.get('stdout_tail')}",
                         )
                     if task_result.get("stderr_tail"):
                         await task_service.add_log(
                             job.task_id,
                             "WARNING",
-                            f"WSL stderr tail [{item_label}]:\n{task_result.get('stderr_tail')}",
+                            f"{engine_title} stderr tail [{item_label}]:\n{task_result.get('stderr_tail')}",
                         )
 
         publish_result = None
@@ -3090,6 +3100,60 @@ async def _handle_pyint_run(job: SystemJobORM) -> None:
         job,
         engine_title="PyINT",
         fallback_timeout_seconds=settings.PYINT_DEFAULT_TIMEOUT_SECONDS,
+    )
+
+
+async def _handle_landsar_run(job: SystemJobORM) -> None:
+    production_run_id = str((job.payload or {}).get("production_run_id") or "").strip()
+    if production_run_id:
+        try:
+            await _run_wsl_dinsar_production_controller(
+                job,
+                engine_code="landsar",
+                engine_title="LandSAR",
+                fallback_timeout_seconds=int(getattr(settings, "LANDSAR_DINSAR_TIMEOUT_SECONDS", 0) or 43200),
+            )
+        except Exception as exc:
+            latest_message = f"LandSAR D-InSAR production controller failed: {exc}"
+            try:
+                async with AsyncSessionLocal() as db:
+                    run = await dinsar_production_service.get_run(production_run_id, db)
+                    if run is not None and str(run.status or "").strip().upper() not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                        summary_payload = dict(run.summary_json or {})
+                        summary_payload["controller_error"] = str(exc)
+                        await dinsar_production_service.finalize_run(
+                            run,
+                            db=db,
+                            status="FAILED",
+                            summary_payload=summary_payload,
+                            latest_message=latest_message,
+                        )
+                        dinsar_production_service.append_run_log(
+                            run.run_id,
+                            f"[controller-failed] {exc}",
+                        )
+            except Exception:
+                pass
+
+            try:
+                current_task = await task_service.get_task(job.task_id)
+                if current_task and current_task.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                    await task_service.add_log(job.task_id, "ERROR", latest_message)
+                    await task_service.update_task(
+                        job.task_id,
+                        status="FAILED",
+                        progress=100,
+                        message=latest_message,
+                    )
+            except Exception:
+                pass
+            raise
+        return
+
+    await _handle_queued_engine_run(
+        job,
+        engine_title="LandSAR",
+        fallback_timeout_seconds=int(getattr(settings, "LANDSAR_DINSAR_TIMEOUT_SECONDS", 0) or 43200),
     )
 
 
@@ -4963,6 +5027,187 @@ async def _handle_sbas_gamma_workflow(job: SystemJobORM) -> None:
     )
 
 
+async def _handle_sbas_landsar_workflow(job: SystemJobORM) -> None:
+    from .landsar_sbas_service import landsar_sbas_service
+
+    payload = job.payload or {}
+    run_id = str(payload.get("run_id") or "").strip()
+    auto_select = bool(payload.get("auto_select"))
+    if not run_id and not auto_select:
+        raise ValueError("SBAS_LANDSAR_WORKFLOW requires run_id or auto_select")
+    timeout_seconds = _normalize_positive_int(payload.get("timeout_seconds")) or int(
+        getattr(settings, "LANDSAR_SBAS_TIMEOUT_SECONDS", 0) or 172800
+    )
+
+    await task_service.start_task(
+        job.task_id,
+        message=(
+            "LandSAR SBAS auto workflow started: selecting LT-1 stack"
+            if auto_select
+            else f"LandSAR SBAS workflow started: {run_id}"
+        ),
+    )
+    await task_service.update_task(
+        job.task_id,
+        progress=5,
+        message=(
+            "Using Gamma SBAS production-area stack discovery for LandSAR input selection..."
+            if auto_select
+            else f"Preparing LandSAR SBAS workflow: {run_id}"
+        ),
+    )
+
+    last_log_at = 0.0
+
+    loop = asyncio.get_running_loop()
+
+    def _progress(event: dict[str, Any]) -> None:
+        nonlocal last_log_at
+        level = str(event.get("level") or "INFO").upper()
+        message = str(event.get("message") or "").strip()
+        if not message:
+            return
+        now = time.monotonic()
+        if level == "INFO" and now - last_log_at < 0.2:
+            return
+        last_log_at = now
+        try:
+            asyncio.run_coroutine_threadsafe(
+                task_service.add_log(job.task_id, level, message),
+                loop,
+            )
+        except Exception:
+            pass
+
+    if auto_select:
+        selection_request = dict(payload.get("selection_request") or {})
+        selection_limit = selection_request.get("limit")
+        if selection_limit is None:
+            selection_limit = 30
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            (
+                "LandSAR auto workflow is reusing Gamma stack discovery: "
+                f"admin_region={selection_request.get('admin_region') or '-'}, "
+                f"min_scenes={selection_request.get('min_scenes') or '-'}"
+            ),
+        )
+        try:
+            detail = await asyncio.to_thread(
+                landsar_sbas_service.create_run_from_best_stack,
+                run_label=selection_request.get("run_label"),
+                source_roots=selection_request.get("source_roots"),
+                orbit_roots=selection_request.get("orbit_roots"),
+                min_scenes=selection_request.get("min_scenes"),
+                discovery_mode=selection_request.get("discovery_mode") or "strict",
+                admin_region=selection_request.get("admin_region"),
+                aoi_bbox=selection_request.get("aoi_bbox"),
+                min_aoi_coverage_ratio=selection_request.get("min_aoi_coverage_ratio", 0.01),
+                min_common_overlap_ratio=selection_request.get(
+                    "min_common_overlap_ratio",
+                    settings.GAMMA_SBAS_MIN_COMMON_OVERLAP_RATIO,
+                ),
+                limit=selection_limit,
+                dem_path=selection_request.get("dem_path"),
+                timeout_seconds=selection_request.get("timeout_seconds"),
+                import_timeout_seconds=selection_request.get("import_timeout_seconds"),
+                params=dict(selection_request.get("params") or {}),
+            )
+        except Exception as exc:
+            await task_service.add_log(job.task_id, "ERROR", f"LandSAR auto stack selection failed: {exc}")
+            raise
+
+        run_id = (
+            (detail.get("run") or {}).get("run_id")
+            or (detail.get("manifest") or {}).get("run_id")
+            or ""
+        )
+        if not run_id:
+            raise ValueError("LandSAR auto workflow did not create a run.")
+        selection = detail.get("selection") or {}
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            (
+                "LandSAR auto stack selected: "
+                f"stack_id={selection.get('selected_stack_id') or '-'}, run_id={run_id}"
+            ),
+        )
+        await task_service.update_task(
+            job.task_id,
+            progress=15,
+            message=f"LandSAR SBAS Run created from Gamma-selected stack: {run_id}",
+        )
+
+    runner_task = asyncio.create_task(
+        asyncio.to_thread(
+            landsar_sbas_service.execute_run,
+            run_id,
+            timeout_seconds=timeout_seconds,
+            progress_callback=_progress,
+        )
+    )
+
+    async def _keepalive() -> None:
+        while not runner_task.done():
+            await asyncio.sleep(30)
+            await task_service.update_task(
+                job.task_id,
+                progress=50,
+                message=f"LandSAR SBAS workflow is still running: {run_id}",
+            )
+
+    keepalive_task = asyncio.create_task(_keepalive())
+    try:
+        result = await runner_task
+    finally:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+
+    manifest = result.get("manifest") or {}
+    workflow = manifest.get("workflow") or {}
+    summary = workflow.get("summary") or {}
+    status = str(manifest.get("status") or "").strip().upper()
+    if status not in {"LANDSAR_SBAS_COMPLETED", "LANDSAR_SBAS_PARTIAL"}:
+        failed_count = summary.get("failed_count") or manifest.get("failed_task_count") or 0
+        if status == "LANDSAR_SBAS_RUNTIME_UNSUPPORTED":
+            unsupported_count = summary.get("unsupported_proid_count") or 0
+            configured_proid = manifest.get("proid") or "unknown"
+            message = (
+                f"LandSAR SBAS runtime unsupported: configured proID {configured_proid} is not recognized by "
+                f"this LandSAR installation. failure_kind=unsupported_proid, "
+                f"next_stage={manifest.get('next_stage') or 'configure_landsar_sbas_runtime'}, "
+                f"unsupported_tasks={unsupported_count}"
+            )
+            await task_service.add_log(job.task_id, "ERROR", message)
+            await task_service.update_task(
+                job.task_id,
+                status="FAILED",
+                progress=100,
+                message=message,
+            )
+            raise RuntimeError(message)
+        raise RuntimeError(
+            "LandSAR SBAS workflow failed: "
+            f"status={status or 'UNKNOWN'}, failed={failed_count}"
+        )
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            f"LandSAR SBAS workflow {status.lower()}: "
+            f"completed={summary.get('completed_count', 0)}, "
+            f"failed={summary.get('failed_count', 0)}"
+        ),
+    )
+
+
 _HANDLERS = {
     JOB_TYPE_SCAN_DATA: _handle_scan_data,
     JOB_TYPE_SCAN_ASSET_INVENTORY: _handle_scan_asset_inventory,
@@ -4993,6 +5238,7 @@ _HANDLERS = {
     JOB_TYPE_IDL_RUN_DINSAR: _handle_idl_run_dinsar,
     JOB_TYPE_ISCE2_RUN: _handle_isce2_run,
     JOB_TYPE_PYINT_RUN: _handle_pyint_run,
+    JOB_TYPE_LANDSAR_RUN: _handle_landsar_run,
     JOB_TYPE_WATER_GEOCODE: _handle_water_geocode,
     JOB_TYPE_SAR_SCENE_PREPROCESS: _handle_sar_scene_preprocess,
     JOB_TYPE_WATER_FLOOD: _handle_water_flood,
@@ -5009,6 +5255,7 @@ _HANDLERS = {
     JOB_TYPE_SBAS_INTERFEROGRAMS: _handle_sbas_interferograms,
     JOB_TYPE_SBAS_IPTA_TIMESERIES: _handle_sbas_ipta_timeseries,
     JOB_TYPE_SBAS_GAMMA_WORKFLOW: _handle_sbas_gamma_workflow,
+    JOB_TYPE_SBAS_LANDSAR_WORKFLOW: _handle_sbas_landsar_workflow,
 }
 
 

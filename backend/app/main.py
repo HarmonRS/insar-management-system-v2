@@ -192,7 +192,7 @@ async def lifespan(app: FastAPI):
     if ps_catalog_bootstrap.get("error"):
         print(f">>> [Timeseries Catalog] Startup bootstrap failed: {ps_catalog_bootstrap['error']}")
     print(
-        ">>> [Gamma SBAS Catalog] root={0} runs={1} db={2} rebuild={3} rebuilt={4}".format(
+        ">>> [SBAS Catalog] root={0} runs={1} db={2} rebuild={3} rebuilt={4}".format(
             sbas_catalog_bootstrap.get("storage_root") or "?",
             sbas_catalog_bootstrap.get("manifest_count", 0),
             sbas_catalog_bootstrap.get("db_count", 0),
@@ -201,7 +201,7 @@ async def lifespan(app: FastAPI):
         )
     )
     if sbas_catalog_bootstrap.get("error"):
-        print(f">>> [Gamma SBAS Catalog] Startup bootstrap failed: {sbas_catalog_bootstrap['error']}")
+        print(f">>> [SBAS Catalog] Startup bootstrap failed: {sbas_catalog_bootstrap['error']}")
     print(
         ">>> [Pairing] status={0} scenes={1} pairs={2} dirty={3} metric={4} rebuild={5}".format(
             pairing_bootstrap.get("status") or "?",

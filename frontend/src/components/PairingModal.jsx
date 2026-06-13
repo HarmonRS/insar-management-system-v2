@@ -8,7 +8,7 @@ import { getAvailableSatellites } from '../api/radar';
 // 配对策略说明
 const STRATEGY_DESCRIPTIONS = {
     all: {
-        title: '全部配对（默认）',
+        title: '全部配对',
         description: '列出所有满足约束条件的候选干涉对，由用户自行筛选。',
         details: [
             '• 系统遍历所有影像组合，保留满足时间基线和两景 footprint 最小重叠率的配对',
@@ -19,7 +19,7 @@ const STRATEGY_DESCRIPTIONS = {
         params: '参数：时间基线范围、两景 footprint 最小重叠率、可选 footprint 中心距上限'
     },
     sbas: {
-        title: 'SBAS (短基线子集)',
+        title: 'SBAS (短基线子集，推荐)',
         description: '基于短基线原则的配对策略，通过覆盖优化算法自动筛选配对。',
         details: [
             '• 优先选择时间间隔较短、覆盖质量较好的配对；可按需启用 footprint 中心距限制',
@@ -204,6 +204,11 @@ function PairingModal({
                                         Star (星型)
                                     </label>
                                 </div>
+                                {pairingParams.strategy === 'all' && (
+                                    <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#fff7ed', border: '1px solid #fdba74', color: '#9a3412', fontSize: 12, lineHeight: 1.5 }}>
+                                        全部配对会返回所有候选边；当前数据量较大时请先限定 AOI 或主/从影像时间范围。做 SBAS 生产建议使用“SBAS (短基线)”策略。
+                                    </div>
+                                )}
                             </div>
 
                             {/* 主影像时间范围 */}

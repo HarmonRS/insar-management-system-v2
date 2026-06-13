@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import apiClient from './api/client';
+import TaskStatusPanel from './components/tasks/TaskStatusPanel';
+import useTaskMonitor from './hooks/useTaskMonitor';
 
 const HazardPointPanel = ({ onPointClick, onToggleVisibility, isVisible, onScanComplete, onTaskStart, points: externalPoints, readOnly = false }) => {
     const [points, setPoints] = useState(Array.isArray(externalPoints) ? externalPoints : []);
@@ -7,6 +9,13 @@ const HazardPointPanel = ({ onPointClick, onToggleVisibility, isVisible, onScanC
     const [isLoading, setIsLoading] = useState(false);
     const [message, setMessage] = useState('');
     const fetchPointsRef = useRef(null);
+    const scanTaskMonitor = useTaskMonitor({
+        taskTypes: ['SCAN_HAZARD'],
+        showRecent: true,
+        recentLimit: 1,
+        pollRecentMs: 10000,
+    });
+    const scanBusy = isLoading || scanTaskMonitor.isBusy;
 
     const fetchPoints = async () => {
         setIsLoading(true);
@@ -84,11 +93,21 @@ const HazardPointPanel = ({ onPointClick, onToggleVisibility, isVisible, onScanC
                 <button 
                     className="primary-btn" 
                     onClick={handleScan} 
-                    disabled={isLoading || readOnly}
+                    disabled={scanBusy || readOnly}
                     style={{ width: '100%', marginBottom: '10px' }}
                 >
-                    {isLoading ? '同步中...' : '同步 Shapefile 数据'}
+                    {scanBusy ? '同步中...' : '同步 Shapefile 数据'}
                 </button>
+
+                <TaskStatusPanel
+                    title="灾害点同步任务"
+                    activeTasks={scanTaskMonitor.activeTasks}
+                    recentTasks={scanTaskMonitor.recentTasks}
+                    latestTask={scanTaskMonitor.latestTask}
+                    isBusy={scanTaskMonitor.isBusy}
+                    idleText="当前没有正在执行的灾害点同步任务。"
+                    compact
+                />
 
                 <input 
                     type="text" 

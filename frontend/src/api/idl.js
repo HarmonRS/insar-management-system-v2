@@ -12,8 +12,6 @@ export const queueDinsarJob = (payload) =>
   apiClient.post('/idl/jobs/dinsar', payload).then(r => r.data);
 export const getRecentRuns = (limit = 20) =>
   apiClient.get(`/idl/jobs/recent?limit=${encodeURIComponent(limit)}`).then(r => r.data);
-export const getActiveTasks = () =>
-  apiClient.get('/tasks/active').then(r => r.data);
 export const getTaskLogs = (taskId, limit = 50, offset = 0) =>
   apiClient.get(`/tasks/${taskId}/logs?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`).then(r => r.data);
 export const forceCancelTask = (taskId, password) =>

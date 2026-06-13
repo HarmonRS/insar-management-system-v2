@@ -5,10 +5,11 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import AuthUserORM
+from ..models import AuthUserORM, SystemTaskORM
 from ..services.job_queue_service import job_queue_service
 from ..services.sbas_insar_catalog_service import (
     JOB_TYPE_REBUILD_SBAS_INSAR_CATALOG,
@@ -24,6 +25,24 @@ router = APIRouter()
 
 class SbasInsarCatalogRebuildRequest(BaseModel):
     full_rebuild: bool = True
+
+
+class SbasInsarPointTimeseriesRequest(BaseModel):
+    lon: float
+    lat: float
+
+
+async def _get_active_sbas_catalog_rebuild_task(db: AsyncSession) -> SystemTaskORM | None:
+    result = await db.execute(
+        select(SystemTaskORM)
+        .where(
+            SystemTaskORM.task_type == TASK_TYPE_REBUILD_SBAS_INSAR_CATALOG,
+            SystemTaskORM.status.in_(["PENDING", "RUNNING"]),
+        )
+        .order_by(SystemTaskORM.created_at.desc(), SystemTaskORM.id.desc())
+        .limit(1)
+    )
+    return result.scalars().first()
 
 
 @router.get("/sbas-insar-products/catalog-status")
@@ -43,12 +62,40 @@ async def queue_sbas_insar_catalog_rebuild(
     admin_user: AuthUserORM = Depends(_require_admin),
 ):
     _ = admin_user
-    task_id = await task_service.create_task(
-        TASK_TYPE_REBUILD_SBAS_INSAR_CATALOG,
-        "SBAS-InSAR result catalog rebuild",
-        params={"full_rebuild": request.full_rebuild},
-        db=db,
-    )
+    existing_task = await _get_active_sbas_catalog_rebuild_task(db)
+    if existing_task is not None:
+        await _add_operation_audit_log(
+            db,
+            request=http_request,
+            action="sbas_insar_catalog_rebuild_already_running",
+            resource="sbas-insar-products/rebuild",
+            detail={"task_id": existing_task.task_id, "full_rebuild": request.full_rebuild},
+        )
+        await db.commit()
+        return {
+            "message": "SBAS-InSAR result catalog rebuild is already queued or running.",
+            "task_id": existing_task.task_id,
+            "already_running": True,
+        }
+
+    try:
+        task_id = await task_service.create_task(
+            TASK_TYPE_REBUILD_SBAS_INSAR_CATALOG,
+            "SBAS-InSAR result catalog rebuild",
+            params={"full_rebuild": request.full_rebuild},
+            db=db,
+        )
+    except ValueError as exc:
+        await db.rollback()
+        existing_task = await _get_active_sbas_catalog_rebuild_task(db)
+        if existing_task is not None:
+            return {
+                "message": "SBAS-InSAR result catalog rebuild is already queued or running.",
+                "task_id": existing_task.task_id,
+                "already_running": True,
+            }
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     await job_queue_service.create_job(
         JOB_TYPE_REBUILD_SBAS_INSAR_CATALOG,
         payload={"full_rebuild": request.full_rebuild},
@@ -98,6 +145,32 @@ async def get_sbas_insar_product_detail(
 ):
     _ = current_user
     detail = await sbas_insar_catalog_service.get_product_detail(db, product_db_id=product_db_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="SBAS-InSAR product not found")
+    return detail
+
+
+@router.post("/sbas-insar-products/{product_db_id}/point-timeseries")
+async def query_sbas_insar_point_timeseries(
+    product_db_id: int,
+    request: SbasInsarPointTimeseriesRequest,
+    current_user: AuthUserORM = Depends(_get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = current_user
+    try:
+        detail = await sbas_insar_catalog_service.query_point_timeseries(
+            db,
+            product_db_id=product_db_id,
+            lon=request.lon,
+            lat=request.lat,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     if detail is None:
         raise HTTPException(status_code=404, detail="SBAS-InSAR product not found")
     return detail

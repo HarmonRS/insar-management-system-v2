@@ -3,10 +3,14 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   auditSbasInsarStack,
   decideSbasInsarItab,
+  deleteSbasInsarRun,
+  getLandsarSbasRun,
+  getLandsarSbasRunArtifactUrl,
   discoverSbasInsarStacks,
   getSbasInsarCapabilities,
   getSbasInsarRun,
   getSbasInsarRunArtifactUrl,
+  listLandsarSbasRuns,
   listSbasInsarRuns,
   prepareSbasInsarCoregistration,
   prepareSbasInsarInterferograms,
@@ -14,6 +18,7 @@ import {
   prepareSbasInsarRdcDem,
   prepareSbasInsarWorkflow,
   runSbasInsarBaselineAudit,
+  submitLandsarSbasAutoWorkflow,
   submitSbasInsarCoregistrationJob,
   submitSbasInsarInterferogramsJob,
   submitSbasInsarIptaTimeseriesJob,
@@ -40,6 +45,8 @@ const mutedStyle = {
   lineHeight: 1.55,
 };
 
+const ACTIVE_RUN_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+
 const labelStyle = {
   color: '#475569',
   fontSize: 12,
@@ -51,17 +58,24 @@ const valueStyle = {
   fontWeight: 650,
 };
 
-const gridStyle = {
-  display: 'grid',
-  gridTemplateColumns: 'minmax(280px, 360px) minmax(0, 1fr)',
-  gap: 12,
-  alignItems: 'start',
-};
-
 const metricGridStyle = {
   display: 'grid',
   gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
   gap: 10,
+};
+
+const compactDetailsStyle = {
+  border: '1px solid #e2e8f0',
+  borderRadius: 8,
+  padding: '9px 10px',
+  background: '#ffffff',
+};
+
+const compactSummaryStyle = {
+  cursor: 'pointer',
+  color: '#0f172a',
+  fontSize: 13,
+  fontWeight: 700,
 };
 
 const buttonBaseStyle = {
@@ -78,20 +92,6 @@ function formatValue(value, suffix = '') {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return '-';
   return `${numeric.toFixed(Math.abs(numeric) >= 100 ? 1 : 2)}${suffix}`;
-}
-
-function formatBytes(value) {
-  const size = Number(value || 0);
-  if (!Number.isFinite(size) || size <= 0) return '-';
-  if (size < 1024) return `${size} B`;
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let current = size / 1024;
-  let index = 0;
-  while (current >= 1024 && index < units.length - 1) {
-    current /= 1024;
-    index += 1;
-  }
-  return `${current.toFixed(current >= 100 ? 0 : 1)} ${units[index]}`;
 }
 
 function normalizeBbox(bbox) {
@@ -150,7 +150,27 @@ function formatPercent(value) {
   return `${(numeric * 100).toFixed(numeric >= 0.1 ? 0 : 1)}%`;
 }
 
+function shortHash(value) {
+  const text = String(value || '').trim();
+  return text ? text.slice(0, 10) : '-';
+}
+
+function getSceneNames(stack) {
+  const sceneNames = Array.isArray(stack?.scene_names) ? stack.scene_names.filter(Boolean) : [];
+  if (sceneNames.length > 0) return sceneNames;
+  const scenes = Array.isArray(stack?.scenes) ? stack.scenes : [];
+  const names = scenes.map(scene => scene?.scene_name).filter(Boolean);
+  if (names.length > 0) return names;
+  return Array.isArray(stack?.scene_name_preview) ? stack.scene_name_preview.filter(Boolean) : [];
+}
+
+function isActiveRunStatus(value) {
+  const text = String(value || '').toUpperCase();
+  return text.includes('RUNNING') || ['READY', 'PENDING', 'RETRY'].includes(text);
+}
+
 function StatusBadge({ value }) {
+  const text = String(value || 'UNKNOWN').toUpperCase();
   const okValues = new Set([
     'READY',
     'READY_FOR_GAMMA_BASELINE_AUDIT',
@@ -159,8 +179,10 @@ function StatusBadge({ value }) {
     'COMPLETED',
     'IPTA_TIMESERIES_READY',
   ]);
-  const isOk = okValues.has(value);
-  const color = isOk ? '#0f766e' : '#92400e';
+  const isRunning = text.includes('RUNNING');
+  const isOk = okValues.has(text);
+  const color = isRunning ? '#0369a1' : (isOk ? '#0f766e' : '#92400e');
+  const background = isRunning ? '#e0f2fe' : (isOk ? '#ccfbf1' : '#fef3c7');
   return (
     <span
       style={{
@@ -170,7 +192,7 @@ function StatusBadge({ value }) {
         padding: '2px 8px',
         borderRadius: 999,
         color,
-        background: isOk ? '#ccfbf1' : '#fef3c7',
+        background,
         fontSize: 12,
         fontWeight: 700,
       }}
@@ -194,6 +216,130 @@ function Metric({ label, value }) {
     >
       <div style={labelStyle}>{label}</div>
       <div style={{ ...valueStyle, marginTop: 4 }}>{value}</div>
+    </div>
+  );
+}
+
+function StackIdentityNotice({ stack }) {
+  if (!stack) return null;
+  const sameDateCount = Number(stack.same_date_sequence_candidate_count || 0);
+  const distinctSceneCount = Number(stack.same_date_sequence_distinct_scene_group_count || 0);
+  const sameSceneRuns = Array.isArray(stack.existing_same_scene_runs) ? stack.existing_same_scene_runs : [];
+  const showDateSequenceNotice = sameDateCount > 1 && distinctSceneCount > 1;
+  if (!showDateSequenceNotice && sameSceneRuns.length === 0) return null;
+
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      {showDateSequenceNotice && (
+        <div style={{ border: '1px solid #fed7aa', borderRadius: 8, padding: 10, background: '#fff7ed', color: '#9a3412', fontSize: 12, lineHeight: 1.55 }}>
+          同日期序列候选 {sameDateCount} 个，其中不同影像组 {distinctSceneCount} 个。判断是否同任务请以影像名称集合为准。
+        </div>
+      )}
+      {sameSceneRuns.length > 0 && (
+        <div style={{ border: '1px solid #fecaca', borderRadius: 8, padding: 10, background: '#fef2f2', color: '#991b1b', fontSize: 12, lineHeight: 1.55 }}>
+          已存在同影像任务：{sameSceneRuns.map(item => `${item.run_id} (${item.status || '-'})`).join('；')}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SceneNamePanel({ stack }) {
+  if (!stack) return null;
+  const names = getSceneNames(stack);
+  return (
+    <details style={compactDetailsStyle}>
+      <summary style={compactSummaryStyle}>
+        影像名称 {names.length || stack.scene_name_count || 0} 景；影像组 {shortHash(stack.scene_identity_hash)}
+      </summary>
+      {names.length > 0 ? (
+        <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
+          {names.map(name => (
+            <div key={name} style={{ ...mutedStyle, wordBreak: 'break-all' }}>
+              {name}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ ...mutedStyle, marginTop: 8 }}>当前候选未返回完整影像名称；请先执行审计或重新发现候选。</div>
+      )}
+    </details>
+  );
+}
+
+function RuntimeStatusPanel({ status }) {
+  if (!status) return null;
+  const background = status.background_activity || {};
+  const tasks = Array.isArray(background.tasks) ? background.tasks : [];
+  const jobs = Array.isArray(background.jobs) ? background.jobs : [];
+  const taskLogs = Array.isArray(background.task_logs) ? background.task_logs : [];
+  const fileLogs = Array.isArray(status.recent_logs) ? status.recent_logs : [];
+  const wslProcesses = Array.isArray(status.wsl_processes?.processes) ? status.wsl_processes.processes : [];
+  const currentTask = tasks.find(item => ['PENDING', 'RUNNING'].includes(String(item.status || '').toUpperCase())) || tasks[0] || null;
+  const currentJob = jobs.find(item => ['READY', 'PENDING', 'RUNNING', 'RETRY'].includes(String(item.status || '').toUpperCase())) || jobs[0] || null;
+  const latestTaskLog = taskLogs[0] || null;
+  const latestFileLog = fileLogs[0] || null;
+  const gate = status.overlap_gate || {};
+
+  return (
+    <div style={{ border: '1px solid #bae6fd', borderRadius: 8, padding: 10, background: '#f0f9ff' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={valueStyle}>Runtime Status</div>
+        <StatusBadge value={status.active ? 'RUNNING' : (status.run_status || 'IDLE')} />
+      </div>
+      <div style={{ ...metricGridStyle, marginTop: 8 }}>
+        <Metric label="Current step" value={status.current_step?.id || '-'} />
+        <Metric label="Workflow updated" value={status.workflow_updated_at || '-'} />
+        <Metric label="Latest log" value={status.latest_log_updated_at || '-'} />
+        <Metric
+          label="Common overlap"
+          value={`${formatPercent(gate.common_overlap_ratio)} / ${formatPercent(gate.min_common_overlap_ratio)}`}
+        />
+      </div>
+      {(currentTask || currentJob) && (
+        <div style={{ ...mutedStyle, marginTop: 8, wordBreak: 'break-word' }}>
+          Task: {currentTask ? `${currentTask.task_type || '-'} ${currentTask.status || '-'} ${currentTask.progress ?? 0}%` : '-'}
+          {'; '}
+          Job: {currentJob ? `${currentJob.job_type || '-'} ${currentJob.status || '-'}` : '-'}
+        </div>
+      )}
+      {latestTaskLog && (
+        <div style={{ ...mutedStyle, marginTop: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          DB log: [{latestTaskLog.level || 'INFO'}] {latestTaskLog.message}
+        </div>
+      )}
+      {latestFileLog?.tail && (
+        <details style={{ ...compactDetailsStyle, marginTop: 8, borderColor: '#bae6fd' }}>
+          <summary style={compactSummaryStyle}>{latestFileLog.name || 'latest log'}</summary>
+          <pre
+            style={{
+              margin: '8px 0 0',
+              maxHeight: 180,
+              overflow: 'auto',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              fontSize: 11,
+              lineHeight: 1.45,
+              color: '#0f172a',
+            }}
+          >
+            {latestFileLog.tail}
+          </pre>
+        </details>
+      )}
+      <details style={{ ...compactDetailsStyle, marginTop: 8, borderColor: '#bae6fd' }}>
+        <summary style={compactSummaryStyle}>WSL processes ({wslProcesses.length})</summary>
+        <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
+          {wslProcesses.length === 0 && (
+            <div style={mutedStyle}>{status.wsl_processes?.error || 'No matching WSL process reported.'}</div>
+          )}
+          {wslProcesses.map(item => (
+            <div key={`${item.pid}-${item.command}`} style={{ ...mutedStyle, fontFamily: 'monospace', wordBreak: 'break-word' }}>
+              {item.pid} {item.etime} {item.stat} {item.command}
+            </div>
+          ))}
+        </div>
+      </details>
     </div>
   );
 }
@@ -482,11 +628,34 @@ function UnusedGeographicCoveragePanel({ coverage }) {
 }
 */
 
-export default function SbasInsarProductionPanel({ readOnly = false }) {
+export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart }) {
+  const [processorMode, setProcessorMode] = useState('landsar');
   const [capabilities, setCapabilities] = useState(null);
   const [runs, setRuns] = useState([]);
   const [selectedRunId, setSelectedRunId] = useState('');
   const [runDetail, setRunDetail] = useState(null);
+  const [landsarRuns, setLandsarRuns] = useState([]);
+  const [selectedLandsarRunId, setSelectedLandsarRunId] = useState('');
+  const [landsarRunDetail, setLandsarRunDetail] = useState(null);
+  const [landsarDemPath, setLandsarDemPath] = useState('');
+  const [landsarMinScenes, setLandsarMinScenes] = useState(3);
+  const [landsarSubmitLoading, setLandsarSubmitLoading] = useState(false);
+  const [landsarWorkflowJobLoading, setLandsarWorkflowJobLoading] = useState(false);
+  const [landsarWorkflowJob, setLandsarWorkflowJob] = useState(null);
+  const [landsarParams, setLandsarParams] = useState({
+    dem_format: 4,
+    intf_method: 0,
+    perp_baseline: 200,
+    time_baseline: 300,
+    doppler_baseline: 100,
+    az_looks: 3,
+    rg_looks: 3,
+    da_threshold: 0.25,
+    network_type: 0,
+    solve_method: 0,
+    gen_vector_map: false,
+    gen_post_raster: true,
+  });
   const [loading, setLoading] = useState(false);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
   const [error, setError] = useState('');
@@ -497,6 +666,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
   const [stackAudit, setStackAudit] = useState(null);
   const [submitLoading, setSubmitLoading] = useState(false);
   const [stackAdminRegionQuery, setStackAdminRegionQuery] = useState('');
+  const [selectedSensorFamily, setSelectedSensorFamily] = useState('LT1');
   const [baselineAuditLoading, setBaselineAuditLoading] = useState(false);
   const [itabDecisionLoading, setItabDecisionLoading] = useState(false);
   const [coregistrationLoading, setCoregistrationLoading] = useState(false);
@@ -514,20 +684,29 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [workflowJobLoading, setWorkflowJobLoading] = useState(false);
   const [workflowJob, setWorkflowJob] = useState(null);
+  const [runDeleteLoading, setRunDeleteLoading] = useState(false);
 
   const stackDiscoveryPayload = useMemo(() => {
     const adminRegion = stackAdminRegionQuery.trim();
+    const isLandsar = processorMode === 'landsar';
+    const processorCapability = (capabilities?.processors || []).find(item =>
+      isLandsar ? item.processor_code === 'landsar_sbas' : item.processor_code === 'gamma_ipta_sbas'
+    );
+    const configuredMinCommonOverlap = Number(
+      processorCapability?.min_common_overlap_ratio ?? capabilities?.min_common_overlap_ratio ?? 0.3
+    );
     return {
-      min_scenes: 3,
-      require_orbits: true,
+      sensor_family: isLandsar ? 'LT1' : selectedSensorFamily,
+      min_scenes: isLandsar ? Math.max(3, Number(landsarMinScenes) || 3) : 3,
+      require_orbits: !isLandsar,
       include_scenes: false,
-      limit: 30,
+      limit: 0,
       discovery_mode: adminRegion ? 'aoi' : 'strict',
       admin_region: adminRegion || undefined,
       min_aoi_coverage_ratio: 0.01,
-      min_common_overlap_ratio: 0,
+      min_common_overlap_ratio: Number.isFinite(configuredMinCommonOverlap) ? configuredMinCommonOverlap : 0.3,
     };
-  }, [stackAdminRegionQuery]);
+  }, [capabilities, landsarMinScenes, processorMode, selectedSensorFamily, stackAdminRegionQuery]);
 
   const loadProductionRuns = useCallback(async () => {
     setLoading(true);
@@ -538,9 +717,19 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
         listSbasInsarRuns(),
       ]);
       const runItems = Array.isArray(runData?.items) ? runData.items : [];
+      const activeRun = runItems.find(item => isActiveRunStatus(item.status));
       setCapabilities(capabilityData);
       setRuns(runItems);
-      setSelectedRunId(current => current || runItems[0]?.run_id || '');
+      setSelectedRunId(current => {
+        if (activeRun && current !== activeRun.run_id) return activeRun.run_id;
+        if (current && runItems.some(item => item.run_id === current)) return current;
+        return runItems[0]?.run_id || '';
+      });
+      const landsarCapability = (capabilityData?.processors || []).find(item => item.processor_code === 'landsar_sbas');
+      if (landsarCapability) {
+        setLandsarDemPath(current => current || landsarCapability.default_dem_path || '');
+        setLandsarMinScenes(current => Math.max(3, Number(current || landsarCapability.min_scenes || 3)));
+      }
     } catch (exc) {
       setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR 列表加载失败');
       setCapabilities(null);
@@ -553,6 +742,15 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
   useEffect(() => {
     loadProductionRuns();
   }, [loadProductionRuns]);
+
+  useEffect(() => {
+    const hasActiveRun = runs.some(item => isActiveRunStatus(item.status));
+    if (!hasActiveRun) return undefined;
+    const timer = window.setInterval(() => {
+      loadProductionRuns();
+    }, ACTIVE_RUN_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [loadProductionRuns, runs]);
 
   const loadRunDetail = useCallback(async runId => {
     if (!runId) {
@@ -575,6 +773,57 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
   useEffect(() => {
     loadRunDetail(selectedRunId);
   }, [loadRunDetail, selectedRunId]);
+
+  useEffect(() => {
+    const statusText = String(runDetail?.run?.status || runDetail?.manifest?.status || '').toUpperCase();
+    const active = Boolean(runDetail?.runtime_status?.active) || statusText.includes('RUNNING');
+    if (!selectedRunId || !active) return undefined;
+    const timer = window.setInterval(() => {
+      loadRunDetail(selectedRunId);
+    }, ACTIVE_RUN_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [loadRunDetail, runDetail?.manifest?.status, runDetail?.run?.status, runDetail?.runtime_status?.active, selectedRunId]);
+
+  const loadLandsarRuns = useCallback(async () => {
+    setError('');
+    try {
+      const data = await listLandsarSbasRuns();
+      const items = Array.isArray(data?.items) ? data.items : [];
+      setLandsarRuns(items);
+      setSelectedLandsarRunId(current => current || items[0]?.run_id || '');
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'LandSAR SBAS Run 列表加载失败');
+      setLandsarRuns([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadLandsarRuns();
+  }, [loadLandsarRuns]);
+
+  const loadLandsarRunDetail = useCallback(async runId => {
+    if (!runId) {
+      setLandsarRunDetail(null);
+      return;
+    }
+    setRunDetailLoading(true);
+    setError('');
+    try {
+      const data = await getLandsarSbasRun(runId);
+      setLandsarRunDetail(data);
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'LandSAR SBAS Run 详情加载失败');
+      setLandsarRunDetail(null);
+    } finally {
+      setRunDetailLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (processorMode === 'landsar') {
+      loadLandsarRunDetail(selectedLandsarRunId);
+    }
+  }, [loadLandsarRunDetail, processorMode, selectedLandsarRunId]);
 
   const handleDiscoverStacks = useCallback(async () => {
     setDiscovering(true);
@@ -620,7 +869,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
       const data = await submitSbasInsarRun(selectedStackId, {
         ...stackDiscoveryPayload,
         run_label: candidate
-          ? `${candidate.satellite || 'LT1'} ${formatAdminRegion(candidate.admin_region)} relOrbit ${candidate.relative_orbit || ''}`.trim()
+          ? `${candidate.satellite || selectedSensorFamily} ${formatAdminRegion(candidate.admin_region)} relOrbit ${candidate.relative_orbit || ''}`.trim()
           : undefined,
         dry_run: false,
         monitor_point_strategy: 'auto_representative_points',
@@ -638,7 +887,84 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     } finally {
       setSubmitLoading(false);
     }
-  }, [readOnly, selectedStackId, stackCandidates, stackDiscoveryPayload]);
+  }, [readOnly, selectedSensorFamily, selectedStackId, stackCandidates, stackDiscoveryPayload]);
+
+  const handleDeleteRun = useCallback(async runId => {
+    if (!runId || readOnly || runDeleteLoading) return;
+    const target = runs.find(item => item.run_id === runId);
+    const label = target?.run_label || target?.run_id || runId;
+    const ok = window.confirm(
+      `确定删除生产 Run ${label}？\n\n会删除运行目录、关联任务/Job 记录和已登记的 SBAS 成果。正在运行的任务会被后端拒绝删除。`
+    );
+    if (!ok) return;
+    setRunDeleteLoading(true);
+    setError('');
+    try {
+      await deleteSbasInsarRun(runId);
+      const runData = await listSbasInsarRuns();
+      const runItems = Array.isArray(runData?.items) ? runData.items : [];
+      setRuns(runItems);
+      const nextRunId = selectedRunId === runId ? (runItems[0]?.run_id || '') : selectedRunId;
+      setSelectedRunId(nextRunId);
+      if (nextRunId) {
+        const detailData = await getSbasInsarRun(nextRunId);
+        setRunDetail(detailData);
+      } else {
+        setRunDetail(null);
+      }
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'SBAS-InSAR 生产 Run 删除失败');
+    } finally {
+      setRunDeleteLoading(false);
+    }
+  }, [readOnly, runDeleteLoading, runs, selectedRunId]);
+
+  const handleSubmitLandsarAutoWorkflow = useCallback(async () => {
+    if (readOnly) return;
+    setLandsarWorkflowJobLoading(true);
+    setLandsarSubmitLoading(true);
+    setError('');
+    setStackAudit(null);
+    try {
+      const data = await submitLandsarSbasAutoWorkflow({
+        ...stackDiscoveryPayload,
+        sensor_family: 'LT1',
+        require_orbits: false,
+        include_scenes: false,
+        dem_path: landsarDemPath || undefined,
+        timeout_seconds: 172800,
+        import_timeout_seconds: 172800,
+        workflow_timeout_seconds: 172800,
+        params: landsarParams,
+      });
+      const runId = data?.run_id || data?.run?.run_id || data?.manifest?.run_id;
+      const selection = data?.selection || {};
+      const selected = selection.selected_stack;
+      if (selected?.stack_id) {
+        setStackCandidates(selection.ranked_candidates || [selected]);
+        setSelectedStackId(selected.stack_id);
+      }
+      if (runId) {
+        setSelectedLandsarRunId(runId);
+        const detailData = await getLandsarSbasRun(runId);
+        setLandsarRunDetail(detailData);
+      }
+      if (data?.task_id) {
+        onTaskStart?.(data.task_id, 'LandSAR SBAS workflow queued.', {
+          taskType: data.job_type || 'SBAS_LANDSAR_WORKFLOW',
+          nonBlocking: true,
+        });
+      }
+      setLandsarWorkflowJob(data);
+      await loadLandsarRuns();
+    } catch (exc) {
+      setError(exc?.response?.data?.detail || exc.message || 'LandSAR SBAS 自动生产提交失败');
+      setLandsarWorkflowJob(null);
+    } finally {
+      setLandsarSubmitLoading(false);
+      setLandsarWorkflowJobLoading(false);
+    }
+  }, [landsarDemPath, landsarParams, loadLandsarRuns, onTaskStart, readOnly, stackDiscoveryPayload]);
 
   const workflowPayload = useMemo(() => ({
     force: false,
@@ -672,6 +998,12 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     try {
       const data = await submitSbasInsarWorkflowJob(selectedRunId, workflowPayload);
       setWorkflowJob(data);
+      if (data?.task_id) {
+        onTaskStart?.(data.task_id, 'Gamma SBAS workflow queued.', {
+          taskType: data.job_type || 'SBAS_GAMMA_WORKFLOW',
+          nonBlocking: true,
+        });
+      }
       const detailData = await getSbasInsarRun(selectedRunId);
       setRunDetail(detailData);
       const runData = await listSbasInsarRuns();
@@ -682,7 +1014,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     } finally {
       setWorkflowJobLoading(false);
     }
-  }, [readOnly, selectedRunId, workflowPayload]);
+  }, [onTaskStart, readOnly, selectedRunId, workflowPayload]);
 
   const handleBaselineAudit = useCallback(async (execute = false) => {
     if (!selectedRunId || readOnly) return;
@@ -759,6 +1091,12 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
         timeout_seconds: 43200,
       });
       setCoregistrationJob(data);
+      if (data?.task_id) {
+        onTaskStart?.(data.task_id, 'SBAS coregistration task queued.', {
+          taskType: data.job_type || 'SBAS_COREGISTRATION',
+          nonBlocking: true,
+        });
+      }
       const detailData = await getSbasInsarRun(selectedRunId);
       setRunDetail(detailData);
       const runData = await listSbasInsarRuns();
@@ -769,7 +1107,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     } finally {
       setCoregistrationJobLoading(false);
     }
-  }, [readOnly, selectedRunId]);
+  }, [onTaskStart, readOnly, selectedRunId]);
 
   const handlePrepareRdcDem = useCallback(async () => {
     if (!selectedRunId || readOnly) return;
@@ -800,6 +1138,12 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
         timeout_seconds: 43200,
       });
       setRdcDemJob(data);
+      if (data?.task_id) {
+        onTaskStart?.(data.task_id, 'SBAS RDC DEM task queued.', {
+          taskType: data.job_type || 'SBAS_RDC_DEM',
+          nonBlocking: true,
+        });
+      }
       const detailData = await getSbasInsarRun(selectedRunId);
       setRunDetail(detailData);
       const runData = await listSbasInsarRuns();
@@ -810,7 +1154,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     } finally {
       setRdcDemJobLoading(false);
     }
-  }, [readOnly, selectedRunId]);
+  }, [onTaskStart, readOnly, selectedRunId]);
 
   const handlePrepareInterferograms = useCallback(async () => {
     if (!selectedRunId || readOnly) return;
@@ -845,6 +1189,12 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
         timeout_seconds: 43200,
       });
       setInterferogramJob(data);
+      if (data?.task_id) {
+        onTaskStart?.(data.task_id, 'SBAS interferogram task queued.', {
+          taskType: data.job_type || 'SBAS_INTERFEROGRAMS',
+          nonBlocking: true,
+        });
+      }
       const detailData = await getSbasInsarRun(selectedRunId);
       setRunDetail(detailData);
       const runData = await listSbasInsarRuns();
@@ -855,7 +1205,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     } finally {
       setInterferogramJobLoading(false);
     }
-  }, [readOnly, selectedRunId]);
+  }, [onTaskStart, readOnly, selectedRunId]);
 
   const handlePrepareIptaTimeseries = useCallback(async () => {
     if (!selectedRunId || readOnly) return;
@@ -888,6 +1238,12 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
         timeout_seconds: 43200,
       });
       setIptaTimeseriesJob(data);
+      if (data?.task_id) {
+        onTaskStart?.(data.task_id, 'SBAS IPTA timeseries task queued.', {
+          taskType: data.job_type || 'SBAS_IPTA_TIMESERIES',
+          nonBlocking: true,
+        });
+      }
       const detailData = await getSbasInsarRun(selectedRunId);
       setRunDetail(detailData);
       const runData = await listSbasInsarRuns();
@@ -898,13 +1254,14 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
     } finally {
       setIptaTimeseriesJobLoading(false);
     }
-  }, [readOnly, selectedRunId]);
+  }, [onTaskStart, readOnly, selectedRunId]);
 
   const selectedStack = stackCandidates.find(item => item.stack_id === selectedStackId) || null;
   const run = runDetail?.run || null;
   const runManifest = runDetail?.manifest || {};
   const workflowManifest = runDetail?.workflow_manifest || {};
   const workflowState = runDetail?.workflow_state || {};
+  const runtimeStatus = runDetail?.runtime_status || null;
   const workflowSteps = Array.isArray(workflowManifest.steps) ? workflowManifest.steps : [];
   const expertDocumentSteps = Array.isArray(workflowManifest.expert_document?.steps)
     ? workflowManifest.expert_document.steps
@@ -922,20 +1279,397 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
   const publishProductsPlan = runManifest.publish_products || null;
   const monitorProductsPlan = runManifest.monitor_point_products || null;
   const runGeographicCoverage = runDetail?.geographic_coverage || null;
-  const runPrimaryPreview = (
-    runArtifacts.find(item => item.key === 'los_rate_toward_m_per_year_hls_geo_preview_png')
-    || runArtifacts.find(item => item.key === 'los_rate_toward_mm_per_year_geo_preview_png')
-    || runArtifacts.find(item => item.key === 'los_rate_toward_mm_per_year_bmp')
-  );
-  const runSigmaPreview = (
-    runArtifacts.find(item => item.key === 'los_sigma_m_per_year_cc_geo_preview_png')
-    || runArtifacts.find(item => item.key === 'los_sigma_mm_per_year_geo_preview_png')
-    || runArtifacts.find(item => item.key === 'los_sigma_mm_per_year_bmp')
-  );
-  const runMonitorPreview = runArtifacts.find(item => item.role === 'monitor_point' && item.relative_path.endsWith('.png'));
-  const runMonitorCsv = runArtifacts.find(item => item.role === 'monitor_point' && item.relative_path.endsWith('.csv'));
   const itabApproved = itabDecision?.decision === 'approve' || runManifest.baseline_audit?.approved_for_next_stage === true;
   const itabRejected = itabDecision?.decision === 'reject';
+  const runSensorFamily = String(run?.sensor_family || runManifest.sensor_family || runManifest.profile_code || '').toUpperCase();
+  const runExecutionEnabled = run?.execution_enabled !== false && runManifest.execution_enabled !== false && !runSensorFamily.startsWith('S1');
+  const showGammaAdvancedActions = runManifest.show_advanced_actions === true;
+  const landsarCapability = (capabilities?.processors || []).find(item => item.processor_code === 'landsar_sbas') || {};
+  const landsarRun = landsarRunDetail?.run || null;
+  const landsarManifest = landsarRunDetail?.manifest || {};
+  const landsarWorkflow = landsarRunDetail?.workflow_manifest || {};
+  const landsarArtifacts = landsarRunDetail?.artifacts || [];
+  const landsarPrimaryPreview = landsarArtifacts.find(item => item.relative_path === 'publish/landsar/preview.png');
+  const landsarPrimaryTif = landsarArtifacts.find(item => item.relative_path === 'publish/landsar/los_timeseries.tif');
+  const activeGammaRun = runs.find(item => isActiveRunStatus(item.status)) || null;
+  const activeGammaRunNotice = activeGammaRun ? (
+    <div style={{ marginTop: 10, border: '1px solid #bae6fd', borderRadius: 8, background: '#f0f9ff', padding: 10, display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+      <div>
+        <div style={valueStyle}>Gamma run is active</div>
+        <div style={{ ...mutedStyle, marginTop: 4 }}>
+          {activeGammaRun.run_label || activeGammaRun.run_id}；{activeGammaRun.status}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => {
+          setSelectedRunId(activeGammaRun.run_id);
+          setProcessorMode('gamma');
+        }}
+        style={{ border: '1px solid #0369a1', borderRadius: 8, background: '#e0f2fe', color: '#0369a1', padding: '7px 11px', fontWeight: 750 }}
+      >
+        Open Runtime Status
+      </button>
+    </div>
+  ) : null;
+  const updateLandsarParam = (key, value) => {
+    setLandsarParams(current => ({ ...current, [key]: value }));
+  };
+  const processorSelector = (
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+      {[
+        ['landsar', 'LandSAR SBAS'],
+        ['gamma', 'Gamma / IPTA SBAS'],
+      ].map(([key, label]) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => setProcessorMode(key)}
+          style={{
+            border: `1px solid ${processorMode === key ? '#0f766e' : '#cbd5e1'}`,
+            borderRadius: 8,
+            background: processorMode === key ? '#ccfbf1' : '#ffffff',
+            color: processorMode === key ? '#0f766e' : '#334155',
+            padding: '8px 12px',
+            fontWeight: 750,
+            cursor: 'pointer',
+          }}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (processorMode === 'landsar') {
+    return (
+      <div style={shellStyle}>
+        <section style={sectionStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 20, color: '#0f172a' }}>SBAS-InSAR 生产</h2>
+              <div style={{ ...mutedStyle, marginTop: 6 }}>
+                LandSAR SBAS 按生产区域自动发现 LT-1 时序栈、创建 Run，并在后台导入场景后执行一体化流程。
+              </div>
+              {processorSelector}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                loadProductionRuns();
+                loadLandsarRuns();
+              }}
+              disabled={loading}
+              style={{
+                border: '1px solid #0f766e',
+                borderRadius: 8,
+                background: '#f0fdfa',
+                color: '#0f766e',
+                padding: '8px 12px',
+                fontWeight: 700,
+                cursor: loading ? 'default' : 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {loading ? '刷新中' : '刷新'}
+            </button>
+          </div>
+          <div style={{ ...metricGridStyle, marginTop: 12 }}>
+            <Metric label="处理器" value={landsarCapability.processor_code || 'landsar_sbas'} />
+            <Metric label="引擎" value={landsarCapability.engine_code || 'landsar'} />
+            <Metric label="状态" value={landsarCapability.status || '-'} />
+            <Metric label="最少景数" value={landsarCapability.min_scenes || landsarMinScenes} />
+          </div>
+          {error && (
+            <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid #fecaca', background: '#fef2f2', color: '#991b1b', fontSize: 13 }}>
+              {error}
+            </div>
+          )}
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 15, color: '#0f172a' }}>SBAS 生产区域</h3>
+              <div style={{ ...mutedStyle, marginTop: 5 }}>
+                只需要指定生产区域；系统会自动寻找满足覆盖和时序条件的 LT-1 栈。下方候选仅用于审计，不需要人工选序列。
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <span style={{ ...labelStyle, border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', background: '#fff' }}>LT-1</span>
+              <input
+                value={stackAdminRegionQuery}
+                onChange={event => {
+                  setStackAdminRegionQuery(event.target.value);
+                  setStackCandidates([]);
+                  setSelectedStackId('');
+                  setStackAudit(null);
+                }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') handleSubmitLandsarAutoWorkflow();
+                }}
+                placeholder="输入行政区，例如 牡丹江 / 洛阳"
+                style={{
+                  border: '1px solid #cbd5e1',
+                  borderRadius: 8,
+                  padding: '8px 10px',
+                  fontSize: 12,
+                  minWidth: 180,
+                }}
+              />
+              <button
+                type="button"
+                onClick={handleDiscoverStacks}
+                disabled={discovering}
+                style={{
+                  border: '1px solid #0f766e',
+                  borderRadius: 8,
+                  background: '#f0fdfa',
+                  color: '#0f766e',
+                  padding: '8px 12px',
+                  fontWeight: 700,
+                  cursor: discovering ? 'default' : 'pointer',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {discovering ? '审计中' : '审计候选'}
+              </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={handleSubmitLandsarAutoWorkflow}
+                  disabled={landsarWorkflowJobLoading || landsarSubmitLoading}
+                  style={{
+                    border: '1px solid #7c3aed',
+                    borderRadius: 8,
+                    background: '#f5f3ff',
+                    color: '#6d28d9',
+                    padding: '8px 12px',
+                    fontWeight: 700,
+                    cursor: landsarWorkflowJobLoading || landsarSubmitLoading ? 'default' : 'pointer',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {landsarWorkflowJobLoading || landsarSubmitLoading ? '提交中' : '自动创建并提交'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginTop: 12 }}>
+            <label style={{ display: 'grid', gap: 5, gridColumn: 'span 2' }}>
+              <span style={labelStyle}>DEM 文件</span>
+              <input value={landsarDemPath} onChange={event => setLandsarDemPath(event.target.value)} placeholder="D:\\DEM\\HeiLongJiang10M_DEM.tif" style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 12 }} />
+            </label>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={labelStyle}>最少景数</span>
+              <input type="number" value={landsarMinScenes} min={3} onChange={event => setLandsarMinScenes(event.target.value)} style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 12 }} />
+            </label>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={labelStyle}>干涉对方法</span>
+              <select value={landsarParams.intf_method} onChange={event => updateLandsarParam('intf_method', Number(event.target.value))} style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 12, background: '#fff' }}>
+                <option value={0}>single</option>
+                <option value={1}>prim</option>
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={labelStyle}>垂直基线</span>
+              <input type="number" value={landsarParams.perp_baseline} onChange={event => updateLandsarParam('perp_baseline', Number(event.target.value))} style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 12 }} />
+            </label>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={labelStyle}>时间基线</span>
+              <input type="number" value={landsarParams.time_baseline} onChange={event => updateLandsarParam('time_baseline', Number(event.target.value))} style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 12 }} />
+            </label>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={labelStyle}>多普勒基线</span>
+              <input type="number" value={landsarParams.doppler_baseline} onChange={event => updateLandsarParam('doppler_baseline', Number(event.target.value))} style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 12 }} />
+            </label>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={labelStyle}>方位向多视</span>
+              <input type="number" min={1} value={landsarParams.az_looks} onChange={event => updateLandsarParam('az_looks', Number(event.target.value))} style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 12 }} />
+            </label>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={labelStyle}>距离向多视</span>
+              <input type="number" min={1} value={landsarParams.rg_looks} onChange={event => updateLandsarParam('rg_looks', Number(event.target.value))} style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 12 }} />
+            </label>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={labelStyle}>DA 阈值</span>
+              <input type="number" step="0.01" min={0} max={1} value={landsarParams.da_threshold} onChange={event => updateLandsarParam('da_threshold', Number(event.target.value))} style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 12 }} />
+            </label>
+          </div>
+
+          {stackCandidates.length > 0 && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 420px) minmax(0, 1fr)', gap: 12, marginTop: 12 }}>
+              <div style={{ display: 'grid', gap: 8, maxHeight: 360, overflow: 'auto' }}>
+                {stackCandidates.map(item => {
+                  const active = item.stack_id === selectedStackId;
+                  return (
+                    <div
+                      key={item.stack_id}
+                      style={{
+                        ...buttonBaseStyle,
+                        borderColor: active ? '#1d4ed8' : '#d8dee8',
+                        background: active ? '#eff6ff' : '#ffffff',
+                        cursor: 'default',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                        <strong style={{ color: '#0f172a', fontSize: 13 }}>
+                          {item.satellite || 'LT1'} / {item.orbit_direction || '-'} / relOrbit {item.relative_orbit || '-'}
+                        </strong>
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                          <StatusBadge value={item.sensor_family || 'LT1'} />
+                          <StatusBadge value={item.status} />
+                        </div>
+                      </div>
+                      <div style={{ ...mutedStyle, marginTop: 6 }}>
+                        {item.date_start} 至 {item.date_end}，可用 {item.usable_scene_count}/{item.scene_count} 景，最大间隔 {item.max_temporal_gap_days} 天
+                      </div>
+                      <div style={{ ...mutedStyle, marginTop: 4 }}>
+                        行政区：{formatAdminRegion(item.admin_region)}；公共重叠 {formatPercent(item.common_overlap_ratio)}
+                      </div>
+                      <div style={{ ...mutedStyle, marginTop: 4 }}>
+                        影像组 {shortHash(item.scene_identity_hash)}；同日期序列 {item.same_date_sequence_candidate_count || 1} 组
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: 'grid', gap: 10 }}>
+                {selectedStack && (
+                  <>
+                    <div style={metricGridStyle}>
+                      <Metric label="平台/模式" value={`${selectedStack.satellite || '-'} / ${selectedStack.imaging_mode || '-'}`} />
+                      <Metric label="轨道方向" value={selectedStack.orbit_direction || '-'} />
+                      <Metric label="极化/接收站" value={`${selectedStack.polarization || '-'} / ${selectedStack.receiving_station || '-'}`} />
+                      <Metric label="建议参考日期" value={selectedStack.reference_date || '-'} />
+                      <Metric label="公共重叠" value={formatPercent(selectedStack.common_overlap_ratio)} />
+                      <Metric label="最低公共重叠" value={formatPercent(selectedStack.min_common_overlap_ratio)} />
+                      <Metric label="AOI 覆盖" value={formatPercent(selectedStack.aoi_overlap_ratio_mean)} />
+                  </div>
+                  {(selectedStack.blockers || []).length > 0 && (
+                    <div style={{ marginTop: 8, border: '1px solid #fecaca', borderRadius: 8, padding: 9, background: '#fef2f2', color: '#991b1b', fontSize: 12, lineHeight: 1.5 }}>
+                      Blocked: {selectedStack.blockers.join('; ')}
+                    </div>
+                  )}
+                  <StackIdentityNotice stack={selectedStack} />
+                  <SceneNamePanel stack={selectedStack} />
+                  <LocationSummaryPanel
+                    coverage={{
+                        bbox: selectedStack.bbox || selectedStack.bbox_intersection,
+                        bbox_intersection: selectedStack.bbox_intersection,
+                        center: selectedStack.center || bboxCenter(selectedStack.bbox || selectedStack.bbox_intersection),
+                        admin_region: selectedStack.admin_region,
+                        scene_bbox_count: selectedStack.usable_scene_count || selectedStack.scene_count || 0,
+                      }}
+                    />
+                  </>
+                )}
+                {stackAudit && (
+                  <div style={{ border: '1px solid #dbeafe', borderRadius: 8, padding: 10, background: '#eff6ff' }}>
+                    <div style={valueStyle}>Manifest 已生成</div>
+                    <div style={{ ...mutedStyle, marginTop: 6, wordBreak: 'break-all' }}>
+                      {stackAudit.manifest_path}
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 6 }}>
+                      状态：{stackAudit.status}；pair 数：{stackAudit.manifest?.pair_network?.pairs?.length || 0}
+                    </div>
+                    {(stackAudit.manifest?.warnings || []).length > 0 && (
+                      <div style={{ ...mutedStyle, marginTop: 6 }}>
+                        警告：{stackAudit.manifest.warnings.join('；')}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {landsarRun && (
+                  <div style={{ border: '1px solid #ddd6fe', borderRadius: 8, padding: 10, background: '#f5f3ff' }}>
+                    <div style={valueStyle}>LandSAR Run</div>
+                    <div style={{ ...mutedStyle, marginTop: 6 }}>
+                      {landsarRun.run_id}；状态：{landsarRun.status}；下一步：{landsarRun.next_stage || '-'}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {!discovering && stackCandidates.length === 0 && (
+            <div style={{ ...mutedStyle, padding: '10px 0', marginTop: 8 }}>提交后后台任务会自动发现并选择生产序列；候选审计只用于提前查看系统会如何筛选。</div>
+          )}
+          {landsarWorkflowJob?.selection_pending && (
+            <div style={{ ...mutedStyle, border: '1px solid #bbf7d0', borderRadius: 8, padding: 10, background: '#f0fdf4', marginTop: 10 }}>
+              已提交后台自动生产任务：{landsarWorkflowJob.task_id || '-'}；Job：{landsarWorkflowJob.job_id || '-'}。系统正在复用 Gamma 的生产区域栈发现与审计逻辑选择 LT-1 序列，随后自动导入并执行 LandSAR SBAS。
+            </div>
+          )}
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 15, color: '#0f172a' }}>LandSAR Run</h3>
+              <div style={{ ...mutedStyle, marginTop: 5 }}>自动生产任务会创建 Run、导入选中序列并执行 LandSAR SBAS，完成后结果会进入 SBAS-InSAR 结果目录。</div>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 420px) minmax(0, 1fr)', gap: 12, marginTop: 12 }}>
+            <div style={{ display: 'grid', gap: 8, maxHeight: 320, overflow: 'auto' }}>
+              {landsarRuns.map(item => {
+                const active = item.run_id === selectedLandsarRunId;
+                return (
+                  <button key={item.run_id} type="button" onClick={() => setSelectedLandsarRunId(item.run_id)} style={{ ...buttonBaseStyle, borderColor: active ? '#7c3aed' : '#d8dee8', background: active ? '#f5f3ff' : '#fff' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                      <strong style={{ color: '#0f172a', fontSize: 13 }}>{item.run_label || item.run_id}</strong>
+                      <StatusBadge value={item.status} />
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 6 }}>{item.scene_count || 0} 景，{item.task_count || 0} 个 Task，{item.date_start || '-'} 至 {item.date_end || '-'}</div>
+                    <div style={{ ...mutedStyle, marginTop: 4, wordBreak: 'break-all' }}>{item.run_id}</div>
+                  </button>
+                );
+              })}
+              {!loading && landsarRuns.length === 0 && <div style={{ ...mutedStyle, padding: '10px 0' }}>暂无 LandSAR SBAS Run。</div>}
+            </div>
+            <div style={{ display: 'grid', gap: 10 }}>
+              {runDetailLoading && <div style={mutedStyle}>正在加载 Run 详情...</div>}
+              {!runDetailLoading && landsarRun && (
+                <>
+                  <div style={metricGridStyle}>
+                    <Metric label="状态" value={landsarRun.status || '-'} />
+                    <Metric label="Task 数" value={landsarRun.task_count || landsarManifest.task_count || 0} />
+                    <Metric label="场景数" value={landsarRun.scene_count || landsarManifest.scene_count || 0} />
+                    <Metric label="下一阶段" value={landsarRun.next_stage || '-'} />
+                  </div>
+                  {landsarPrimaryPreview && (
+                    <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, overflow: 'hidden', background: '#0f172a', maxWidth: 520 }}>
+                      <img src={getLandsarSbasRunArtifactUrl(landsarRun.run_id, landsarPrimaryPreview.relative_path)} alt={landsarRun.run_label || landsarRun.run_id} style={{ display: 'block', width: '100%', objectFit: 'contain' }} />
+                    </div>
+                  )}
+                  {landsarWorkflowJob && landsarWorkflowJob.run_id === landsarRun.run_id && (
+                    <div style={{ ...mutedStyle, border: '1px solid #bbf7d0', borderRadius: 8, padding: 10, background: '#f0fdf4' }}>
+                      已提交后台任务：{landsarWorkflowJob.task_id}；Job：{landsarWorkflowJob.job_id}
+                    </div>
+                  )}
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {(landsarArtifacts.slice(0, 24)).map(asset => (
+                      <div key={asset.relative_path} style={{ display: 'grid', gridTemplateColumns: 'minmax(130px, 180px) minmax(0, 1fr) auto', gap: 8, alignItems: 'center', border: '1px solid #e2e8f0', borderRadius: 8, padding: '7px 9px' }}>
+                        <div style={{ fontSize: 12, fontWeight: 750, color: '#0f172a' }}>{asset.role}</div>
+                        <div style={{ ...mutedStyle, wordBreak: 'break-all' }}>{asset.relative_path}</div>
+                        <a href={getLandsarSbasRunArtifactUrl(landsarRun.run_id, asset.relative_path)} target="_blank" rel="noreferrer" style={{ color: '#1d4ed8', fontSize: 12, fontWeight: 750 }}>打开</a>
+                      </div>
+                    ))}
+                  </div>
+                  {landsarPrimaryTif && (
+                    <div style={mutedStyle}>主 GeoTIFF：{landsarPrimaryTif.relative_path}</div>
+                  )}
+                  {landsarWorkflow?.task_results && (
+                    <div style={mutedStyle}>完成 {landsarWorkflow.completed_count || 0}，失败 {landsarWorkflow.failed_count || 0}</div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div style={shellStyle}>
@@ -946,6 +1680,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
             <div style={{ ...mutedStyle, marginTop: 6 }}>
               Gamma IPTA SBAS 生产入口。当前阶段接入已验证的 LT1/Gamma 试验成果，作业提交在下一阶段开放。
             </div>
+            {processorSelector}
           </div>
           <button
             type="button"
@@ -993,6 +1728,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
             {error}
           </div>
         )}
+        {activeGammaRunNotice}
       </section>
 
       <section style={sectionStyle}>
@@ -1004,6 +1740,27 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <select
+              value={selectedSensorFamily}
+              onChange={event => {
+                setSelectedSensorFamily(event.target.value);
+                setStackCandidates([]);
+                setSelectedStackId('');
+                setStackAudit(null);
+              }}
+              style={{
+                border: '1px solid #cbd5e1',
+                borderRadius: 8,
+                padding: '8px 10px',
+                fontSize: 12,
+                minWidth: 130,
+                background: '#fff',
+                color: '#0f172a',
+              }}
+            >
+              <option value="LT1">LT-1</option>
+              <option value="S1">Sentinel-1</option>
+            </select>
             <input
               value={stackAdminRegionQuery}
               onChange={event => {
@@ -1100,7 +1857,10 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                       <strong style={{ color: '#0f172a', fontSize: 13 }}>
                         {item.satellite || 'LT1'} / {item.orbit_direction || '-'} / relOrbit {item.relative_orbit || '-'}
                       </strong>
-                      <StatusBadge value={item.status} />
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                        <StatusBadge value={item.sensor_family || selectedSensorFamily} />
+                        <StatusBadge value={item.status} />
+                      </div>
                     </div>
                     <div style={{ ...mutedStyle, marginTop: 6 }}>
                       {item.date_start} 至 {item.date_end}，可用 {item.usable_scene_count}/{item.scene_count} 景，
@@ -1111,6 +1871,9 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     </div>
                     <div style={{ ...mutedStyle, marginTop: 4 }}>
                       覆盖 {formatPercent(item.aoi_overlap_ratio_mean)}；中心点 {formatCenter(item.center)}
+                    </div>
+                    <div style={{ ...mutedStyle, marginTop: 4 }}>
+                      影像组 {shortHash(item.scene_identity_hash)}；同日期序列 {item.same_date_sequence_candidate_count || 1} 组
                     </div>
                   </button>
                 );
@@ -1125,8 +1888,16 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     <Metric label="极化/接收站" value={`${selectedStack.polarization || '-'} / ${selectedStack.receiving_station || '-'}`} />
                     <Metric label="建议参考日期" value={selectedStack.reference_date || '-'} />
                     <Metric label="公共重叠" value={formatPercent(selectedStack.common_overlap_ratio)} />
+                    <Metric label="最低公共重叠" value={formatPercent(selectedStack.min_common_overlap_ratio)} />
                     <Metric label="AOI 覆盖" value={formatPercent(selectedStack.aoi_overlap_ratio_mean)} />
                   </div>
+                  {(selectedStack.blockers || []).length > 0 && (
+                    <div style={{ marginTop: 8, border: '1px solid #fecaca', borderRadius: 8, padding: 9, background: '#fef2f2', color: '#991b1b', fontSize: 12, lineHeight: 1.5 }}>
+                      Blocked: {selectedStack.blockers.join('; ')}
+                    </div>
+                  )}
+                  <StackIdentityNotice stack={selectedStack} />
+                  <SceneNamePanel stack={selectedStack} />
                   <LocationSummaryPanel
                     coverage={{
                       bbox: selectedStack.bbox || selectedStack.bbox_intersection,
@@ -1188,6 +1959,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
           <div style={{ display: 'grid', gap: 8, maxHeight: 300, overflow: 'auto' }}>
             {runs.map(item => {
               const active = item.run_id === selectedRunId;
+              const running = isActiveRunStatus(item.status);
               return (
                 <button
                   key={item.run_id}
@@ -1208,14 +1980,17 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                   <div style={{ ...mutedStyle, marginTop: 6 }}>
                     {item.scene_count || 0} 景，{item.pair_count || 0} 对，下一步 {item.next_stage || '-'}
                   </div>
+                  <div style={{ ...mutedStyle, marginTop: 4 }}>
+                    影像组 {shortHash(item.scene_identity_hash)}
+                  </div>
+                  {running && (
+                    <div style={{ marginTop: 6, color: '#0369a1', fontSize: 12, fontWeight: 700 }}>
+                      正在运行，已自动打开右侧 Runtime Status
+                    </div>
+                  )}
                 </button>
               );
             })}
-            {runs.length > 0 && (
-              <div style={{ ...mutedStyle, padding: '2px 0 6px' }}>
-                当前 Run 列表已补充中心点行政区；筛选入口优先放在候选序列发现阶段。
-              </div>
-            )}
             {!loading && runs.length === 0 && (
               <div style={{ ...mutedStyle, padding: '10px 0' }}>
                 暂无计划 Run。先发现序列，再创建计划 Run。
@@ -1227,18 +2002,84 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
             {runDetailLoading && <div style={mutedStyle}>正在加载 Run 详情...</div>}
             {!runDetailLoading && run && (
               <>
+                <div
+                  style={{
+                    border: '1px solid #e2e8f0',
+                    borderRadius: 8,
+                    padding: 10,
+                    background: '#f8fafc',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 10,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div>
+                    <div style={valueStyle}>{run.run_label || run.run_id}</div>
+                    <div style={{ ...mutedStyle, marginTop: 4, wordBreak: 'break-all' }}>
+                      Run ID: {run.run_id}
+                    </div>
+                  </div>
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteRun(run.run_id)}
+                      disabled={runDeleteLoading}
+                      style={{
+                        border: '1px solid #b91c1c',
+                        borderRadius: 8,
+                        background: runDeleteLoading ? '#f8fafc' : '#fef2f2',
+                        color: runDeleteLoading ? '#94a3b8' : '#b91c1c',
+                        padding: '7px 11px',
+                        fontWeight: 700,
+                        cursor: runDeleteLoading ? 'default' : 'pointer',
+                      }}
+                    >
+                      {runDeleteLoading ? '删除中' : '删除 Run'}
+                    </button>
+                  )}
+                </div>
+
                 <div style={metricGridStyle}>
                   <Metric label="状态" value={run.status || '-'} />
                   <Metric label="参考日期" value={run.reference_date || '-'} />
                   <Metric label="场景/配对" value={`${run.scene_count || 0} / ${run.pair_count || 0}`} />
                   <Metric label="下一阶段" value={run.next_stage || '-'} />
+                  <Metric label="影像组" value={shortHash(run.scene_identity_hash)} />
+                  <Metric
+                    label="公共重叠"
+                    value={`${formatPercent(run.common_overlap_ratio)} / ${formatPercent(run.min_common_overlap_ratio)}`}
+                  />
                 </div>
 
-                <LocationSummaryPanel coverage={runGeographicCoverage} />
+                <SceneNamePanel stack={{ ...run, scenes: runManifest.scenes }} />
+
+                <RuntimeStatusPanel status={runtimeStatus} />
+
+                <details style={compactDetailsStyle}>
+                  <summary style={compactSummaryStyle}>空间覆盖</summary>
+                  <div style={{ marginTop: 10 }}>
+                    <LocationSummaryPanel coverage={runGeographicCoverage} />
+                  </div>
+                </details>
 
                 {!readOnly && (
                   <div style={{ border: '1px solid #bbf7d0', borderRadius: 8, padding: 10, background: '#f0fdf4' }}>
                     <div style={valueStyle}>Gamma SBAS Workflow</div>
+                    {!runExecutionEnabled && (
+                      <div style={{
+                        marginTop: 8,
+                        padding: '8px 10px',
+                        borderRadius: 8,
+                        border: '1px solid #fed7aa',
+                        background: '#fff7ed',
+                        color: '#9a3412',
+                        fontSize: 12,
+                      }}>
+                        Sentinel-1 Gamma SBAS is planning-only. Stack discovery, audit manifest and run record are enabled; Gamma execution is disabled until the S1 TOPS/SBAS scripts are verified.
+                      </div>
+                    )}
                     <div style={{ ...mutedStyle, marginTop: 6 }}>
                       专家文档目录 + manifest + WSL runner 主路径。旧分阶段执行仅作为兼容桥接。
                     </div>
@@ -1246,7 +2087,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                       <button
                         type="button"
                         onClick={handlePrepareWorkflow}
-                        disabled={workflowLoading}
+                        disabled={workflowLoading || !runExecutionEnabled}
                         style={{
                           border: '1px solid #15803d',
                           borderRadius: 8,
@@ -1254,7 +2095,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                           color: '#166534',
                           padding: '8px 12px',
                           fontWeight: 700,
-                          cursor: workflowLoading ? 'default' : 'pointer',
+                          cursor: workflowLoading || !runExecutionEnabled ? 'default' : 'pointer',
                         }}
                       >
                         {workflowLoading ? '生成中' : '生成 Workflow Manifest'}
@@ -1262,7 +2103,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                       <button
                         type="button"
                         onClick={handleSubmitWorkflowJob}
-                        disabled={workflowJobLoading}
+                        disabled={workflowJobLoading || !runExecutionEnabled}
                         style={{
                           border: '1px solid #0f766e',
                           borderRadius: 8,
@@ -1270,7 +2111,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                           color: '#0f766e',
                           padding: '8px 12px',
                           fontWeight: 700,
-                          cursor: workflowJobLoading ? 'default' : 'pointer',
+                          cursor: workflowJobLoading || !runExecutionEnabled ? 'default' : 'pointer',
                         }}
                       >
                         {workflowJobLoading ? '提交中' : '提交 Gamma SBAS Workflow'}
@@ -1282,7 +2123,9 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                       </div>
                     )}
                     {workflowSteps.length > 0 && (
-                      <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
+                      <details style={{ ...compactDetailsStyle, marginTop: 10, borderColor: '#bbf7d0' }}>
+                        <summary style={compactSummaryStyle}>Workflow steps ({workflowSteps.length})</summary>
+                        <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
                         {workflowSteps.map(step => {
                           const state = workflowStepState[step.id] || {};
                           return (
@@ -1311,13 +2154,14 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                             </div>
                           );
                         })}
-                      </div>
+                        </div>
+                      </details>
                     )}
                     {expertDocumentSteps.length > 0 && (
-                      <div style={{ marginTop: 12 }}>
-                        <div style={valueStyle}>Expert document path</div>
+                      <details style={{ ...compactDetailsStyle, marginTop: 10 }}>
+                        <summary style={compactSummaryStyle}>Expert document path ({expertDocumentSteps.length})</summary>
                         <div style={{ ...mutedStyle, marginTop: 4 }}>
-                          {expertDocumentSteps.length} sections from the LT1 Gamma SBAS expert document. Commands are shown as the acceptance checklist; implementation may be a bridge where the verified experiment already covers the same Gamma function.
+                          {expertDocumentSteps.length} sections from the LT1 Gamma SBAS expert document. Commands are used as the acceptance checklist; completed workflow steps must pass the expert command audit.
                         </div>
                         <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
                           {expertDocumentSteps.map(item => {
@@ -1361,17 +2205,17 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                             );
                           })}
                         </div>
-                      </div>
+                      </details>
                     )}
                   </div>
                 )}
 
-                {!readOnly && false && (
+                {!readOnly && showGammaAdvancedActions && (
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <button
                       type="button"
                       onClick={() => handleBaselineAudit(false)}
-                      disabled={baselineAuditLoading}
+                      disabled={baselineAuditLoading || !runExecutionEnabled}
                       style={{
                         border: '1px solid #1d4ed8',
                         borderRadius: 8,
@@ -1379,7 +2223,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         color: '#1d4ed8',
                         padding: '8px 12px',
                         fontWeight: 700,
-                        cursor: baselineAuditLoading ? 'default' : 'pointer',
+                        cursor: baselineAuditLoading || !runExecutionEnabled ? 'default' : 'pointer',
                       }}
                     >
                       {baselineAuditLoading ? '处理中' : '生成/解析 baseline audit'}
@@ -1387,7 +2231,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     <button
                       type="button"
                       onClick={() => handleBaselineAudit(true)}
-                      disabled={baselineAuditLoading}
+                      disabled={baselineAuditLoading || !runExecutionEnabled}
                       style={{
                         border: '1px solid #7c3aed',
                         borderRadius: 8,
@@ -1395,7 +2239,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         color: '#6d28d9',
                         padding: '8px 12px',
                         fontWeight: 700,
-                        cursor: baselineAuditLoading ? 'default' : 'pointer',
+                        cursor: baselineAuditLoading || !runExecutionEnabled ? 'default' : 'pointer',
                       }}
                     >
                       执行 Gamma baseline audit
@@ -1403,7 +2247,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     <button
                       type="button"
                       onClick={handlePrepareCoregistration}
-                      disabled={coregistrationLoading}
+                      disabled={coregistrationLoading || !runExecutionEnabled}
                       style={{
                         border: '1px solid #0f766e',
                         borderRadius: 8,
@@ -1411,7 +2255,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         color: '#0f766e',
                         padding: '8px 12px',
                         fontWeight: 700,
-                        cursor: coregistrationLoading ? 'default' : 'pointer',
+                        cursor: coregistrationLoading || !runExecutionEnabled ? 'default' : 'pointer',
                       }}
                     >
                       {coregistrationLoading ? '生成中' : '生成共参考配准脚本'}
@@ -1419,7 +2263,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     <button
                       type="button"
                       onClick={handleSubmitCoregistrationJob}
-                      disabled={coregistrationJobLoading}
+                      disabled={coregistrationJobLoading || !runExecutionEnabled}
                       style={{
                         border: '1px solid #b45309',
                         borderRadius: 8,
@@ -1427,7 +2271,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         color: '#92400e',
                         padding: '8px 12px',
                         fontWeight: 700,
-                        cursor: coregistrationJobLoading ? 'default' : 'pointer',
+                        cursor: coregistrationJobLoading || !runExecutionEnabled ? 'default' : 'pointer',
                       }}
                     >
                       {coregistrationJobLoading ? '提交中' : '提交共参考配准任务'}
@@ -1435,7 +2279,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     <button
                       type="button"
                       onClick={handlePrepareRdcDem}
-                      disabled={rdcDemLoading}
+                      disabled={rdcDemLoading || !runExecutionEnabled}
                       style={{
                         border: '1px solid #0369a1',
                         borderRadius: 8,
@@ -1443,7 +2287,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         color: '#0369a1',
                         padding: '8px 12px',
                         fontWeight: 700,
-                        cursor: rdcDemLoading ? 'default' : 'pointer',
+                        cursor: rdcDemLoading || !runExecutionEnabled ? 'default' : 'pointer',
                       }}
                     >
                       {rdcDemLoading ? '生成中' : '生成 RDC DEM 脚本'}
@@ -1451,7 +2295,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     <button
                       type="button"
                       onClick={handleSubmitRdcDemJob}
-                      disabled={rdcDemJobLoading}
+                      disabled={rdcDemJobLoading || !runExecutionEnabled}
                       style={{
                         border: '1px solid #4338ca',
                         borderRadius: 8,
@@ -1459,7 +2303,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         color: '#3730a3',
                         padding: '8px 12px',
                         fontWeight: 700,
-                        cursor: rdcDemJobLoading ? 'default' : 'pointer',
+                        cursor: rdcDemJobLoading || !runExecutionEnabled ? 'default' : 'pointer',
                       }}
                     >
                       {rdcDemJobLoading ? '提交中' : '提交 RDC DEM 任务'}
@@ -1467,7 +2311,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     <button
                       type="button"
                       onClick={handlePrepareInterferograms}
-                      disabled={interferogramLoading}
+                      disabled={interferogramLoading || !runExecutionEnabled}
                       style={{
                         border: '1px solid #7c2d12',
                         borderRadius: 8,
@@ -1475,7 +2319,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         color: '#7c2d12',
                         padding: '8px 12px',
                         fontWeight: 700,
-                        cursor: interferogramLoading ? 'default' : 'pointer',
+                        cursor: interferogramLoading || !runExecutionEnabled ? 'default' : 'pointer',
                       }}
                     >
                       {interferogramLoading ? '生成中' : '生成干涉图脚本'}
@@ -1483,7 +2327,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     <button
                       type="button"
                       onClick={handleSubmitInterferogramsJob}
-                      disabled={interferogramJobLoading}
+                      disabled={interferogramJobLoading || !runExecutionEnabled}
                       style={{
                         border: '1px solid #be123c',
                         borderRadius: 8,
@@ -1491,7 +2335,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         color: '#be123c',
                         padding: '8px 12px',
                         fontWeight: 700,
-                        cursor: interferogramJobLoading ? 'default' : 'pointer',
+                        cursor: interferogramJobLoading || !runExecutionEnabled ? 'default' : 'pointer',
                       }}
                     >
                       {interferogramJobLoading ? '提交中' : '提交干涉图任务'}
@@ -1499,7 +2343,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     <button
                       type="button"
                       onClick={handlePrepareIptaTimeseries}
-                      disabled={iptaTimeseriesLoading}
+                      disabled={iptaTimeseriesLoading || !runExecutionEnabled}
                       style={{
                         border: '1px solid #166534',
                         borderRadius: 8,
@@ -1507,7 +2351,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         color: '#166534',
                         padding: '8px 12px',
                         fontWeight: 700,
-                        cursor: iptaTimeseriesLoading ? 'default' : 'pointer',
+                        cursor: iptaTimeseriesLoading || !runExecutionEnabled ? 'default' : 'pointer',
                       }}
                     >
                       {iptaTimeseriesLoading ? '生成中' : '生成 IPTA 脚本'}
@@ -1515,7 +2359,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     <button
                       type="button"
                       onClick={handleSubmitIptaTimeseriesJob}
-                      disabled={iptaTimeseriesJobLoading}
+                      disabled={iptaTimeseriesJobLoading || !runExecutionEnabled}
                       style={{
                         border: '1px solid #15803d',
                         borderRadius: 8,
@@ -1523,7 +2367,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         color: '#166534',
                         padding: '8px 12px',
                         fontWeight: 700,
-                        cursor: iptaTimeseriesJobLoading ? 'default' : 'pointer',
+                        cursor: iptaTimeseriesJobLoading || !runExecutionEnabled ? 'default' : 'pointer',
                       }}
                     >
                       {iptaTimeseriesJobLoading ? '提交中' : '提交 IPTA 任务'}
@@ -1531,6 +2375,9 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                   </div>
                 )}
 
+                <details style={compactDetailsStyle}>
+                  <summary style={compactSummaryStyle}>阶段/脚本明细</summary>
+                  <div style={{ display: 'grid', gap: 10, marginTop: 10 }}>
                 <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10 }}>
                   <div style={valueStyle}>Gamma 阶段计划</div>
                   <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
@@ -1588,7 +2435,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                           <button
                             type="button"
                             onClick={() => handleItabDecision('approve')}
-                            disabled={itabDecisionLoading || itabApproved}
+                            disabled={itabDecisionLoading || itabApproved || !runExecutionEnabled}
                             style={{
                               border: '1px solid #0f766e',
                               borderRadius: 8,
@@ -1596,7 +2443,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                               color: itabApproved ? '#94a3b8' : '#0f766e',
                               padding: '7px 11px',
                               fontWeight: 700,
-                              cursor: itabDecisionLoading || itabApproved ? 'default' : 'pointer',
+                              cursor: itabDecisionLoading || itabApproved || !runExecutionEnabled ? 'default' : 'pointer',
                             }}
                           >
                             {itabApproved ? 'itab 已批准' : '批准 itab'}
@@ -1604,7 +2451,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                           <button
                             type="button"
                             onClick={() => handleItabDecision('reject')}
-                            disabled={itabDecisionLoading || itabApproved || itabRejected}
+                            disabled={itabDecisionLoading || itabApproved || itabRejected || !runExecutionEnabled}
                             style={{
                               border: '1px solid #b91c1c',
                               borderRadius: 8,
@@ -1612,7 +2459,7 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                               color: itabApproved || itabRejected ? '#94a3b8' : '#b91c1c',
                               padding: '7px 11px',
                               fontWeight: 700,
-                              cursor: itabDecisionLoading || itabApproved || itabRejected ? 'default' : 'pointer',
+                              cursor: itabDecisionLoading || itabApproved || itabRejected || !runExecutionEnabled ? 'default' : 'pointer',
                             }}
                           >
                             {itabRejected ? 'itab 已拒绝' : '拒绝 itab'}
@@ -1933,76 +2780,13 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                     )}
                   </div>
                 )}
-
-                {(runPrimaryPreview || runSigmaPreview || runMonitorPreview) && (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
-                    {runPrimaryPreview && (
-                      <div>
-                        <div style={{ ...valueStyle, marginBottom: 6 }}>LOS Velocity</div>
-                        <div style={{ ...mutedStyle, marginBottom: 6 }}>
-                          {runPrimaryPreview.key.endsWith('_geo_preview_png') ? 'WGS84 geocoded preview' : 'RDC QA preview'}
-                        </div>
-                        <img
-                          alt="Run LOS velocity toward radar positive"
-                          src={getSbasInsarRunArtifactUrl(run.run_id, runPrimaryPreview.relative_path)}
-                          style={{
-                            width: '100%',
-                            aspectRatio: '4 / 3',
-                            objectFit: 'contain',
-                            border: '1px solid #d8dee8',
-                            borderRadius: 8,
-                            background: '#f8fafc',
-                          }}
-                        />
-                      </div>
-                    )}
-                    {runSigmaPreview && (
-                      <div>
-                        <div style={{ ...valueStyle, marginBottom: 6 }}>LOS Sigma</div>
-                        <div style={{ ...mutedStyle, marginBottom: 6 }}>
-                          {runSigmaPreview.key.endsWith('_geo_preview_png') ? 'WGS84 geocoded preview' : 'RDC QA preview'}
-                        </div>
-                        <img
-                          alt="Run LOS velocity sigma"
-                          src={getSbasInsarRunArtifactUrl(run.run_id, runSigmaPreview.relative_path)}
-                          style={{
-                            width: '100%',
-                            aspectRatio: '4 / 3',
-                            objectFit: 'contain',
-                            border: '1px solid #d8dee8',
-                            borderRadius: 8,
-                            background: '#f8fafc',
-                          }}
-                        />
-                      </div>
-                    )}
-                    {runMonitorPreview && (
-                      <div>
-                        <div style={{ ...valueStyle, marginBottom: 6 }}>Monitoring Curve</div>
-                        <img
-                          alt="Run monitoring point LOS displacement time series"
-                          src={getSbasInsarRunArtifactUrl(run.run_id, runMonitorPreview.relative_path)}
-                          style={{
-                            width: '100%',
-                            aspectRatio: '4 / 3',
-                            objectFit: 'contain',
-                            border: '1px solid #d8dee8',
-                            borderRadius: 8,
-                            background: '#ffffff',
-                          }}
-                        />
-                        {runMonitorCsv && (
-                          <div style={{ ...mutedStyle, marginTop: 6 }}>
-                            <RunArtifactLink runId={run.run_id} artifact={runMonitorCsv} />
-                          </div>
-                        )}
-                      </div>
-                    )}
                   </div>
-                )}
+                </details>
 
                 {runArtifacts.length > 0 && (
-                  <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, overflow: 'hidden' }}>
+                  <details style={compactDetailsStyle}>
+                    <summary style={compactSummaryStyle}>资产下载 ({runArtifacts.length})</summary>
+                    <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, overflow: 'hidden', marginTop: 10 }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                       <thead>
                         <tr style={{ background: '#f8fafc', color: '#475569' }}>
@@ -2023,7 +2807,8 @@ export default function SbasInsarProductionPanel({ readOnly = false }) {
                         ))}
                       </tbody>
                     </table>
-                  </div>
+                    </div>
+                  </details>
                 )}
               </>
             )}

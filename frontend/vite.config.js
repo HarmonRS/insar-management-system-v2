@@ -71,6 +71,8 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: backendTarget,
           changeOrigin: true,
+          timeout: 300000,
+          proxyTimeout: 300000,
         }
       }
     }

@@ -2,8 +2,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { scanDinsarResults } from './api/dinsar';
 import { extractDispResults } from './api/idl';
-import { clearTaskLogs, deleteTaskLog, getActiveTasks, getRecentTasks, getTaskLogs } from './api/tasks';
+import { clearTaskLogs, deleteTaskLog, getTaskLogs } from './api/tasks';
 import DinsarCatalogPanel from './components/DinsarCatalogPanel';
+import useTaskMonitor from './hooks/useTaskMonitor';
 
 const PRODUCT_TASK_TYPES = [
   'SCAN_DINSAR',
@@ -55,41 +56,19 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
   const [actionError, setActionError] = useState(false);
   const [scanning, setScanning] = useState(false);
 
-  const [activeTask, setActiveTask] = useState(null);
-  const [recentTask, setRecentTask] = useState(null);
   const [taskLogs, setTaskLogs] = useState([]);
   const [taskLogsLoading, setTaskLogsLoading] = useState(false);
   const [taskLogActionLoading, setTaskLogActionLoading] = useState(false);
   const [taskLogDeletingId, setTaskLogDeletingId] = useState(null);
-  const monitoredTask = activeTask || recentTask;
+  const taskMonitor = useTaskMonitor({
+    taskTypes: PRODUCT_TASK_TYPES,
+    showRecent: true,
+    recentLimit: 1,
+  });
+  const monitoredTask = taskMonitor.latestTask;
   const logTaskId = monitoredTask?.task_id || '';
-  const showingRecentTask = !activeTask && !!recentTask;
+  const showingRecentTask = !taskMonitor.isBusy && !!monitoredTask;
   const actionTone = getMessageTone(actionMessage, actionError);
-
-  const loadActiveTask = useCallback(async () => {
-    try {
-      const data = await getActiveTasks();
-      const tasks = Array.isArray(data) ? data : (data?.tasks || []);
-      const relevantTask = tasks.find((task) => PRODUCT_TASK_TYPES.includes(task.task_type)) || null;
-      setActiveTask(relevantTask);
-      return relevantTask;
-    } catch {
-      setActiveTask(null);
-      return null;
-    }
-  }, []);
-
-  const loadRecentTask = useCallback(async () => {
-    try {
-      const tasks = await getRecentTasks(PRODUCT_TASK_TYPES, [], 1, 0);
-      const nextTask = Array.isArray(tasks) ? (tasks[0] || null) : null;
-      setRecentTask(nextTask);
-      return nextTask;
-    } catch {
-      setRecentTask(null);
-      return null;
-    }
-  }, []);
 
   const loadTaskLogs = useCallback(async (taskId) => {
     if (!taskId) {
@@ -108,17 +87,14 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
   }, []);
 
   const refreshMonitor = useCallback(async () => {
-    const [nextActiveTask, nextRecentTask] = await Promise.all([
-      loadActiveTask(),
-      loadRecentTask(),
-    ]);
-    const nextTaskId = nextActiveTask?.task_id || nextRecentTask?.task_id || '';
+    const nextRecentTasks = await taskMonitor.refreshRecentTasks();
+    const nextTaskId = taskMonitor.activeTasks[0]?.task_id || nextRecentTasks[0]?.task_id || logTaskId;
     await loadTaskLogs(nextTaskId);
-  }, [loadActiveTask, loadRecentTask, loadTaskLogs]);
+  }, [loadTaskLogs, logTaskId, taskMonitor]);
 
   useEffect(() => {
-    refreshMonitor();
-  }, [refreshMonitor]);
+    loadTaskLogs(logTaskId);
+  }, [loadTaskLogs, logTaskId]);
 
   const handleDeleteTaskLog = useCallback(async (logId) => {
     const taskId = logTaskId;

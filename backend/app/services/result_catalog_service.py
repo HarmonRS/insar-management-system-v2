@@ -340,6 +340,8 @@ def _iter_flat_result_candidates(root_dir: str) -> Iterable[Dict[str, Any]]:
 
                         if is_standard_isce2_disp_file(normalized_root, entry.path):
                             source_dir = os.path.dirname(os.path.dirname(os.path.dirname(entry.path)))
+                            run_meta = find_json_sidecar(source_dir, RUN_META_FILENAME, max_levels=0) or {}
+                            engine_code = _first_text(run_meta.get("engine_code")) or "isce2"
                             source_files = [entry.path]
                             coh_candidates = (
                                 os.path.join(source_dir, "assets", "coh", "coh.tif"),
@@ -350,7 +352,7 @@ def _iter_flat_result_candidates(root_dir: str) -> Iterable[Dict[str, Any]]:
                                     source_files.append(coh_path)
                                     break
                             yield {
-                                "engine_code": "isce2",
+                                "engine_code": engine_code,
                                 "name": os.path.splitext(entry.name)[0],
                                 "task_name": "",
                                 "source_dir": source_dir,

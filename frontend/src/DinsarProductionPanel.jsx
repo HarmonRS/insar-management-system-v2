@@ -1,8 +1,9 @@
 ﻿import React, { useCallback, useEffect, useState } from 'react';
 
 import { deleteRunLog, deleteRunRecord, getRunLog, listEngines, listRuns, previewPyintInputAssets, submitRun } from './api/dinsarProduction';
-import { clearTaskLogs, deleteTaskLog, deleteTaskRecord, getActiveTasks, getRecentTasks, getTaskLogs } from './api/tasks';
+import { clearTaskLogs, deleteTaskLog, deleteTaskRecord, getRecentTasks, getTaskLogs } from './api/tasks';
 import { formatSatelliteFamilyLabel, inferSatelliteFamilyFromResultLike } from './utils/satelliteFamily';
+import useTaskMonitor from './hooks/useTaskMonitor';
 
 const card = {
   background: '#fff',
@@ -45,8 +46,10 @@ const ENGINE_LABEL = {
 const TASK_TYPE_LABEL = {
   ISCE2_RUN: 'ISCE2生产',
   PYINT_RUN: 'PyINT/Gamma生产',
+  LANDSAR_RUN: 'LandSAR生产',
   IDL_RUN_DINSAR: 'ENVI生产',
 };
+const DINSAR_PRODUCTION_TASK_TYPES = ['ISCE2_RUN', 'PYINT_RUN', 'LANDSAR_RUN', 'IDL_RUN_DINSAR'];
 
 const STATUS_LABEL = {
   PENDING: '等待中',
@@ -111,6 +114,7 @@ function formatStatus(status) {
 function taskTypeToEngine(taskType) {
   if (taskType === 'ISCE2_RUN') return 'isce2';
   if (taskType === 'PYINT_RUN') return 'pyint';
+  if (taskType === 'LANDSAR_RUN') return 'landsar';
   if (taskType === 'IDL_RUN_DINSAR') return 'sarscape';
   return '';
 }
@@ -191,7 +195,7 @@ function mergeRunRows(productionRuns, recentTasks, limit = null) {
   );
 
   (recentTasks || []).forEach(task => {
-    if (!['ISCE2_RUN', 'PYINT_RUN', 'IDL_RUN_DINSAR'].includes(task?.task_type)) {
+    if (!DINSAR_PRODUCTION_TASK_TYPES.includes(task?.task_type)) {
       return;
     }
     const taskId = String(task?.task_id || '').trim();
@@ -428,6 +432,7 @@ function ParamField({ name, schema, value, disabled, onChange }) {
   const description = schema.description || '';
   const recommendation = schema.recommendation || '';
   const isReadonly = !!schema.readonly;
+  const readonlyLabel = schema.readonly_label || '固定值';
   const inputStyle = {
     width: '100%',
     padding: '5px 8px',
@@ -441,29 +446,43 @@ function ParamField({ name, schema, value, disabled, onChange }) {
 
   if (schema.type === 'boolean') {
     return (
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#0f172a' }}>
-        <input
-          type="checkbox"
-          checked={!!value}
-          disabled={disabled || isReadonly}
-          onChange={event => onChange(name, event.target.checked)}
-        />
-        <span>{label}</span>
-        {isReadonly && (
-          <span
-            style={{
-              padding: '1px 6px',
-              borderRadius: 999,
-              background: '#e2e8f0',
-              color: '#475569',
-              fontSize: 11,
-            }}
-          >
-            固定值
-          </span>
-        )}
-        {description && <span style={{ color: '#64748b' }}>{description}</span>}
-      </label>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 4,
+          minWidth: 220,
+          flex: '1 1 260px',
+          fontSize: 12,
+          color: isReadonly ? '#475569' : '#0f172a',
+        }}
+      >
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={!!value}
+            disabled={disabled || isReadonly}
+            onChange={event => onChange(name, event.target.checked)}
+          />
+          <span>{label}</span>
+          {isReadonly && (
+            <span
+              style={{
+                padding: '1px 6px',
+                borderRadius: 999,
+                background: '#e2e8f0',
+                color: '#475569',
+                fontSize: 11,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {readonlyLabel}
+            </span>
+          )}
+        </label>
+        {description && <div style={{ color: '#64748b', lineHeight: 1.45 }}>{description}</div>}
+        {recommendation && <div style={{ color: '#2563eb', lineHeight: 1.45 }}>推荐：{recommendation}</div>}
+      </div>
     );
   }
 
@@ -483,7 +502,7 @@ function ParamField({ name, schema, value, disabled, onChange }) {
                 fontSize: 11,
               }}
             >
-              固定值
+              {readonlyLabel}
             </span>
           )}
         </div>
@@ -517,7 +536,7 @@ function ParamField({ name, schema, value, disabled, onChange }) {
               fontSize: 11,
             }}
           >
-            固定值
+            {readonlyLabel}
           </span>
         )}
       </div>
@@ -568,8 +587,6 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     loading: false,
   });
   const [runLogDeletingId, setRunLogDeletingId] = useState('');
-  const [activeTask, setActiveTask] = useState(null);
-  const [recentTask, setRecentTask] = useState(null);
   const [taskLogs, setTaskLogs] = useState([]);
   const [taskLogsLoading, setTaskLogsLoading] = useState(false);
   const [taskLogActionLoading, setTaskLogActionLoading] = useState(false);
@@ -583,12 +600,19 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const currentDefaultTimeoutSec = Number(currentEngineObj?.default_timeout_seconds || 0) || 0;
   const currentParamHelpText = selectedEngine === 'pyint'
     ? 'PyINT/Gamma 会按目标网格尺寸自动换算多视；新增 Gamma 残余重去平在解缠后执行 rascc_mask/quad_fit/quad_sub，再导出 native 和标准 GeoTIFF。'
-    : selectedEngine === 'isce2'
+    : selectedEngine === 'landsar'
+      ? 'LandSAR 当前使用已跑通的稳定参数。GACOS 大气相位改正需要外部大气延迟文件，未配置文件前不可启用；垂直向形变为可选输出，默认关闭。'
+      : selectedEngine === 'isce2'
       ? '这些参数现在按执行、交付、增强分组展示。结果异常时，优先尝试关闭增强项，再回看基础几何和配对质量。'
       : '这些参数影响当前引擎的生产模板。建议先使用默认值，只有在结果边界、噪声或几何表现异常时再逐项调整。';
   const pyintPreviewBlocksSubmit = selectedEngine === 'pyint' && pyintPreview && pyintPreview.allow_submit === false;
+  const taskMonitor = useTaskMonitor({
+    taskTypes: DINSAR_PRODUCTION_TASK_TYPES,
+    showRecent: true,
+    recentLimit: 1,
+  });
   const latestRunWithTask = runs.find(run => run?.task_id) || null;
-  const monitoredTask = activeTask || recentTask || (
+  const monitoredTask = taskMonitor.latestTask || (
     latestRunWithTask
       ? {
         task_id: latestRunWithTask.task_id,
@@ -597,7 +621,9 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             ? 'ISCE2_RUN'
             : latestRunWithTask.engine === 'pyint'
               ? 'PYINT_RUN'
-              : 'IDL_RUN_DINSAR',
+              : latestRunWithTask.engine === 'landsar'
+                ? 'LANDSAR_RUN'
+                : 'IDL_RUN_DINSAR',
         status: latestRunWithTask.raw_status || latestRunWithTask.status,
         progress: latestRunWithTask.raw_status === 'COMPLETED' || latestRunWithTask.status === 'success' ? 100 : null,
         message: latestRunWithTask.message || '最近一次任务',
@@ -605,7 +631,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
       : null
   );
   const logTaskId = monitoredTask?.task_id || '';
-  const showingRecentTask = !activeTask && !!monitoredTask;
+  const showingRecentTask = !taskMonitor.isBusy && !!monitoredTask;
 
   const loadEngines = useCallback(async () => {
     setEnginesLoading(true);
@@ -640,7 +666,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
         const allTasks = [];
         let offset = 0;
         while (true) {
-          const data = await getRecentTasks(['ISCE2_RUN', 'PYINT_RUN', 'IDL_RUN_DINSAR'], [], TASK_HISTORY_PAGE_SIZE, offset);
+          const data = await getRecentTasks(DINSAR_PRODUCTION_TASK_TYPES, [], TASK_HISTORY_PAGE_SIZE, offset);
           const pageTasks = Array.isArray(data) ? data : (data?.tasks || []);
           allTasks.push(...pageTasks);
           if (pageTasks.length < TASK_HISTORY_PAGE_SIZE) break;
@@ -660,32 +686,6 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
       return [];
     } finally {
       if (!silent) setRunsLoading(false);
-    }
-  }, []);
-
-  const loadActiveTask = useCallback(async () => {
-    try {
-      const data = await getActiveTasks();
-      const tasks = Array.isArray(data) ? data : (data?.tasks || []);
-      const relevantTask = tasks.find(task => ['ISCE2_RUN', 'PYINT_RUN', 'IDL_RUN_DINSAR'].includes(task.task_type)) || null;
-      setActiveTask(relevantTask);
-      return relevantTask;
-    } catch {
-      setActiveTask(null);
-      return null;
-    }
-  }, []);
-
-  const loadRecentTask = useCallback(async () => {
-    try {
-      const data = await getRecentTasks(['ISCE2_RUN', 'PYINT_RUN', 'IDL_RUN_DINSAR'], [], 1, 0);
-      const tasks = Array.isArray(data) ? data : (data?.tasks || []);
-      const relevantTask = tasks[0] || null;
-      setRecentTask(relevantTask);
-      return relevantTask;
-    } catch {
-      setRecentTask(null);
-      return null;
     }
   }, []);
 
@@ -744,18 +744,17 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
 
   const refreshMonitor = useCallback(async (options = {}) => {
     const silent = !!options.silent;
-    const [nextRuns, nextActiveTask, nextRecentTask] = await Promise.all([
+    const [nextRuns, nextRecentTasks] = await Promise.all([
       loadRuns({ silent }),
-      loadActiveTask(),
-      loadRecentTask(),
+      taskMonitor.refreshRecentTasks(),
     ]);
     const fallbackTaskId =
-      nextActiveTask?.task_id
-      || nextRecentTask?.task_id
+      taskMonitor.activeTasks[0]?.task_id
+      || nextRecentTasks[0]?.task_id
       || nextRuns.find(run => run?.task_id)?.task_id
       || '';
     await loadTaskLogs(fallbackTaskId, { silent });
-  }, [loadActiveTask, loadRecentTask, loadRuns, loadTaskLogs]);
+  }, [loadRuns, loadTaskLogs, taskMonitor]);
 
   useEffect(() => {
     loadEngines();
@@ -763,12 +762,12 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   }, [loadEngines, refreshMonitor]);
 
   useEffect(() => {
-    const intervalMs = activeTask ? 5000 : 15000;
+    const intervalMs = taskMonitor.isBusy ? 5000 : 15000;
     const timer = window.setInterval(() => {
       refreshMonitor({ silent: true });
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [activeTask, refreshMonitor]);
+  }, [taskMonitor.isBusy, refreshMonitor]);
 
   useEffect(() => {
     if (currentProfiles.length > 0) {

@@ -45,6 +45,7 @@ from .pairing_state_service import pairing_state_service
 
 PAIRING_POLICY_VERSION = "2026.05.raw-source.v2"
 PAIRING_WARNING_CANDIDATE_THRESHOLD = 3000
+PAIRING_ALL_STRATEGY_HARD_LIMIT = 20000
 logger = logging.getLogger(__name__)
 
 
@@ -143,6 +144,12 @@ class SpatialService:
             aoi_wkt=aoi_wkt,
             require_orbit_data=require_orbit_data,
         )
+
+        if effective_params.strategy == "all" and len(candidate_pool) > PAIRING_ALL_STRATEGY_HARD_LIMIT:
+            raise RuntimeError(
+                f"全部配对命中 {len(candidate_pool)} 条候选边，超过系统一次性返回上限 "
+                f"{PAIRING_ALL_STRATEGY_HARD_LIMIT}。请改用 SBAS/Sequential 策略，或收紧 AOI、日期范围、重叠率。"
+            )
 
         if len(candidate_pool) > PAIRING_WARNING_CANDIDATE_THRESHOLD:
             warnings.append(

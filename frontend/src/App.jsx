@@ -11,6 +11,7 @@ import AppSidePanel from './components/app/AppSidePanel';
 import AppStatusHeader from './components/app/AppStatusHeader';
 import { useI18n } from './i18n/I18nContext';
 import apiClient from './api/client';
+import { getSbasInsarProductAssetUrl } from './api/sbasInsarProducts';
 import {
     useAuthStore, useTaskStore, useUiStore, useRadarStore,
     useDinsarStore, useBatchStore, usePairingStore, useHazardStore, useMapStore,
@@ -47,6 +48,138 @@ import { DINSAR_ENGINE_ALL, getDinsarEngineMeta } from './utils/dinsarEngines';
 
 const NATIONAL_BOUNDARY_STATIC_URL = '/geojson/\u5168\u56fd\u884c\u653f\u533a.geojson';
 
+const toFiniteNumber = (value) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+};
+
+const formatMapNumber = (value, digits = 2) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric.toFixed(digits) : '-';
+};
+
+const getSbasProductBounds = (product) => {
+    const coverage = product?.geographic_coverage || {};
+    const bbox = coverage.bbox || {};
+    const minLon = toFiniteNumber(product?.min_lon ?? bbox.min_lon);
+    const minLat = toFiniteNumber(product?.min_lat ?? bbox.min_lat);
+    const maxLon = toFiniteNumber(product?.max_lon ?? bbox.max_lon);
+    const maxLat = toFiniteNumber(product?.max_lat ?? bbox.max_lat);
+    if ([minLon, minLat, maxLon, maxLat].some(value => value === null)) return null;
+    if (minLon >= maxLon || minLat >= maxLat) return null;
+    return [[minLat, minLon], [maxLat, maxLon]];
+};
+
+const findSbasAsset = (detail, roles) => {
+    const roleSet = new Set(roles);
+    return (detail?.assets || []).find(asset => roleSet.has(asset.asset_role) && asset.exists_flag);
+};
+
+const sbasAssetCacheKey = (asset) => (
+    [asset?.id, asset?.file_size, asset?.updated_at || asset?.created_at || asset?.relative_path]
+        .filter(Boolean)
+        .join(':')
+);
+
+const sbasRateColor = (rate) => {
+    const numeric = Number(rate);
+    if (!Number.isFinite(numeric)) return '#64748b';
+    if (numeric <= -30) return '#1d4ed8';
+    if (numeric < -5) return '#38bdf8';
+    if (numeric <= 5) return '#16a34a';
+    if (numeric < 30) return '#f59e0b';
+    return '#dc2626';
+};
+
+const SBAS_OVERVIEW_COLORS = ['#1d4ed8', '#dc2626', '#059669', '#7c3aed', '#d97706', '#0f766e'];
+
+const normalizeSbasDisplacements = (rows) => (Array.isArray(rows) ? rows : [])
+    .map((item) => {
+        const date = String(item?.date || '').trim();
+        const time = Date.parse(`${date}T00:00:00Z`);
+        const displacement = Number(item?.displacement_mm ?? item?.displacement ?? item?.value);
+        if (!date || !Number.isFinite(time) || !Number.isFinite(displacement)) return null;
+        return { date, time, displacement };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.time - right.time);
+
+const buildSbasSparklineSvg = (rows) => {
+    const values = normalizeSbasDisplacements(rows);
+    if (values.length < 2) return '';
+    const width = 220;
+    const height = 72;
+    const padX = 12;
+    const padY = 10;
+    const minTime = Math.min(...values.map(item => item.time));
+    const maxTime = Math.max(...values.map(item => item.time));
+    const minValue = Math.min(...values.map(item => item.displacement), 0);
+    const maxValue = Math.max(...values.map(item => item.displacement), 0);
+    const timeSpan = Math.max(1, maxTime - minTime);
+    const valueSpan = Math.max(1e-9, maxValue - minValue);
+    const xScale = (time) => padX + ((time - minTime) / timeSpan) * (width - padX * 2);
+    const yScale = (value) => height - padY - ((value - minValue) / valueSpan) * (height - padY * 2);
+    const points = values.map(item => `${xScale(item.time).toFixed(1)},${yScale(item.displacement).toFixed(1)}`).join(' ');
+    const zeroY = yScale(0).toFixed(1);
+    const minLabel = escapeHtml(formatMapNumber(minValue, 1));
+    const maxLabel = escapeHtml(formatMapNumber(maxValue, 1));
+    return `
+        <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="SBAS displacement sparkline">
+            <rect x="0" y="0" width="${width}" height="${height}" fill="#f8fafc" rx="6"></rect>
+            <line x1="${padX}" x2="${width - padX}" y1="${zeroY}" y2="${zeroY}" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3 3"></line>
+            <polyline points="${points}" fill="none" stroke="#1d4ed8" stroke-width="2"></polyline>
+            ${values.map(item => `<circle cx="${xScale(item.time).toFixed(1)}" cy="${yScale(item.displacement).toFixed(1)}" r="2.4" fill="#1d4ed8"></circle>`).join('')}
+            <text x="${padX}" y="10" font-size="9" fill="#64748b">${maxLabel} mm</text>
+            <text x="${padX}" y="${height - 4}" font-size="9" fill="#64748b">${minLabel} mm</text>
+        </svg>
+    `;
+};
+
+const buildSbasPointPopupHtml = (point, options = {}) => {
+    const matched = point?.matched || {};
+    const pointId = escapeHtml(point?.point_id || options.pointId || 'SBAS point');
+    const label = escapeHtml(point?.selection_label || options.label || pointId);
+    const rate = point?.deformation_rate_mm_per_year ?? point?.los_rate_mm_per_year ?? matched.los_rate_mm_per_year;
+    const lon = point?.lon ?? matched.lon;
+    const lat = point?.lat ?? matched.lat;
+    const nearestNote = matched.used_nearest
+        ? `<div><strong>匹配:</strong> 最近有效像元，距离 ${escapeHtml(formatMapNumber(matched.distance_m, 1))} m</div>`
+        : '';
+    return `
+        <div class="sbas-popup" style="min-width:240px">
+            <div style="font-weight:800;margin-bottom:6px">${label}</div>
+            <div><strong>ID:</strong> <span class="mono">${pointId}</span></div>
+            <div><strong>经纬度:</strong> ${escapeHtml(formatMapNumber(lon, 6))}, ${escapeHtml(formatMapNumber(lat, 6))}</div>
+            <div><strong>LOS速率:</strong> ${escapeHtml(formatMapNumber(rate, 2))} mm/yr</div>
+            ${nearestNote}
+            <div style="margin-top:8px">${buildSbasSparklineSvg(point?.displacements || options.displacements || [])}</div>
+        </div>
+    `;
+};
+
+const buildSbasOverviewPopupHtml = (product) => {
+    const title = escapeHtml(product?.display_name || product?.stack_key || product?.run_key || `SBAS #${product?.id ?? '-'}`);
+    const dateStart = escapeHtml(String(product?.date_start || '-').slice(0, 10));
+    const dateEnd = escapeHtml(String(product?.date_end || '-').slice(0, 10));
+    const stackSize = escapeHtml(product?.stack_size ?? product?.stack_dates?.length ?? '-');
+    const status = escapeHtml(product?.status || '-');
+    const health = escapeHtml(product?.health_status || '-');
+    const runKey = escapeHtml(product?.run_key || '-');
+    const stackKey = escapeHtml(product?.stack_key || '-');
+    const region = product?.admin_region?.display_name || product?.admin_region?.name || product?.admin_region?.tree_id || '-';
+    return `
+        <div class="sbas-popup" style="min-width:260px">
+            <div style="font-weight:850;margin-bottom:7px">${title}</div>
+            <div><strong>时间:</strong> ${dateStart} → ${dateEnd}</div>
+            <div><strong>栈期数:</strong> ${stackSize}</div>
+            <div><strong>状态:</strong> ${status} / ${health}</div>
+            <div><strong>区域:</strong> ${escapeHtml(region)}</div>
+            <div><strong>stack:</strong> <span class="mono">${stackKey}</span></div>
+            <div><strong>run:</strong> <span class="mono">${runKey}</span></div>
+        </div>
+    `;
+};
+
 function App() {
     const { language, setLanguage } = useI18n();
 
@@ -77,21 +210,16 @@ function App() {
         setHealthError: state.setHealthError,
     })));
     const {
-        activeTasks, setActiveTasks, isGlobalLocked, setIsGlobalLocked,
+        activeTasks, setActiveTasks,
         isCheckingTasks, setIsCheckingTasks,
         pendingTaskIds, setPendingTaskIds,
-        nonBlockingTaskIds, setNonBlockingTaskIds,
     } = useTaskStore(useShallow((state) => ({
         activeTasks: state.activeTasks,
         setActiveTasks: state.setActiveTasks,
-        isGlobalLocked: state.isGlobalLocked,
-        setIsGlobalLocked: state.setIsGlobalLocked,
         isCheckingTasks: state.isCheckingTasks,
         setIsCheckingTasks: state.setIsCheckingTasks,
         pendingTaskIds: state.pendingTaskIds,
         setPendingTaskIds: state.setPendingTaskIds,
-        nonBlockingTaskIds: state.nonBlockingTaskIds,
-        setNonBlockingTaskIds: state.setNonBlockingTaskIds,
     })));
     const {
         leftPanelTab, setLeftPanelTab, leftPanelWidth, setLeftPanelWidth,
@@ -295,6 +423,7 @@ function App() {
     const foundPairsRef = useRef(foundPairs);
     const hazardLayersRef = useRef({});
     const dinsarResultLayersRef = useRef({});
+    const sbasAnalysisLayersRef = useRef({});
     const resizeStateRef = useRef({ side: null, startX: 0, startLeft: 0, startRight: 0 });
     const allDataRef = useRef(allData);
     const dinsarResultsRef = useRef(dinsarResults);
@@ -324,6 +453,7 @@ function App() {
         activeLayersRef: activeLayersRef.current,
         hazardLayersGroupRef: hazardLayersGroupRef.current,
         dinsarResultLayersRef: dinsarResultLayersRef.current,
+        sbasAnalysisLayersRef: sbasAnalysisLayersRef.current,
         waterSceneLayersRef: waterSceneLayersRef.current,
         radarPreviewLayersRef: radarPreviewLayersRef.current,
         pairLayersRef: pairLayersRef.current,
@@ -386,12 +516,8 @@ function App() {
             addLog('warn', '当前账号为只读用户，无法执行写操作。');
             return false;
         }
-        if (isCheckingTasks || isGlobalLocked) {
-            addLog('warn', '系统正在处理任务，请稍候...');
-            return false;
-        }
         return true;
-    }, [addLog, isAdmin, isCheckingTasks, isGlobalLocked]);
+    }, [addLog, isAdmin]);
 
     const clearRadarMapLayers = () => {
         cancelMapBatch();
@@ -411,6 +537,16 @@ function App() {
         Object.values(radarPreviewLayersRef.current).forEach(layer => layer.remove());
         radarPreviewLayersRef.current = {};
     };
+
+    const clearSbasAnalysisLayers = useCallback(() => {
+        Object.values(sbasAnalysisLayersRef.current).forEach((entry) => {
+            const layer = entry?.layer || entry;
+            if (layer?.remove) {
+                layer.remove();
+            }
+        });
+        sbasAnalysisLayersRef.current = {};
+    }, []);
 
     const clearRadarSearchResults = (options = {}) => {
         const nextLimit = Math.max(
@@ -613,7 +749,6 @@ function App() {
         setHasRadarSearched,
         setCurrentUser,
         setAuthChecked,
-        setIsGlobalLocked,
         setPendingTaskIds,
         setLicenseLoading,
         setLicenseStatus,
@@ -798,11 +933,11 @@ function App() {
     handleTaskCompletionRef.current = handleTaskCompletion;
 
     const {
-        forceUnlockPwd,
-        setForceUnlockPwd,
-        showForceUnlock,
-        setShowForceUnlock,
-        handleForceUnlock,
+        cancelTaskPwd,
+        setCancelTaskPwd,
+        showCancelTask,
+        setShowCancelTask,
+        handleCancelActiveTasks,
     } = useGlobalTaskControl({
         currentUser,
         licenseOk: !!licenseStatus?.ok,
@@ -810,14 +945,8 @@ function App() {
         setActiveTasks,
         pendingTaskIds,
         setPendingTaskIds,
-        nonBlockingTaskIds,
-        setNonBlockingTaskIds,
-        isGlobalLocked,
-        setIsGlobalLocked,
         setIsCheckingTasks,
         handleTaskCompletionRef,
-        initializeAppDataRef,
-        addLog,
     });
 
     const fetchRadarPreviewStatus = useCallback(async (itemId, options = {}) => {
@@ -839,8 +968,7 @@ function App() {
         if (!ensureCanOperate()) return;
         if (rebuildingPreviewIds[itemId]) return;
 
-        // 立即锁定前端
-        handleTaskStart(null, `正在生成影像 ${itemId} 的预览缓存...`);
+        addLog('info', `正在生成影像 ${itemId} 的预览缓存...`);
 
         setRebuildingPreviewIds(prev => ({ ...prev, [itemId]: true }));
         try {
@@ -1196,6 +1324,219 @@ function App() {
             }
         }
     }, [addLog, buildDinsarResultPopupHtml, showDates, updateLayerTooltip]);
+
+    const flyToSbasProduct = useCallback((product) => {
+        if (!mapRef.current || !product) return false;
+        const bounds = getSbasProductBounds(product);
+        if (!bounds) {
+            addLog('warn', '当前 SBAS 产品没有可定位的地理范围。');
+            return false;
+        }
+        mapRef.current.flyToBounds(L.latLngBounds(bounds), { padding: [45, 45], maxZoom: 12 });
+        return true;
+    }, [addLog]);
+
+    const toggleSbasRateLayer = useCallback((detail, shouldBeVisible, opacity = 0.78) => {
+        if (!mapRef.current || !detail) return false;
+        const layerKey = `rate:${detail.id}`;
+        const existing = sbasAnalysisLayersRef.current[layerKey]?.layer;
+        if (!shouldBeVisible) {
+            if (existing) existing.remove();
+            delete sbasAnalysisLayersRef.current[layerKey];
+            return true;
+        }
+
+        const asset = findSbasAsset(detail, ['primary_geocoded_preview', 'primary_rate_color_preview']);
+        const bounds = getSbasProductBounds(detail);
+        if (!asset || !bounds) {
+            addLog('warn', 'SBAS 产品缺少 LOS 速率图或地理范围，无法叠加到地图。');
+            return false;
+        }
+        if (existing) {
+            if (!mapRef.current.hasLayer(existing)) existing.addTo(mapRef.current);
+            existing.setOpacity(opacity);
+            flyToSbasProduct(detail);
+            return true;
+        }
+
+        const imageUrl = getSbasInsarProductAssetUrl(detail.id, asset.id, sbasAssetCacheKey(asset));
+        const layer = L.imageOverlay(imageUrl, bounds, {
+            opacity,
+            interactive: true,
+            crossOrigin: true,
+        }).addTo(mapRef.current);
+        layer.bindPopup(
+            `<div class="sbas-popup"><div style="font-weight:800;margin-bottom:6px">${escapeHtml(detail.display_name || detail.run_key || 'Gamma SBAS')}</div>` +
+            `<div><strong>图层:</strong> LOS 速率图</div>` +
+            `<div><strong>色表:</strong> ${escapeHtml(detail.color_policy?.colormap || 'Gamma hls.cm')}</div>` +
+            `<div><strong>范围:</strong> ${escapeHtml((detail.color_policy?.display_range_mm_per_year || [-80, 80]).join(' 到 '))} mm/yr</div></div>`,
+            { maxWidth: 340 },
+        );
+        layer.on('load', () => addLog('success', `SBAS LOS 速率图已加载：${detail.display_name || detail.run_key || detail.id}`));
+        layer.on('error', () => {
+            addLog('error', 'SBAS LOS 速率图加载失败。');
+            layer.remove();
+            delete sbasAnalysisLayersRef.current[layerKey];
+        });
+        sbasAnalysisLayersRef.current[layerKey] = { layer, kind: 'rate', productId: detail.id };
+        flyToSbasProduct(detail);
+        return true;
+    }, [addLog, flyToSbasProduct]);
+
+    const updateSbasRateOpacity = useCallback((opacity) => {
+        Object.values(sbasAnalysisLayersRef.current).forEach((entry) => {
+            if (entry?.kind === 'rate' && entry.layer?.setOpacity) {
+                entry.layer.setOpacity(opacity);
+            }
+        });
+    }, []);
+
+    const toggleSbasProductOverview = useCallback((products, shouldBeVisible) => {
+        if (!mapRef.current) return false;
+        const layerKey = 'overview';
+        const existing = sbasAnalysisLayersRef.current[layerKey]?.layer;
+        if (!shouldBeVisible) {
+            if (existing) existing.remove();
+            delete sbasAnalysisLayersRef.current[layerKey];
+            return true;
+        }
+        if (existing) {
+            if (!mapRef.current.hasLayer(existing)) existing.addTo(mapRef.current);
+            const existingBounds = sbasAnalysisLayersRef.current[layerKey]?.bounds;
+            if (existingBounds) {
+                mapRef.current.flyToBounds(existingBounds, { padding: [55, 55], maxZoom: 10 });
+            }
+            return true;
+        }
+
+        const validProducts = (Array.isArray(products) ? products : [])
+            .map((product) => ({ product, bounds: getSbasProductBounds(product) }))
+            .filter(item => item.bounds);
+        if (!validProducts.length) {
+            addLog('warn', '当前没有可绘制范围的 SBAS 产品。');
+            return false;
+        }
+
+        const group = L.layerGroup();
+        let allBounds = null;
+        validProducts.forEach(({ product, bounds }, index) => {
+            const color = SBAS_OVERVIEW_COLORS[index % SBAS_OVERVIEW_COLORS.length] || '#1d4ed8';
+            const rectangle = L.rectangle(bounds, {
+                color,
+                weight: 2,
+                opacity: 0.95,
+                fillColor: color,
+                fillOpacity: 0.08,
+                dashArray: index % 2 === 0 ? undefined : '6 4',
+                interactive: true,
+            });
+            rectangle.bindPopup(buildSbasOverviewPopupHtml(product), { maxWidth: 360 });
+            rectangle.bindTooltip(
+                `${product.display_name || product.stack_key || product.run_key || product.id}<br>${String(product.date_start || '-').slice(0, 10)} → ${String(product.date_end || '-').slice(0, 10)}`,
+                { sticky: true, direction: 'top', opacity: 0.92 },
+            );
+            rectangle.addTo(group);
+            const nextBounds = L.latLngBounds(bounds);
+            allBounds = allBounds ? allBounds.extend(nextBounds) : nextBounds;
+        });
+        group.addTo(mapRef.current);
+        sbasAnalysisLayersRef.current[layerKey] = { layer: group, kind: 'overview', bounds: allBounds };
+        if (allBounds) {
+            mapRef.current.flyToBounds(allBounds, { padding: [55, 55], maxZoom: 10 });
+        }
+        addLog('info', `已显示 ${validProducts.length} 个 SBAS 产品范围和时间。`);
+        return true;
+    }, [addLog]);
+
+    const toggleSbasMonitorPoints = useCallback((detail, shouldBeVisible) => {
+        if (!mapRef.current || !detail) return false;
+        const layerKey = `points:${detail.id}`;
+        const existing = sbasAnalysisLayersRef.current[layerKey]?.layer;
+        if (!shouldBeVisible) {
+            if (existing) existing.remove();
+            delete sbasAnalysisLayersRef.current[layerKey];
+            return true;
+        }
+        if (existing) {
+            if (!mapRef.current.hasLayer(existing)) existing.addTo(mapRef.current);
+            flyToSbasProduct(detail);
+            return true;
+        }
+        const points = (detail.monitor_points?.monitor_points || [])
+            .filter(point => Number.isFinite(Number(point.lat)) && Number.isFinite(Number(point.lon)));
+        if (!points.length) {
+            addLog('warn', '当前 SBAS 监测点没有 WGS84 坐标，请重新注册资产后再显示。');
+            return false;
+        }
+        const group = L.layerGroup();
+        const latLngs = [];
+        points.forEach((point) => {
+            const lat = Number(point.lat);
+            const lon = Number(point.lon);
+            const rate = Number(point.deformation_rate_mm_per_year);
+            const color = sbasRateColor(rate);
+            const marker = L.circleMarker([lat, lon], {
+                radius: 7,
+                color: '#ffffff',
+                weight: 2,
+                fillColor: color,
+                fillOpacity: 0.92,
+                interactive: true,
+            });
+            marker.bindPopup(buildSbasPointPopupHtml(point), { maxWidth: 320 });
+            marker.addTo(group);
+            latLngs.push([lat, lon]);
+        });
+        group.addTo(mapRef.current);
+        sbasAnalysisLayersRef.current[layerKey] = { layer: group, kind: 'points', productId: detail.id };
+        if (latLngs.length) {
+            mapRef.current.flyToBounds(L.latLngBounds(latLngs), { padding: [55, 55], maxZoom: 13 });
+        }
+        addLog('info', `已显示 ${points.length} 个 SBAS 监测点。`);
+        return true;
+    }, [addLog, flyToSbasProduct]);
+
+    const showSbasQueryPoint = useCallback((result, detail) => {
+        if (!mapRef.current || !result?.matched) return false;
+        const matched = result.matched;
+        const lat = Number(matched.lat);
+        const lon = Number(matched.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+        const layerKey = 'query';
+        const existing = sbasAnalysisLayersRef.current[layerKey]?.layer;
+        if (existing) existing.remove();
+        const marker = L.circleMarker([lat, lon], {
+            radius: 8,
+            color: '#111827',
+            weight: 2,
+            fillColor: matched.used_nearest ? '#f59e0b' : '#22c55e',
+            fillOpacity: 0.95,
+            interactive: true,
+        }).addTo(mapRef.current);
+        const point = {
+            point_id: matched.used_nearest ? 'query_nearest' : 'query_point',
+            selection_label: matched.used_nearest ? '查询点最近有效像元' : '查询点',
+            deformation_rate_mm_per_year: matched.los_rate_mm_per_year,
+            displacements: result.displacements || [],
+            matched,
+            lon,
+            lat,
+        };
+        marker.bindPopup(buildSbasPointPopupHtml(point), { maxWidth: 320 }).openPopup();
+        sbasAnalysisLayersRef.current[layerKey] = { layer: marker, kind: 'query', productId: detail?.id };
+        mapRef.current.flyTo([lat, lon], Math.max(mapRef.current.getZoom(), 12), { animate: true });
+        return true;
+    }, []);
+
+    const sbasAnalysisPanel = {
+        onToggleRateLayer: toggleSbasRateLayer,
+        onRateOpacityChange: updateSbasRateOpacity,
+        onToggleMonitorPoints: toggleSbasMonitorPoints,
+        onToggleProductOverview: toggleSbasProductOverview,
+        onFlyToProduct: flyToSbasProduct,
+        onShowQueryPoint: showSbasQueryPoint,
+        onClearLayers: clearSbasAnalysisLayers,
+    };
 
     const toggleDinsarResultVisibility = useCallback((resultId) => {
         cancelMapBatch();
@@ -1702,10 +2043,10 @@ function App() {
         fetchDinsarResults({ offset: 0 });
     }, [fetchDinsarResults]);
 
-    const handleCancelForceUnlock = useCallback(() => {
-        setShowForceUnlock(false);
-        setForceUnlockPwd('');
-    }, [setShowForceUnlock, setForceUnlockPwd]);
+    const handleCloseCancelTask = useCallback(() => {
+        setShowCancelTask(false);
+        setCancelTaskPwd('');
+    }, [setShowCancelTask, setCancelTaskPwd]);
 
     const radarPanel = {
         radarCurrentPage,
@@ -1852,6 +2193,7 @@ function App() {
                     aiPanel={aiPanel}
                     pairsPanel={pairsPanel}
                     psPanel={psPanel}
+                    sbasAnalysisPanel={sbasAnalysisPanel}
                 />
 
                 <div
@@ -1916,14 +2258,13 @@ function App() {
                 onRefreshLicenseStatus={fetchLicenseStatus}
                 licenseFileName={licenseFileName}
                 licenseUploadStatus={licenseUploadStatus}
-                isGlobalLocked={isGlobalLocked}
                 activeTasks={activeTasks}
-                showForceUnlock={showForceUnlock}
-                forceUnlockPwd={forceUnlockPwd}
-                onShowForceUnlock={() => setShowForceUnlock(true)}
-                onForceUnlockPwdChange={setForceUnlockPwd}
-                onForceUnlockConfirm={handleForceUnlock}
-                onCancelForceUnlock={handleCancelForceUnlock}
+                showCancelTask={showCancelTask}
+                cancelTaskPwd={cancelTaskPwd}
+                onShowCancelTask={() => setShowCancelTask(true)}
+                onCancelTaskPwdChange={setCancelTaskPwd}
+                onCancelTaskConfirm={handleCancelActiveTasks}
+                onCloseCancelTask={handleCloseCancelTask}
                 mapExport={mapExport}
             />
         </div>

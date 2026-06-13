@@ -30,6 +30,7 @@ const LazyBatchPanel = lazy(() => import('../../panels/BatchPanel'));
 const LazyPairsListPanel = lazy(() => import('../../panels/PairsListPanel'));
 const LazyPsResultsPanel = lazy(() => import('../../panels/PsResultsPanel'));
 const LazyPsinsarCatalogPanel = lazy(() => import('../PsinsarCatalogPanel'));
+const LazySbasInsarMapAnalysisPanel = lazy(() => import('../../panels/SbasInsarMapAnalysisPanel'));
 const LazyProductionWorkspace = lazy(() => import('../../ProductionWorkspace'));
 
 export default function AppSidePanel({
@@ -62,6 +63,7 @@ export default function AppSidePanel({
     aiPanel,
     pairsPanel,
     psPanel,
+    sbasAnalysisPanel,
 }) {
     const isProductionWorkspace = PRODUCTION_WORKSPACE_ROUTE_TABS.has(leftPanelTab);
     const activeLeftGroup = LEFT_TAB_GROUP[leftPanelTab] || 'data';
@@ -425,13 +427,12 @@ export default function AppSidePanel({
 
             {leftPanelTab === 'psinsar_analysis' && (
                 <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <div style={{ padding: '16px' }}>
-                        <div className="empty-state">
-                            时序InSAR 分析页已预留。
-                            <br />
-                            后续可以在这里放置时序分析、速率分级、热点识别和专题统计能力。
-                        </div>
-                    </div>
+                    <Suspense fallback={<PanelLoadingBody message="正在加载时序InSAR地图分析..." />}>
+                        <LazySbasInsarMapAnalysisPanel
+                            readOnly={isReadOnlyUser}
+                            {...sbasAnalysisPanel}
+                        />
+                    </Suspense>
                 </div>
             )}
 

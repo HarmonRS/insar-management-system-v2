@@ -8,12 +8,14 @@ import re
 import shutil
 import struct
 import subprocess
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
 from shapely.geometry import box as shapely_box
+from sqlalchemy import String, cast, delete, or_, select
 
 from ..config import settings
 from .admin_region_lookup_service import (
@@ -24,6 +26,30 @@ from .admin_region_lookup_service import (
 
 
 PRODUCT_DEFINITIONS = (
+    {
+        "key": "expert_geo_los_def_rate_tif",
+        "label": "Expert Gamma geo_los_def_rate GeoTIFF",
+        "role": "primary_geotiff",
+        "relative_path": "publish/geotiff/geo_los_def_rate.tif",
+    },
+    {
+        "key": "expert_geo_los_def_rate_rgb_tif",
+        "label": "Expert Gamma geo_los_def_rate RGB GeoTIFF",
+        "role": "primary_rgb_geotiff",
+        "relative_path": "publish/geotiff/geo_los_def_rate_rgb.tif",
+    },
+    {
+        "key": "expert_geo_los_def_rate_rgb_preview_png",
+        "label": "Expert Gamma geo_los_def_rate RGB PNG preview",
+        "role": "primary_geocoded_preview",
+        "relative_path": "publish/geotiff/geo_los_def_rate_rgb_preview.png",
+    },
+    {
+        "key": "expert_disp_point_txt",
+        "label": "Expert Gamma disp_prt_2d point time series",
+        "role": "monitor_points",
+        "relative_path": "publish/points/disp_point.txt",
+    },
     {
         "key": "los_rate_toward_m_per_year_hls_geo_preview_png",
         "label": "Expert HLS LOS velocity geocoded RGB preview, toward radar positive",
@@ -159,36 +185,87 @@ IPTA_MB_MODE_DESCRIPTIONS = {
     1: "allow missing unwrapped phase values with network connectivity",
     2: "allow missing unwrapped phase values without network connectivity requirement",
 }
+GAMMA_SBAS_FALLBACK_MIN_COMMON_OVERLAP_RATIO = 0.30
+
+GAMMA_SBAS_FORBIDDEN_DEFAULT_TOOLS = {
+    "LT1_precision_orbit.py",
+    "SLC_coreg.py",
+    "gc_map1",
+    "phase_sim_orb",
+    "SLC_diff_intf",
+    "adf",
+    "cc_wave",
+    "mcf",
+}
+
+GAMMA_SBAS_MANUAL_QC_TOOLS = {
+    "disSLC",
+    "dismph_fft",
+}
+
+GAMMA_SBAS_BLOCKING_INTERACTIVE_TOOLS = {
+    "disSLC",
+    "dismph",
+    "dismph_fft",
+    "dispwr",
+    "disras",
+    "xterm",
+    "display",
+    "eog",
+    "gwenview",
+    "xdg-open",
+}
+
+GAMMA_SBAS_UNATTENDED_POLICY = (
+    "Backend Gamma SBAS production is non-interactive. Expert manual display/QC "
+    "commands are documented but are not executed by default; reviewable browse "
+    "assets are produced by raster/export commands and the publish step."
+)
+
+GAMMA_SBAS_REQUIRED_STEP_TOOLS = {
+    "02_import_lt1_slc": {"par_LT1_SLC", "ORB_filt_spline.py"},
+    "03_reference_mli": {"multi_look", "ras_dB", "SLC_corners"},
+    "04_dem_lookup": {"dem_import", "fill_gaps", "gc_map2", "pixel_area", "gc_map_fine", "geocode", "geocode_back"},
+    "06_coregister_scenes": {"create_offset", "init_offset_orbit", "init_offset", "offset_pwr", "offset_fit", "SLC_interp"},
+    "07_rmli_average": {"mk_mli_all", "ras_dB"},
+    "08_diff_network": {"base_calc", "base_plot", "mk_diff_2d"},
+    "09_filter_unwrap": {"mk_adf_2d", "ave_image", "rascc_mask", "mk_unw_2d"},
+    "10_detrend_atm": {"create_diff_par", "quad_fit", "quad_sub", "atm_mod_2d", "fill_gaps", "atm_sim_2d", "sub_phase"},
+    "11_sbas_inversion": {"mb", "real_to_cpx", "unw_model"},
+    "12_outputs_points": {"replace_values", "mask_data", "dispmap", "ts_rate", "geocode_back", "data2geotiff", "disp_prt_2d"},
+}
 
 GAMMA_STAGE_PLAN = (
     {
         "stage_id": "prepare_slc",
         "label": "Prepare LT1 SLCs",
-        "gamma_tools": ["par_LT1_SLC", "LT1_precision_orbit.py", "multi_look"],
+        "gamma_tools": ["par_LT1_SLC", "ORB_filt_spline.py", "SLC_corners"],
+        "manual_qc_tools": ["disSLC", "dismph_fft"],
+        "unattended_policy": GAMMA_SBAS_UNATTENDED_POLICY,
         "status": "PLANNED",
     },
     {
         "stage_id": "baseline_audit",
         "label": "Gamma baseline audit and itab approval",
-        "gamma_tools": ["base_calc"],
+        "gamma_tools": ["multi_look", "base_calc", "base_plot"],
         "status": "PENDING_REQUIRED_AUDIT",
     },
     {
         "stage_id": "coregistration",
         "label": "Stack co-registration",
-        "gamma_tools": ["SLC_coreg.py"],
+        "gamma_tools": ["create_offset", "init_offset_orbit", "init_offset", "offset_pwr", "offset_fit", "SLC_interp"],
         "status": "PLANNED_AFTER_BASELINE_AUDIT",
     },
     {
         "stage_id": "rdc_dem",
         "label": "RDC DEM and lookup table",
-        "gamma_tools": ["gc_map1", "geocode", "gc_map_fine"],
+        "gamma_tools": ["dem_import", "fill_gaps", "gc_map2", "pixel_area", "create_diff_par", "offset_pwrm", "offset_fitm", "gc_map_fine", "geocode", "geocode_back"],
         "status": "PLANNED_AFTER_BASELINE_AUDIT",
     },
     {
         "stage_id": "interferograms",
         "label": "Differential interferograms",
-        "gamma_tools": ["phase_sim_orb", "SLC_diff_intf", "adf", "mcf"],
+        "gamma_tools": ["base_calc", "base_plot", "mk_diff_2d", "mk_adf_2d", "ave_image", "rascc_mask", "mk_unw_2d"],
         "status": "PLANNED_AFTER_BASELINE_AUDIT",
     },
     {
@@ -200,7 +277,7 @@ GAMMA_STAGE_PLAN = (
     {
         "stage_id": "ipta_timeseries",
         "label": "IPTA SBAS time-series inversion",
-        "gamma_tools": ["mb", "ts_rate"],
+        "gamma_tools": ["mb", "real_to_cpx", "unw_model"],
         "status": "PLANNED_AFTER_DETREND_ATM",
     },
     {
@@ -247,7 +324,9 @@ GAMMA_SBAS_WORKFLOW_STEPS = (
         "legacy_stage": "baseline_audit",
         "script_name": "02_import_lt1_slc.sh",
         "status": "PENDING",
-        "expert_tools": ["par_LT1_SLC", "ORB_filt_spline.py", "SLC_corners", "disSLC", "dismph_fft"],
+        "expert_tools": ["par_LT1_SLC", "ORB_filt_spline.py", "SLC_corners"],
+        "manual_qc_tools": ["disSLC", "dismph_fft"],
+        "unattended_policy": GAMMA_SBAS_UNATTENDED_POLICY,
     },
     {
         "id": "03_reference_mli",
@@ -320,7 +399,7 @@ GAMMA_SBAS_WORKFLOW_STEPS = (
         "legacy_stage": "ipta_timeseries",
         "script_name": "11_sbas_inversion.sh",
         "status": "PENDING",
-        "expert_tools": ["mb", "unw_to_cpx", "unw_model", "ts_rate"],
+        "expert_tools": ["mb", "real_to_cpx", "unw_model", "ts_rate"],
     },
     {
         "id": "12_outputs_points",
@@ -339,7 +418,7 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "Directory and LT1 data preparation",
         "document_section": "1. Directory and data preparation",
         "workflow_steps": ["01_workspace_data"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
             "mkdir -p RAW SLC dem rslc_prep mli_dir diff_dir diff1_dir sbas",
             "ls RAW/<date>/*.tiff",
@@ -368,7 +447,7 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "Reference MLI and footprint checks",
         "document_section": "3. Reference multilook and range check",
         "workflow_steps": ["03_reference_mli"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
             "multi_look <ref>.slc <ref>.slc.par <ref>_<rlks>_<azlks>.mli <ref>_<rlks>_<azlks>.mli.par <rlks> <azlks>",
             "grep range_samples <ref>.mli.par",
@@ -383,7 +462,7 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "DEM import and lookup table",
         "document_section": "4. DEM import and geocoding lookup table",
         "workflow_steps": ["04_dem_lookup"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
             "dem_import <dem>.tif SRTM.dem SRTM.dem.par ...",
             "fill_gaps SRTM.dem <dem_width> SRTM_dem_fill",
@@ -403,7 +482,7 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "SLC coregistration preparation",
         "document_section": "5. SLC coregistration preparation",
         "workflow_steps": ["05_coreg_prep"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
             "cp SLC/dates rslc_prep/dates",
             "cp <ref>.slc <ref>.rslc",
@@ -416,9 +495,9 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "Coregister every SLC to reference",
         "document_section": "6. Coregister scenes to reference geometry",
         "workflow_steps": ["06_coregister_scenes"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
-            "create_offset <ref>.rslc.par <date>.slc.par <ref>_<date>.off 1",
+            "create_offset <ref>.rslc.par <date>.slc.par <ref>_<date>.off 1 <rlks> <azlks> 0",
             "init_offset_orbit <ref>.rslc.par <date>.slc.par <ref>_<date>.off",
             "init_offset <ref>.rslc <date>.slc <ref>.rslc.par <date>.slc.par <ref>_<date>.off <rlks> <azlks>",
             "offset_pwr <ref>.rslc <date>.slc <ref>.rslc.par <date>.slc.par <ref>_<date>.off ...",
@@ -433,7 +512,7 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "RMLI stack and average intensity",
         "document_section": "7. Generate RMLI and average intensity",
         "workflow_steps": ["07_rmli_average"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
             "mk_mli_all rslc_tab . <rlks> <azlks> 1 1.0 0.4 mli.ave",
             "grep range_samples mli.ave.par",
@@ -447,7 +526,7 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "Interferogram network and differential phase",
         "document_section": "8. Interferogram generation and differential interferometry",
         "workflow_steps": ["08_diff_network"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
             "base_calc rslc_tab <ref>.rslc.par bprep_file itab 1 1 <bmin> <bmax> <tmin> <tmax> -",
             "base_plot rslc_tab <ref>.rslc.par itab bprep_file 1",
@@ -462,7 +541,7 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "Adaptive filtering, coherence mask and unwrap",
         "document_section": "9. Adaptive filtering, coherence mask and phase unwrapping",
         "workflow_steps": ["09_filter_unwrap"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
             "mk_adf_2d rslc_tab itab mli.ave . 5 0.6 32 8 -u",
             "ls *.adf.diff",
@@ -479,7 +558,7 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "Detrend and atmospheric phase removal",
         "document_section": "10. Detrending and atmospheric phase removal",
         "workflow_steps": ["10_detrend_atm"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
             "create_diff_par <pair>.off <pair>.off <pair>.diff_par 0 0",
             "quad_fit <pair>.adf.unw <pair>.diff_par 5 5 - - 3 <pair>.unw_linear",
@@ -498,10 +577,10 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "SBAS inversion",
         "document_section": "11. SBAS inversion",
         "workflow_steps": ["11_sbas_inversion"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
             "mb unw_atmsub_tab RMLI_tab itab - itab_ts ras/diff1 1 diff1.sigma_ts 1 - <r_ref> <a_ref> 15 15 0.0 mli.ave.par",
-            "unw_to_cpx <pair>.unw.atmsub <pair>.unw.atmsub.cpx <width>",
+            "real_to_cpx - <pair>.unw.atmsub <pair>.unw.atmsub.cpx <width> 1",
             "unw_model <pair>.unw.atmsub.cpx <pair>.unw.atmsub_sim <pair>.unw.atmsub_1 <width> <r_ref> <a_ref>",
             "mb unw.atmsub_1_tab RMLI_tab itab - itab_ts ras/diff2 1 diff2.sigma_ts 0 - <r_ref> <a_ref> 15 15 0.0 mli.ave.par",
             "mb final_unw_tab RMLI_tab itab - itab_ts ras/diff 0 diff.sigma_ts 0 - <r_ref> <a_ref> 15 15 0.5 mli.ave.par",
@@ -513,7 +592,7 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
         "title": "Output, geocode and point time-series",
         "document_section": "12. Output, geocoding and point time-series",
         "workflow_steps": ["12_outputs_points"],
-        "implementation_status": "implemented_bridge",
+        "implementation_status": "implemented",
         "commands": [
             "replace_values diff.sigma_ts 0.5 0.0 diff.sigma_ts.masked <width> 1 2 0",
             "rasdt_pwr diff.sigma_ts.masked - <width> 1 0 1 1 0.0 1.5 1 cc.cm diff.sigma_ts.masked.bmp 1.0 0.35 8",
@@ -525,7 +604,7 @@ GAMMA_SBAS_EXPERT_DOCUMENT_STEPS = (
             "data2geotiff <ref>_seg.dem_par geo_los_def_rate 2 geo_los_def_rate.tif",
             "geocode_back los_def_rate.bmp <width> <ref>.lt_fine geo_los_def_rate.bmp <dem_width> <dem_lines> 0 2",
             "data2geotiff <ref>_seg.dem_par geo_los_def_rate.bmp 0 geo_los_def_rate_rgb.tif",
-            "disp_prt_2d disp_geo.TS_tab RMLI_tab itab_ts - 3 disp_point.txt - geo_los_def_rate geo_diff.sigma_ts items.txt disp_tab.txt 3 1 0",
+            "disp_prt_2d disp.TS_tab RMLI_tab itab_ts - 3 disp_point_sel.txt <ref>.hgt los_def_rate diff.sigma_ts.masked items.txt disp_point.txt 3 1 0",
         ],
     },
 )
@@ -542,6 +621,54 @@ LT1_SCENE_RE = re.compile(
     r"(?P<product_type>[A-Z0-9]+)_"
     r"(?P<polarization>[A-Z0-9]+)_",
     re.IGNORECASE,
+)
+
+S1_SOURCE_RE = re.compile(
+    r"^(?P<satellite>S1[A-Z])_"
+    r"(?P<mode>[A-Z0-9]+)_"
+    r"(?P<product>[A-Z0-9]+)_+"
+    r"(?P<class>[0-9A-Z]{4})_"
+    r"(?P<start>\d{8}T\d{6}(?:\.\d+)?)_"
+    r"(?P<stop>\d{8}T\d{6}(?:\.\d+)?)_"
+    r"(?P<absolute_orbit>\d+)_"
+    r"(?P<datatake>[0-9A-F]+)_"
+    r"(?P<product_uid>[0-9A-F]+)"
+    r"(?:\.SAFE|\.zip)?$",
+    re.IGNORECASE,
+)
+
+S1_EOF_RE = re.compile(
+    r"^(?P<satellite>S1[A-Z])_OPER_"
+    r"(?P<orbit_type>AUX_[A-Z0-9]+)_"
+    r"(?P<provider>[A-Z0-9]+)_"
+    r"(?P<generation>\d{8}T\d{6})_"
+    r"V(?P<valid_start>\d{8}T\d{6})_"
+    r"(?P<valid_stop>\d{8}T\d{6})\.EOF$",
+    re.IGNORECASE,
+)
+
+S1_GAMMA_SBAS_PLANNING_STEPS = (
+    {
+        "id": "01_s1_stack_assets",
+        "name": "Sentinel-1 ZIP/SAFE and EOF stack audit",
+        "status": "PENDING",
+        "optional": False,
+        "notes": ["Implemented as planning metadata; no Gamma commands are executed."],
+    },
+    {
+        "id": "02_s1_tops_import",
+        "name": "Sentinel-1 TOPS import and burst selection",
+        "status": "PLANNED",
+        "optional": False,
+        "notes": ["Pending verified Gamma TOPS import script."],
+    },
+    {
+        "id": "03_s1_sbas_workflow",
+        "name": "Sentinel-1 Gamma SBAS workflow",
+        "status": "PLANNED",
+        "optional": False,
+        "notes": ["Pending Sentinel-1 specific co-registration, interferogram and IPTA scripts."],
+    },
 )
 
 
@@ -670,6 +797,7 @@ class SbasInsarProductionService:
             "implementation_state": "expert_manifest_script_runner_primary",
             "trial_root": str(self.trial_root),
             "production_root": str(self.production_root),
+            "min_common_overlap_ratio": self._effective_min_common_overlap_ratio(None),
             "workflow_runner": {
                 "enabled": bool(settings.GAMMA_SBAS_ENABLED),
                 "runtime_id": settings.GAMMA_SBAS_RUNTIME_ID,
@@ -681,7 +809,21 @@ class SbasInsarProductionService:
                 "style": "expert_document_manifest_and_scripts",
             },
             "workflow_node_count": len(GAMMA_SBAS_WORKFLOW_STEPS),
-            "supported_sensors": ["LT1"],
+            "supported_sensors": ["LT1", "S1"],
+            "sensor_profiles": [
+                {
+                    "sensor_family": "LT1",
+                    "profile_code": "lt1_gamma_sbas",
+                    "execution_enabled": True,
+                    "description": "LT-1 Gamma SBAS workflow generated from the expert command document.",
+                },
+                {
+                    "sensor_family": "S1",
+                    "profile_code": "s1_gamma_sbas",
+                    "execution_enabled": False,
+                    "description": "Sentinel-1 stack discovery and planning only; Gamma TOPS/SBAS execution is not enabled.",
+                },
+            ],
             "supported_products": [item["key"] for item in PRODUCT_DEFINITIONS],
             "run_submission": {
                 "enabled": True,
@@ -707,7 +849,7 @@ class SbasInsarProductionService:
                 "execution_enabled": True,
                 "execution_mode": "queued_background_task",
                 "job_type": "SBAS_COREGISTRATION",
-                "default_strategy": "common_reference_to_stack_reference_date",
+                "default_strategy": "expert_create_offset_init_offset_slc_interp",
                 "requires_status": "ITAB_APPROVED",
             },
             "rdc_dem": {
@@ -715,7 +857,7 @@ class SbasInsarProductionService:
                 "execution_enabled": True,
                 "execution_mode": "queued_background_task",
                 "job_type": "SBAS_RDC_DEM",
-                "default_strategy": "gamma_gc_map_fine_reference_geometry",
+                "default_strategy": "expert_dem_import_gc_map2_pixel_area_gc_map_fine",
                 "requires_status": "COREGISTRATION_READY",
             },
             "interferograms": {
@@ -723,7 +865,7 @@ class SbasInsarProductionService:
                 "execution_enabled": True,
                 "execution_mode": "queued_background_task",
                 "job_type": "SBAS_INTERFEROGRAMS",
-                "default_strategy": "approved_itab_common_reference_diff_unwrap",
+                "default_strategy": "expert_mk_diff_2d_mk_adf_2d_mk_unw_2d",
                 "requires_status": "RDC_DEM_READY",
             },
             "detrend_atm": {
@@ -739,7 +881,7 @@ class SbasInsarProductionService:
                 "execution_enabled": True,
                 "execution_mode": "queued_background_task",
                 "job_type": "SBAS_IPTA_TIMESERIES",
-                "default_strategy": "gamma_mb_ts_rate_common_reference",
+                "default_strategy": "expert_three_pass_mb_real_to_cpx_unw_model",
                 "default_mb_mode": DEFAULT_IPTA_MB_MODE,
                 "mb_mode_description": IPTA_MB_MODE_DESCRIPTIONS[DEFAULT_IPTA_MB_MODE],
                 "requires_status": "DETREND_ATM_READY",
@@ -776,6 +918,7 @@ class SbasInsarProductionService:
     def discover_stacks(
         self,
         *,
+        sensor_family: str = "LT1",
         source_roots: list[str] | None = None,
         orbit_roots: list[str] | None = None,
         min_scenes: int = 3,
@@ -789,25 +932,28 @@ class SbasInsarProductionService:
         discovery_mode: str = "strict",
         aoi_bbox: dict[str, Any] | None = None,
         min_aoi_coverage_ratio: float = 0.01,
-        min_common_overlap_ratio: float = 0.0,
+        min_common_overlap_ratio: float | None = None,
         force_refresh: bool = False,
     ) -> dict[str, Any]:
-        source_paths = self._resolve_source_roots(source_roots)
-        orbit_paths = self._resolve_orbit_roots(orbit_roots)
+        sensor_family = self._normalize_sensor_family(sensor_family)
+        source_paths = self._resolve_source_roots(source_roots, sensor_family=sensor_family)
+        orbit_paths = self._resolve_orbit_roots(orbit_roots, sensor_family=sensor_family)
         root_warnings = self._build_root_resolution_warnings(
             source_roots=source_roots,
             orbit_roots=orbit_roots,
             source_paths=source_paths,
             orbit_paths=orbit_paths,
+            sensor_family=sensor_family,
         )
         normalized_mode = self._normalize_discovery_mode(discovery_mode)
         min_aoi_coverage_ratio = max(0.0, min(1.0, float(min_aoi_coverage_ratio or 0.0)))
-        min_common_overlap_ratio = max(0.0, min(1.0, float(min_common_overlap_ratio or 0.0)))
+        min_common_overlap_ratio = self._effective_min_common_overlap_ratio(min_common_overlap_ratio)
         discovery_aoi = self._build_discovery_aoi(admin_region=admin_region, aoi_bbox=aoi_bbox)
         effective_mode = "aoi" if normalized_mode == "aoi" and discovery_aoi.get("geometry") is not None else "strict"
         cache_key = self._discovery_cache_key(
             source_paths=source_paths,
             orbit_paths=orbit_paths,
+            sensor_family=sensor_family,
             min_scenes=min_scenes,
             require_orbits=require_orbits,
             include_scenes=include_scenes,
@@ -820,6 +966,7 @@ class SbasInsarProductionService:
             aoi_bbox=aoi_bbox,
             min_aoi_coverage_ratio=min_aoi_coverage_ratio,
             min_common_overlap_ratio=min_common_overlap_ratio,
+            strategy_version="gamma-overlap-substack-v4",
         )
         if not force_refresh:
             cached = self._read_discovery_cache(cache_key)
@@ -838,11 +985,20 @@ class SbasInsarProductionService:
 
         for root in source_paths:
             try:
-                for scene_dir in self._iter_lt1_scene_dirs(root):
+                scene_iter = (
+                    self._iter_s1_scene_sources(root)
+                    if sensor_family == "S1"
+                    else self._iter_lt1_scene_dirs(root)
+                )
+                for scene_source in scene_iter:
                     try:
-                        scene = self._parse_lt1_scene(scene_dir, orbit_paths)
+                        scene = (
+                            self._parse_s1_scene(scene_source, orbit_paths)
+                            if sensor_family == "S1"
+                            else self._parse_lt1_scene(scene_source, orbit_paths)
+                        )
                     except Exception as exc:
-                        errors.append({"scene_dir": str(scene_dir), "error": str(exc)})
+                        errors.append({"scene_source": str(scene_source), "error": str(exc)})
                         continue
                     if platform_filter and scene.get("satellite") != platform_filter:
                         continue
@@ -860,44 +1016,59 @@ class SbasInsarProductionService:
             except Exception as exc:
                 errors.append({"source_root": str(root), "error": str(exc)})
 
+        if sensor_family == "S1":
+            scenes = self._dedupe_s1_scenes(scenes)
+
         grouped_initial: dict[str, list[dict[str, Any]]] = {}
         for scene in scenes:
-            group_key = self._aoi_stack_group_key(scene) if effective_mode == "aoi" else self._stack_group_key(scene)
+            group_key = (
+                self._aoi_stack_group_key(scene)
+                if effective_mode == "aoi"
+                else self._stack_group_key(scene)
+            )
             grouped_initial.setdefault(group_key, []).append(scene)
 
-        if effective_mode == "aoi":
-            grouped: dict[str, list[dict[str, Any]]] = {}
-            for observation_key, group_scenes in grouped_initial.items():
-                for cluster in self._cluster_aoi_scenes(group_scenes):
-                    cluster_key = self._aoi_cluster_key(observation_key, cluster)
-                    clustered_scenes = [
-                        {
-                            **scene,
-                            "aoi_cluster_key": cluster_key,
-                            "aoi_cluster_source": "footprint_common_overlap",
-                        }
-                        for scene in cluster
-                    ]
-                    grouped[cluster_key] = clustered_scenes
-        else:
-            grouped = grouped_initial
+        cluster_source = (
+            "aoi_footprint_common_overlap"
+            if effective_mode == "aoi"
+            else "footprint_common_overlap"
+        )
+        candidate_scene_groups: list[dict[str, Any]] = []
+        for observation_key, group_scenes in grouped_initial.items():
+            candidate_scene_groups.extend(
+                self._build_discovery_scene_groups(
+                    observation_key=observation_key,
+                    group_scenes=group_scenes,
+                    discovery_mode=effective_mode,
+                    require_orbits=require_orbits,
+                    min_scenes=min_scenes,
+                    min_common_overlap_ratio=min_common_overlap_ratio,
+                    cluster_source=cluster_source,
+                )
+            )
 
         candidates = [
             self._build_stack_candidate(
-                group_scenes,
+                scene_group["scenes"],
                 min_scenes=min_scenes,
                 require_orbits=require_orbits,
                 discovery_mode=effective_mode,
                 aoi_summary=discovery_aoi.get("summary"),
                 min_common_overlap_ratio=min_common_overlap_ratio,
             )
-            for group_scenes in grouped.values()
+            for scene_group in candidate_scene_groups
+            if scene_group.get("scenes")
         ]
+        candidates = self._dedupe_stack_candidates(candidates)
         if admin_region and effective_mode != "aoi":
             candidates = [
                 candidate for candidate in candidates
                 if admin_region_matches(candidate.get("admin_region"), admin_region)
             ]
+        self._annotate_stack_candidate_identity(
+            candidates,
+            existing_run_index=self._existing_run_identity_index(),
+        )
         candidates.sort(
             key=lambda item: (
                 int(item.get("status") != "READY"),
@@ -915,6 +1086,7 @@ class SbasInsarProductionService:
         snapshot = {
             "schema": "insar.sbas-stack-discovery/v1",
             "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "sensor_family": sensor_family,
             "source_roots": [str(path) for path in source_paths],
             "orbit_roots": [str(path) for path in orbit_paths],
             "min_scenes": min_scenes,
@@ -943,6 +1115,7 @@ class SbasInsarProductionService:
         self,
         stack_id: str,
         *,
+        sensor_family: str = "LT1",
         source_roots: list[str] | None = None,
         orbit_roots: list[str] | None = None,
         min_scenes: int = 3,
@@ -951,9 +1124,11 @@ class SbasInsarProductionService:
         admin_region: str | None = None,
         aoi_bbox: dict[str, Any] | None = None,
         min_aoi_coverage_ratio: float = 0.01,
-        min_common_overlap_ratio: float = 0.0,
+        min_common_overlap_ratio: float | None = None,
     ) -> dict[str, Any]:
+        sensor_family = self._normalize_sensor_family(sensor_family)
         discovery = self.discover_stacks(
+            sensor_family=sensor_family,
             source_roots=source_roots,
             orbit_roots=orbit_roots,
             min_scenes=min_scenes,
@@ -978,41 +1153,74 @@ class SbasInsarProductionService:
             if (scene.get("has_orbit") or not require_orbits)
         ]
         usable_scenes.sort(key=lambda item: str(item.get("date") or ""))
+        duplicate_audit = self._duplicate_scene_date_audit(usable_scenes)
         pairs = self._build_adjacent_pairs(usable_scenes)
         blockers: list[str] = []
         warnings: list[str] = []
+        for blocker in candidate.get("blockers") or []:
+            text = str(blocker or "").strip()
+            if text and text not in blockers:
+                blockers.append(text)
 
         if len(usable_scenes) < min_scenes:
             blockers.append(
                 f"Only {len(usable_scenes)} usable scenes; minimum required is {min_scenes}."
             )
         if require_orbits and candidate.get("missing_orbit_count"):
+            orbit_label = "EOF" if sensor_family == "S1" else "TXT"
             warnings.append(
-                f"{candidate.get('missing_orbit_count')} scenes are excluded because precise orbit TXT is missing."
+                f"{candidate.get('missing_orbit_count')} scenes are excluded because precise orbit {orbit_label} is missing."
             )
         if len(pairs) < max(0, len(usable_scenes) - 1):
             blockers.append("Adjacent pair network is not fully connected.")
+        if duplicate_audit.get("has_duplicate_dates"):
+            blockers.append(
+                "Duplicate acquisition dates remain in the Gamma date-keyed stack; "
+                "each executable SBAS stack must contain one scene per date."
+            )
         for pair in pairs:
             if int(pair.get("delta_days") or 0) > 180:
                 warnings.append(
                     f"Long temporal gap: {pair.get('master_date')} -> {pair.get('slave_date')} "
                     f"({pair.get('delta_days')} days)."
                 )
+        candidate_duplicate_audit = candidate.get("date_keyed_duplicate_audit") or {}
+        if candidate_duplicate_audit.get("excluded_scene_count"):
+            warnings.append(
+                "Same-date LT1 scenes were reduced to one representative scene per date "
+                "for the Gamma date-keyed expert workflow."
+            )
 
         timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+        ready_status = (
+            "READY_FOR_S1_GAMMA_SBAS_PLANNING"
+            if sensor_family == "S1"
+            else "READY_FOR_GAMMA_BASELINE_AUDIT"
+        )
         manifest = {
             "schema": "insar.gamma-ipta-sbas-stack-manifest/v1",
             "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "stack_id": stack_id,
+            "sensor_family": sensor_family,
+            "profile_code": "s1_gamma_sbas" if sensor_family == "S1" else "lt1_gamma_sbas",
             "processor_code": "gamma_ipta_sbas",
             "engine_code": "gamma",
-            "workflow": "Gamma DIFF + IPTA mb/ts_rate",
-            "status": "READY_FOR_GAMMA_BASELINE_AUDIT" if not blockers else "BLOCKED",
+            "workflow": "Sentinel-1 Gamma SBAS planning" if sensor_family == "S1" else "LT1 Gamma SBAS expert command workflow",
+            "status": ready_status if not blockers else "BLOCKED",
             "require_orbits": require_orbits,
             "min_scenes": min_scenes,
             "discovery_mode": candidate.get("discovery_mode") or discovery.get("discovery_mode") or "strict",
             "aoi": candidate.get("aoi") or discovery.get("aoi"),
             "common_overlap_ratio": candidate.get("common_overlap_ratio"),
+            "min_common_overlap_ratio": discovery.get("min_common_overlap_ratio"),
+            "scene_identity_hash": candidate.get("scene_identity_hash"),
+            "scene_name_count": candidate.get("scene_name_count"),
+            "scene_name_preview": candidate.get("scene_name_preview") or [],
+            "scene_names": candidate.get("scene_names") or [],
+            "date_sequence_hash": candidate.get("date_sequence_hash"),
+            "same_date_sequence_candidate_count": candidate.get("same_date_sequence_candidate_count"),
+            "same_date_sequence_distinct_scene_group_count": candidate.get("same_date_sequence_distinct_scene_group_count"),
+            "existing_same_scene_runs": candidate.get("existing_same_scene_runs") or [],
             "stack": {
                 key: candidate.get(key)
                 for key in [
@@ -1032,15 +1240,22 @@ class SbasInsarProductionService:
             "excluded_scenes": [
                 scene for scene in candidate.get("scenes", [])
                 if scene not in usable_scenes
-            ],
+            ] + (candidate.get("date_keyed_excluded_scenes") or []),
+            "date_keyed_duplicate_audit": candidate_duplicate_audit or duplicate_audit,
             "pair_network": {
                 "strategy": "adjacent_temporal_initial",
                 "gamma_baseline_status": "PENDING",
+                "execution_enabled": sensor_family != "S1",
                 "pairs": pairs,
             },
             "blockers": blockers,
             "warnings": sorted(set(warnings)),
-            "next_stage": "convert selected LT1 scenes with par_LT1_SLC, then run Gamma base_calc before final itab approval",
+            "execution_enabled": sensor_family != "S1",
+            "next_stage": (
+                "Sentinel-1 stack is ready for planning; Gamma TOPS/SBAS scripts are not enabled yet."
+                if sensor_family == "S1"
+                else "run the LT1 Gamma SBAS expert command workflow and review the generated command audit"
+            ),
         }
         manifest_path = self._write_runtime_json(
             Path("stack_manifests") / stack_id,
@@ -1064,6 +1279,7 @@ class SbasInsarProductionService:
         self,
         stack_id: str,
         *,
+        sensor_family: str = "LT1",
         run_label: str | None = None,
         source_roots: list[str] | None = None,
         orbit_roots: list[str] | None = None,
@@ -1075,11 +1291,13 @@ class SbasInsarProductionService:
         admin_region: str | None = None,
         aoi_bbox: dict[str, Any] | None = None,
         min_aoi_coverage_ratio: float = 0.01,
-        min_common_overlap_ratio: float = 0.0,
+        min_common_overlap_ratio: float | None = None,
         dry_run: bool = True,
     ) -> dict[str, Any]:
+        sensor_family = self._normalize_sensor_family(sensor_family)
         audit = self.audit_stack(
             stack_id,
+            sensor_family=sensor_family,
             source_roots=source_roots,
             orbit_roots=orbit_roots,
             min_scenes=min_scenes,
@@ -1091,8 +1309,13 @@ class SbasInsarProductionService:
             min_common_overlap_ratio=min_common_overlap_ratio,
         )
         manifest = audit["manifest"]
-        if manifest.get("status") != "READY_FOR_GAMMA_BASELINE_AUDIT":
-            raise ValueError("stack manifest is not ready for run planning")
+        ready_statuses = {"READY_FOR_GAMMA_BASELINE_AUDIT", "READY_FOR_S1_GAMMA_SBAS_PLANNING"}
+        if manifest.get("status") not in ready_statuses:
+            blockers = "; ".join(str(item) for item in (manifest.get("blockers") or []) if item)
+            raise ValueError(
+                "stack manifest is not ready for run planning"
+                + (f": {blockers}" if blockers else "")
+            )
 
         timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         run_id = self._stable_id(f"{stack_id}|{timestamp}|{run_label or ''}")
@@ -1102,7 +1325,11 @@ class SbasInsarProductionService:
         log_dir = run_dir / "logs"
         for path in (work_dir, publish_dir, log_dir):
             path.mkdir(parents=True, exist_ok=True)
-        expert_workspace = self._ensure_expert_workspace(run_dir)
+        expert_workspace = (
+            self._ensure_s1_planning_workspace(run_dir)
+            if sensor_family == "S1"
+            else self._ensure_expert_workspace(run_dir)
+        )
 
         monitor_config = self._build_monitor_point_config(
             monitor_points=monitor_points,
@@ -1116,13 +1343,24 @@ class SbasInsarProductionService:
             "workflow_code": "sbas_insar",
             "processor_code": "gamma_ipta_sbas",
             "engine_code": "gamma",
-            "execution_mode": "expert_manifest_script_workflow",
-            "status": "WORKFLOW_READY",
+            "sensor_family": sensor_family,
+            "profile_code": "s1_gamma_sbas" if sensor_family == "S1" else "lt1_gamma_sbas",
+            "execution_mode": "s1_gamma_sbas_planning_only" if sensor_family == "S1" else "expert_manifest_script_workflow",
+            "execution_enabled": sensor_family != "S1",
+            "status": "S1_GAMMA_SBAS_PLANNED" if sensor_family == "S1" else "WORKFLOW_READY",
             "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "stack_id": stack_id,
             "discovery_mode": manifest.get("discovery_mode"),
             "aoi": manifest.get("aoi"),
             "common_overlap_ratio": manifest.get("common_overlap_ratio"),
+            "min_common_overlap_ratio": manifest.get("min_common_overlap_ratio"),
+            "scene_identity_hash": manifest.get("scene_identity_hash"),
+            "scene_name_count": manifest.get("scene_name_count"),
+            "scene_name_preview": manifest.get("scene_name_preview") or [],
+            "scene_names": manifest.get("scene_names") or [],
+            "date_sequence_hash": manifest.get("date_sequence_hash"),
+            "same_date_sequence_candidate_count": manifest.get("same_date_sequence_candidate_count"),
+            "same_date_sequence_distinct_scene_group_count": manifest.get("same_date_sequence_distinct_scene_group_count"),
             "stack_manifest_path": audit["manifest_path"],
             "pair_network_path": audit["pair_network_path"],
             "workflow_manifest_path": str(run_dir / "manifest.json"),
@@ -1134,18 +1372,31 @@ class SbasInsarProductionService:
             "stack": manifest.get("stack") or {},
             "scene_count": len(manifest.get("scenes") or []),
             "pair_count": len(((manifest.get("pair_network") or {}).get("pairs")) or []),
-            "next_stage": "workflow",
+            "next_stage": "implement_s1_gamma_sbas_scripts" if sensor_family == "S1" else "workflow",
             "requires_user_action": [
-                "Review Gamma base_calc baseline table before approving final itab.",
-                "Confirm monitoring-point source: manual points, imported layer, or automatic sampler.",
-                "Confirm geocoded preview products are published from EPSG:4326 GeoTIFFs.",
+                *(
+                    [
+                        "Review Sentinel-1 stack grouping, EOF coverage, subswath/burst policy, and common overlap before enabling execution.",
+                        "Implement and verify Sentinel-1 Gamma TOPS/SBAS scripts before submitting workflow jobs.",
+                    ]
+                    if sensor_family == "S1"
+                    else [
+                        "Review Gamma base_calc baseline table before approving final itab.",
+                        "Confirm monitoring-point source: manual points, imported layer, or automatic sampler.",
+                        "Confirm geocoded preview products are published from EPSG:4326 GeoTIFFs.",
+                    ]
+                ),
             ],
             "monitor_points": monitor_config,
             "planning_only": True,
             "legacy_dry_run_request": bool(dry_run),
         }
         command_manifest = self._build_command_manifest(run_manifest, manifest)
-        workflow_manifest = self._build_workflow_manifest(run_dir, run_manifest, manifest)
+        workflow_manifest = (
+            self._build_s1_workflow_manifest(run_dir, run_manifest, manifest)
+            if sensor_family == "S1"
+            else self._build_workflow_manifest(run_dir, run_manifest, manifest)
+        )
 
         run_manifest_path = self._write_json(run_dir / "run_manifest.json", run_manifest)
         command_manifest_path = self._write_json(run_dir / "gamma_command_manifest.json", command_manifest)
@@ -1213,9 +1464,243 @@ class SbasInsarProductionService:
             "command_manifest": command_manifest,
             "workflow_manifest": workflow_manifest,
             "workflow_state": workflow_state,
+            "runtime_status": self._build_runtime_status(
+                run_dir,
+                manifest=manifest,
+                workflow_manifest=workflow_manifest or {},
+                workflow_state=workflow_state or {},
+            ),
             "monitor_points": monitor_points,
             "geographic_coverage": geographic_coverage,
             "artifacts": self._build_run_artifacts(run_dir),
+        }
+
+    def _build_runtime_status(
+        self,
+        run_dir: Path,
+        *,
+        manifest: dict[str, Any],
+        workflow_manifest: dict[str, Any],
+        workflow_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        steps = workflow_state.get("steps") or {}
+        manifest_steps = workflow_manifest.get("steps") or []
+        current_step = None
+        for step in manifest_steps:
+            step_id = str(step.get("id") or "")
+            state = steps.get(step_id) or {}
+            status = str(state.get("status") or step.get("status") or "").strip().upper()
+            if status == "RUNNING":
+                current_step = {
+                    "id": step_id,
+                    "name": state.get("name") or step.get("name") or step_id,
+                    "status": status,
+                    "started_at": state.get("started_at"),
+                    "log": state.get("log") or step.get("log"),
+                    "script": state.get("script") or step.get("script"),
+                }
+                break
+        if current_step is None:
+            for step in manifest_steps:
+                step_id = str(step.get("id") or "")
+                state = steps.get(step_id) or {}
+                status = str(state.get("status") or step.get("status") or "").strip().upper()
+                if status in {"FAILED", "PENDING", "SCRIPT_READY"}:
+                    current_step = {
+                        "id": step_id,
+                        "name": state.get("name") or step.get("name") or step_id,
+                        "status": status,
+                        "started_at": state.get("started_at"),
+                        "ended_at": state.get("ended_at"),
+                        "log": state.get("log") or step.get("log"),
+                        "script": state.get("script") or step.get("script"),
+                    }
+                    break
+
+        workflow_summary = (
+            self._summarize_workflow_state(workflow_manifest, workflow_state)
+            if workflow_manifest and workflow_state
+            else {}
+        )
+        recent_logs = self._recent_run_logs(run_dir)
+        latest_log = recent_logs[0] if recent_logs else None
+        run_status = str(manifest.get("status") or "UNKNOWN").strip().upper()
+        return {
+            "schema": "insar.sbas-runtime-status/v1",
+            "run_id": manifest.get("run_id") or run_dir.name,
+            "run_status": run_status,
+            "active": "RUNNING" in run_status or bool(current_step and current_step.get("status") == "RUNNING"),
+            "current_step": current_step,
+            "workflow_updated_at": workflow_state.get("updated_at"),
+            "workflow_summary": workflow_summary,
+            "latest_log_updated_at": latest_log.get("modified_at") if latest_log else None,
+            "recent_logs": recent_logs,
+            "wsl": {
+                "distro": settings.GAMMA_SBAS_WSL_DISTRO,
+                "runtime_id": settings.GAMMA_SBAS_RUNTIME_ID,
+                "run_root": self._windows_path_to_wsl_mount(str(run_dir)),
+            },
+            "overlap_gate": {
+                "common_overlap_ratio": manifest.get("common_overlap_ratio"),
+                "min_common_overlap_ratio": manifest.get("min_common_overlap_ratio"),
+                "passed": (
+                    float(manifest.get("common_overlap_ratio") or 0.0)
+                    >= float(manifest.get("min_common_overlap_ratio") or 0.0)
+                ),
+            },
+        }
+
+    def _recent_run_logs(self, run_dir: Path, *, limit: int = 8, tail_chars: int = 1600) -> list[dict[str, Any]]:
+        log_dir = run_dir / "logs"
+        if not log_dir.is_dir():
+            return []
+        files = [path for path in log_dir.glob("*") if path.is_file()]
+        files.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+        logs: list[dict[str, Any]] = []
+        for path in files[: max(1, int(limit))]:
+            try:
+                stat = path.stat()
+                tail = self._tail_text(path.read_text(encoding="utf-8", errors="replace"), tail_chars)
+                modified_at = datetime.utcfromtimestamp(stat.st_mtime).isoformat(timespec="seconds") + "Z"
+                logs.append(
+                    {
+                        "name": path.name,
+                        "relative_path": str(path.relative_to(run_dir)).replace("\\", "/"),
+                        "size_bytes": stat.st_size,
+                        "modified_at": modified_at,
+                        "tail": tail,
+                    }
+                )
+            except Exception as exc:
+                logs.append(
+                    {
+                        "name": path.name,
+                        "relative_path": str(path.relative_to(run_dir)).replace("\\", "/"),
+                        "error": str(exc),
+                    }
+                )
+        return logs
+
+    async def delete_run_record(self, run_id: str, *, db: Any) -> dict[str, Any]:
+        from ..models import (
+            ResultAssetORM,
+            ResultIssueORM,
+            ResultProductORM,
+            SystemJobORM,
+            SystemTaskORM,
+            TaskLogORM,
+        )
+
+        clean_id = str(run_id or "").strip()
+        run_dir = self._resolve_run_dir(clean_id)
+        manifest = self._read_json(run_dir / "run_manifest.json")
+        run_ids = {
+            clean_id,
+            str(manifest.get("run_id") or "").strip(),
+            str(manifest.get("workflow_run_id") or "").strip(),
+        }
+        run_ids = {item for item in run_ids if item}
+
+        like_conditions = [
+            cast(SystemTaskORM.params, String).ilike(f"%{item}%")
+            for item in run_ids
+        ]
+        task_conditions = list(like_conditions)
+        for item in run_ids:
+            task_conditions.append(SystemTaskORM.task_name.ilike(f"%{item}%"))
+
+        tasks = []
+        if task_conditions:
+            task_result = await db.execute(select(SystemTaskORM).where(or_(*task_conditions)))
+            tasks = list(task_result.scalars().all())
+        task_ids = sorted({str(task.task_id or "").strip() for task in tasks if str(task.task_id or "").strip()})
+
+        job_conditions = [
+            cast(SystemJobORM.payload, String).ilike(f"%{item}%")
+            for item in run_ids
+        ]
+        for item in run_ids:
+            job_conditions.append(SystemJobORM.workflow_run_id == item)
+        if task_ids:
+            job_conditions.append(SystemJobORM.task_id.in_(task_ids))
+
+        jobs = []
+        if job_conditions:
+            job_result = await db.execute(select(SystemJobORM).where(or_(*job_conditions)))
+            jobs = list(job_result.scalars().all())
+
+        active_task_statuses = {"PENDING", "RUNNING"}
+        active_job_statuses = {"READY", "PENDING", "RUNNING", "RETRY"}
+        active_tasks = [
+            task.task_id
+            for task in tasks
+            if str(task.status or "").strip().upper() in active_task_statuses
+        ]
+        active_jobs = [
+            job.job_id
+            for job in jobs
+            if str(job.status or "").strip().upper() in active_job_statuses
+        ]
+        if active_tasks or active_jobs:
+            raise ValueError(
+                "Cannot delete an SBAS run with active task/job: "
+                f"tasks={active_tasks or []}, jobs={active_jobs or []}"
+            )
+
+        product_conditions = [
+            ResultProductORM.catalog_name == "sbas_insar",
+            or_(
+                *[
+                    or_(
+                        ResultProductORM.run_key == item,
+                        ResultProductORM.product_id.ilike(f"%{item}%"),
+                        ResultProductORM.manifest_path.ilike(f"%{item}%"),
+                        ResultProductORM.publish_dir.ilike(f"%{item}%"),
+                    )
+                    for item in run_ids
+                ]
+            ),
+        ]
+        product_result = await db.execute(select(ResultProductORM).where(*product_conditions))
+        products = list(product_result.scalars().all())
+        product_ids = [product.id for product in products]
+        if product_ids:
+            await db.execute(delete(ResultIssueORM).where(ResultIssueORM.product_ref_id.in_(product_ids)))
+            await db.execute(delete(ResultAssetORM).where(ResultAssetORM.product_ref_id.in_(product_ids)))
+            await db.execute(delete(ResultProductORM).where(ResultProductORM.id.in_(product_ids)))
+
+        job_ids = sorted({str(job.job_id or "").strip() for job in jobs if str(job.job_id or "").strip()})
+        if job_ids:
+            await db.execute(delete(SystemJobORM).where(SystemJobORM.job_id.in_(job_ids)))
+        if task_ids:
+            await db.execute(delete(TaskLogORM).where(TaskLogORM.task_id.in_(task_ids)))
+            await db.execute(delete(SystemTaskORM).where(SystemTaskORM.task_id.in_(task_ids)))
+
+        deleted_stack_files: list[str] = []
+        for key in ("stack_manifest_path", "pair_network_path"):
+            path = self._resolve_production_delete_path(manifest.get(key))
+            if path is not None and path.is_file():
+                path.unlink()
+                deleted_stack_files.append(str(path))
+                try:
+                    parent = path.parent
+                    stack_root = (self.production_root / "stack_manifests").resolve()
+                    parent.relative_to(stack_root)
+                    if parent.is_dir() and not any(parent.iterdir()):
+                        parent.rmdir()
+                except Exception:
+                    pass
+
+        shutil.rmtree(run_dir)
+        await db.commit()
+        return {
+            "run_id": clean_id,
+            "deleted": True,
+            "run_dir_deleted": str(run_dir),
+            "stack_files_deleted": deleted_stack_files,
+            "tasks_deleted": len(task_ids),
+            "jobs_deleted": len(job_ids),
+            "products_deleted": len(product_ids),
         }
 
     def run_baseline_audit(
@@ -1231,6 +1716,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         stack_manifest = self._read_json(run_dir / "stack_manifest.json")
         if manifest.get("status") not in {
             "PLANNED_GAMMA_BASELINE_AUDIT",
@@ -1435,6 +1921,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         if manifest.get("status") not in {
             "ITAB_APPROVED",
             "COREGISTRATION_SCRIPT_READY",
@@ -1505,6 +1992,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         status = str(manifest.get("status") or "").strip()
         if status == "COREGISTRATION_READY":
             return self.get_run_detail(run_id)
@@ -1609,6 +2097,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         status = str(manifest.get("status") or "").strip()
         if status == "RDC_DEM_READY":
             return self.get_run_detail(run_id)
@@ -1684,6 +2173,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         status = str(manifest.get("status") or "").strip()
         if status == "RDC_DEM_READY":
             return self.get_run_detail(run_id)
@@ -1793,6 +2283,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         status = str(manifest.get("status") or "").strip()
         if status == "INTERFEROGRAMS_READY":
             return self.get_run_detail(run_id)
@@ -1889,6 +2380,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         status = str(manifest.get("status") or "").strip()
         if status == "INTERFEROGRAMS_READY":
             return self.get_run_detail(run_id)
@@ -2000,6 +2492,10 @@ class SbasInsarProductionService:
         reference_window: int = 16,
         coherence_min: float = 0.15,
     ) -> dict[str, Any]:
+        run_dir = self._resolve_run_dir(run_id)
+        manifest_path = run_dir / "run_manifest.json"
+        manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         if execute:
             return self.execute_detrend_atm(
                 run_id,
@@ -2008,9 +2504,6 @@ class SbasInsarProductionService:
                 coherence_min=coherence_min,
             )
 
-        run_dir = self._resolve_run_dir(run_id)
-        manifest_path = run_dir / "run_manifest.json"
-        manifest = self._read_json(manifest_path)
         status = str(manifest.get("status") or "").strip()
         if status == "DETREND_ATM_READY":
             return self.get_run_detail(run_id)
@@ -2123,6 +2616,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         status = str(manifest.get("status") or "").strip()
         if status == "DETREND_ATM_READY":
             return self.get_run_detail(run_id)
@@ -2487,6 +2981,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         recovered = self._recover_workflow_resume_status(dict(manifest))
         if recovered.get("status") != manifest.get("status"):
             manifest = recovered
@@ -2611,6 +3106,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         recovered = self._recover_workflow_resume_status(dict(manifest))
         if recovered.get("status") != manifest.get("status"):
             manifest = recovered
@@ -2725,6 +3221,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(manifest)
         recovered = self._recover_workflow_resume_status(dict(manifest))
         if recovered.get("status") != manifest.get("status"):
             manifest = recovered
@@ -2953,20 +3450,23 @@ class SbasInsarProductionService:
             "artifacts": artifacts,
             "stage_contract": [
                 "par_LT1_SLC",
-                "LT1_precision_orbit.py",
+                "ORB_filt_spline.py",
                 "multi_look",
                 "base_calc",
-                "SLC_coreg.py",
-                "gc_map1/geocode/gc_map_fine",
-                "phase_sim_orb",
-                "SLC_diff_intf",
-                "adf",
-                "mcf",
+                "create_offset/init_offset_orbit/init_offset/offset_pwr/offset_fit/SLC_interp",
+                "dem_import/fill_gaps/gc_map2/pixel_area/gc_map_fine",
+                "mk_diff_2d",
+                "mk_adf_2d",
+                "mk_unw_2d",
+                "quad_fit/quad_sub/atm_mod_2d/atm_sim_2d/sub_phase",
                 "mb",
+                "real_to_cpx",
+                "unw_model",
                 "ts_rate",
                 "geocode_back",
                 "data2geotiff",
-                "LOS sign conversion",
+                "dispmap",
+                "disp_prt_2d",
                 "monitoring point time series",
             ],
         }
@@ -3021,7 +3521,9 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         run_manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(run_manifest)
         stack_manifest = self._read_json(run_dir / "stack_manifest.json")
+        self._ensure_gamma_date_keyed_stack(stack_manifest)
         self._ensure_expert_workspace(run_dir)
         run_manifest = self._recover_workflow_resume_status(run_manifest)
         self._write_json(manifest_path, run_manifest)
@@ -3036,8 +3538,6 @@ class SbasInsarProductionService:
                 maximum=256,
             ),
         }
-        self._prepare_reusable_stage_scripts(run_id, run_dir, run_manifest, params)
-        run_manifest = self._read_json(manifest_path)
         resume_stage_status = str(run_manifest.get("status") or "").strip()
         run_manifest["workflow"] = {
             **(run_manifest.get("workflow") or {}),
@@ -3265,6 +3765,7 @@ class SbasInsarProductionService:
         run_dir = self._resolve_run_dir(run_id)
         manifest_path = run_dir / "run_manifest.json"
         run_manifest = self._read_json(manifest_path)
+        self._ensure_lt1_execution_enabled(run_manifest)
         if not (run_dir / "manifest.json").is_file():
             self.prepare_workflow(run_id, force=force)
             run_manifest = self._read_json(manifest_path)
@@ -3286,7 +3787,7 @@ class SbasInsarProductionService:
         }
         self._write_json(manifest_path, run_manifest)
 
-        execution_results = self._execute_workflow_bridge(
+        execution_results = self._execute_expert_workflow_scripts(
             run_id,
             run_dir,
             workflow_manifest=workflow_manifest,
@@ -3305,7 +3806,7 @@ class SbasInsarProductionService:
             "returncode": returncode,
             "runtime_id": settings.GAMMA_SBAS_RUNTIME_ID,
             "distro": settings.GAMMA_SBAS_WSL_DISTRO,
-            "mode": "managed_python_bridge_to_expert_scripts",
+            "mode": "expert_document_scripts",
             "results": execution_results,
             "summary": summary,
         }
@@ -3315,7 +3816,8 @@ class SbasInsarProductionService:
             "execution": execution,
             "summary": summary,
         }
-        if returncode == 0 and summary.get("ready"):
+        audit_summary = self._read_optional_json(run_dir / "expert_command_audit.json") or {}
+        if returncode == 0 and summary.get("ready") and audit_summary.get("ready"):
             run_manifest["status"] = "WORKFLOW_COMPLETED"
             run_manifest["next_stage"] = "review_publish_products"
         elif returncode == 0:
@@ -3380,7 +3882,7 @@ class SbasInsarProductionService:
             previous = state["steps"].get(step_id) or {}
             if previous.get("status") == "COMPLETED" and not force:
                 result = {**previous, "status": "SKIPPED", "skipped_reason": "already completed"}
-                state["steps"][step_id] = result
+                state["steps"][step_id] = previous
                 results.append(result)
                 continue
 
@@ -3421,6 +3923,143 @@ class SbasInsarProductionService:
             self._write_json(state_path, state)
             results.append(result)
         return results
+
+    def _execute_expert_workflow_scripts(
+        self,
+        run_id: str,
+        run_dir: Path,
+        *,
+        workflow_manifest: dict[str, Any],
+        from_step: str | None,
+        to_step: str | None,
+        only_steps: list[str],
+        force: bool,
+        timeout_seconds: int,
+    ) -> list[dict[str, Any]]:
+        selected = self._select_workflow_steps(
+            workflow_manifest.get("steps") or [],
+            from_step=from_step,
+            to_step=to_step,
+            only_steps=only_steps,
+        )
+        state_path = run_dir / "state" / "step_status.json"
+        state = self._read_optional_json(state_path) or self._initial_workflow_state(
+            self._read_json(run_dir / "run_manifest.json"),
+            workflow_manifest,
+        )
+        state.setdefault("steps", {})
+        results: list[dict[str, Any]] = []
+        for step in selected:
+            step_id = str(step.get("id") or "")
+            if not step.get("enabled"):
+                result = self._workflow_step_result(step, status="PLANNED", skipped_reason="step planned but not enabled")
+                state["steps"][step_id] = result
+                results.append(result)
+                continue
+            previous = state["steps"].get(step_id) or {}
+            if previous.get("status") == "COMPLETED" and not force:
+                result = {**previous, "status": "SKIPPED", "skipped_reason": "already completed"}
+                state["steps"][step_id] = previous
+                results.append(result)
+                continue
+
+            started_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            state["steps"][step_id] = {
+                "id": step_id,
+                "name": step.get("name") or step_id,
+                "enabled": bool(step.get("enabled")),
+                "optional": bool(step.get("optional")),
+                "status": "RUNNING",
+                "started_at": started_at,
+                "script": step.get("script"),
+                "log": step.get("log"),
+            }
+            state["updated_at"] = started_at
+            self._write_json(state_path, state)
+            try:
+                detail = self._execute_expert_workflow_step_script(run_dir, step, timeout_seconds=timeout_seconds)
+                result = {
+                    "id": step_id,
+                    "name": step.get("name") or step_id,
+                    "status": "COMPLETED",
+                    "started_at": started_at,
+                    "ended_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "returncode": 0,
+                    "detail": detail,
+                }
+            except Exception as exc:
+                result = {
+                    "id": step_id,
+                    "name": step.get("name") or step_id,
+                    "status": "FAILED",
+                    "started_at": started_at,
+                    "ended_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "returncode": 1,
+                    "error": str(exc),
+                }
+                state["steps"][step_id] = result
+                state["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+                self._write_json(state_path, state)
+                results.append(result)
+                break
+            state["steps"][step_id] = result
+            state["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            self._write_json(state_path, state)
+            results.append(result)
+        return results
+
+    def _execute_expert_workflow_step_script(
+        self,
+        run_dir: Path,
+        step: dict[str, Any],
+        *,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        step_id = str(step.get("id") or "")
+        script_path = Path(self._path_to_windows(str(step.get("script") or "")) or "")
+        if not script_path.is_file():
+            raise FileNotFoundError(f"expert workflow script not found for {step_id}: {script_path}")
+        audit = self._audit_expert_step_script(step_id, script_path)
+        if not audit.get("ready"):
+            raise ValueError(f"expert command audit failed for {step_id}: {audit}")
+        command = self._script_execution_command(str(self._windows_path_to_wsl_mount(str(script_path))))
+        completed = subprocess.run(
+            command,
+            cwd=str(run_dir),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        log_path = run_dir / "logs" / f"{step_id}.runner.log"
+        log_text = "\n".join(
+            [
+                "$ " + " ".join(command),
+                "",
+                "STDOUT:",
+                completed.stdout or "",
+                "",
+                "STDERR:",
+                completed.stderr or "",
+                "",
+            ]
+        )
+        log_path.write_text(log_text, encoding="utf-8", newline="\n")
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"expert workflow step {step_id} failed with rc={completed.returncode}: "
+                f"{self._tail_text(completed.stderr or completed.stdout)}"
+            )
+        return {
+            "step_id": step_id,
+            "script": str(script_path),
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout_tail": self._tail_text(completed.stdout),
+            "stderr_tail": self._tail_text(completed.stderr),
+            "runner_log": str(log_path),
+            "command_audit": audit,
+        }
 
     def _execute_workflow_step_bridge(self, run_id: str, step_id: str, *, timeout_seconds: int) -> dict[str, Any]:
         self._restore_stage_status_for_workflow_step(run_id)
@@ -3695,17 +4334,32 @@ class SbasInsarProductionService:
                 break
         return selected
 
-    def _resolve_source_roots(self, roots: list[str] | None) -> list[Path]:
-        raw_values = roots or self._split_config_paths(settings.GAMMA_SBAS_SOURCE_ROOTS)
+    def _resolve_source_roots(self, roots: list[str] | None, *, sensor_family: str = "LT1") -> list[Path]:
+        sensor_family = self._normalize_sensor_family(sensor_family)
+        raw_values = roots or self._default_source_roots(sensor_family)
         if not raw_values:
-            raw_values = [r"D:\LuTan1_Image_Pool"]
+            raw_values = [r"D:\Sentinel1_Image_Pool"] if sensor_family == "S1" else [r"D:\LuTan1_Image_Pool"]
         return self._dedupe_existing_dirs(raw_values)
 
-    def _resolve_orbit_roots(self, roots: list[str] | None) -> list[Path]:
-        raw_values = roots or self._split_config_paths(settings.GAMMA_SBAS_ORBIT_ROOTS)
+    def _resolve_orbit_roots(self, roots: list[str] | None, *, sensor_family: str = "LT1") -> list[Path]:
+        sensor_family = self._normalize_sensor_family(sensor_family)
+        raw_values = roots or self._default_orbit_roots(sensor_family)
         if not raw_values:
-            raw_values = [r"D:\orbit_pools\envi"]
+            raw_values = [r"D:\Sentinel1_Orbit_Pool"] if sensor_family == "S1" else [r"D:\orbit_pools\envi"]
         return self._dedupe_existing_dirs(raw_values)
+
+    def _default_source_roots(self, sensor_family: str) -> list[str]:
+        if sensor_family == "S1":
+            return self._split_config_paths(
+                settings.SENTINEL1_STORAGE_DIRS,
+                settings.SOURCE_PRODUCT_DIRS,
+            )
+        return self._split_config_paths(settings.GAMMA_SBAS_SOURCE_ROOTS)
+
+    def _default_orbit_roots(self, sensor_family: str) -> list[str]:
+        if sensor_family == "S1":
+            return self._split_config_paths(settings.ORBIT_SOURCE_DIRS)
+        return self._split_config_paths(settings.GAMMA_SBAS_ORBIT_ROOTS)
 
     def _build_root_resolution_warnings(
         self,
@@ -3714,10 +4368,16 @@ class SbasInsarProductionService:
         orbit_roots: list[str] | None,
         source_paths: list[Path],
         orbit_paths: list[Path],
+        sensor_family: str = "LT1",
     ) -> list[dict[str, Any]]:
         warnings: list[dict[str, Any]] = []
-        source_requested = source_roots or self._split_config_paths(settings.GAMMA_SBAS_SOURCE_ROOTS) or [r"D:\LuTan1_Image_Pool"]
-        orbit_requested = orbit_roots or self._split_config_paths(settings.GAMMA_SBAS_ORBIT_ROOTS) or [r"D:\orbit_pools\envi"]
+        sensor_family = self._normalize_sensor_family(sensor_family)
+        source_requested = source_roots or self._default_source_roots(sensor_family) or (
+            [r"D:\Sentinel1_Image_Pool"] if sensor_family == "S1" else [r"D:\LuTan1_Image_Pool"]
+        )
+        orbit_requested = orbit_roots or self._default_orbit_roots(sensor_family) or (
+            [r"D:\Sentinel1_Orbit_Pool"] if sensor_family == "S1" else [r"D:\orbit_pools\envi"]
+        )
 
         source_missing = self._missing_root_values(source_requested)
         orbit_missing = self._missing_root_values(orbit_requested)
@@ -3764,6 +4424,7 @@ class SbasInsarProductionService:
         *,
         source_paths: list[Path],
         orbit_paths: list[Path],
+        sensor_family: str,
         min_scenes: int,
         require_orbits: bool,
         include_scenes: bool,
@@ -3776,10 +4437,12 @@ class SbasInsarProductionService:
         aoi_bbox: dict[str, Any] | None,
         min_aoi_coverage_ratio: float,
         min_common_overlap_ratio: float,
+        strategy_version: str = "gamma-overlap-substack-v3",
     ) -> str:
         payload = {
             "source_paths": [os.path.normcase(str(path.resolve())) for path in source_paths],
             "orbit_paths": [os.path.normcase(str(path.resolve())) for path in orbit_paths],
+            "sensor_family": str(sensor_family or "LT1").strip().upper(),
             "source_mtime_ns": [
                 int(path.stat().st_mtime_ns) if path.exists() else 0
                 for path in source_paths
@@ -3800,7 +4463,8 @@ class SbasInsarProductionService:
             "aoi_bbox": SbasInsarProductionService._normalize_bbox(aoi_bbox),
             "min_aoi_coverage_ratio": float(min_aoi_coverage_ratio),
             "min_common_overlap_ratio": float(min_common_overlap_ratio),
-            "response_shape": "aoi_discovery_v1",
+            "response_shape": "footprint_cluster_discovery_v3",
+            "strategy_version": strategy_version,
         }
         return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
@@ -3926,6 +4590,415 @@ class SbasInsarProductionService:
             )
         except OSError:
             return False
+
+    def _iter_s1_scene_sources(self, root: Path):
+        if self._looks_like_s1_source(root):
+            yield root
+            return
+
+        stack: list[tuple[Path, int]] = [(root, 0)]
+        seen: set[str] = set()
+        while stack:
+            current, depth = stack.pop()
+            key = os.path.normcase(str(current.resolve()))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                children = list(current.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                name = child.name
+                if name.startswith((".", "_")):
+                    continue
+                if self._looks_like_s1_source(child):
+                    yield child
+                    continue
+                if child.is_dir() and depth < 2:
+                    stack.append((child, depth + 1))
+
+    @staticmethod
+    def _looks_like_s1_source(path: Path) -> bool:
+        name = path.name
+        upper = name.upper()
+        if path.is_file() and upper.startswith("S1") and upper.endswith(".ZIP"):
+            return S1_SOURCE_RE.match(name) is not None
+        if path.is_dir() and upper.startswith("S1") and upper.endswith(".SAFE"):
+            return S1_SOURCE_RE.match(name) is not None and (path / "manifest.safe").is_file()
+        return False
+
+    def _parse_s1_scene(self, source_path: Path, orbit_roots: list[Path]) -> dict[str, Any]:
+        source_name = source_path.name
+        filename_meta = self._parse_s1_scene_name(source_name)
+        if not filename_meta:
+            raise ValueError(f"Cannot parse Sentinel-1 source name: {source_name}")
+
+        manifest_meta = self._parse_s1_manifest(source_path)
+        meta = {**filename_meta, **{key: value for key, value in manifest_meta.items() if value not in (None, "", [])}}
+        start_dt = meta.get("start_time_utc_dt")
+        stop_dt = meta.get("stop_time_utc_dt") or start_dt
+        date = str(meta.get("date") or "")[:8]
+        satellite = str(meta.get("satellite") or "").upper()
+        orbit_path = self._find_s1_orbit(orbit_roots, satellite, start_dt, stop_dt)
+
+        bbox = meta.get("bbox")
+        center_lon, center_lat = self._centroid_from_bbox(bbox)
+        if meta.get("center_lon") is not None:
+            center_lon = self._as_float(meta.get("center_lon"))
+        if meta.get("center_lat") is not None:
+            center_lat = self._as_float(meta.get("center_lat"))
+
+        polarizations = meta.get("polarization_channels") or []
+        polarization = "+".join(polarizations) if polarizations else str(meta.get("polarization") or "").upper() or None
+        source_format = "S1_SAFE_DIR" if source_path.is_dir() else "S1_ZIP"
+        source_windows = self._path_to_windows(str(source_path))
+        source_wsl = self._windows_path_to_wsl_mount(str(source_path))
+        return {
+            "scene_name": source_path.name,
+            "logical_product_uid": meta.get("logical_product_uid"),
+            "scene_dir_windows": source_windows if source_path.is_dir() else None,
+            "scene_dir_wsl": source_wsl if source_path.is_dir() else None,
+            "source_windows": source_windows,
+            "source_wsl": source_wsl,
+            "source_format": source_format,
+            "archive_windows": source_windows if source_path.is_file() else None,
+            "archive_wsl": source_wsl if source_path.is_file() else None,
+            "orbit_windows": self._path_to_windows(str(orbit_path)) if orbit_path else None,
+            "orbit_wsl": self._windows_path_to_wsl_mount(str(orbit_path)) if orbit_path else None,
+            "has_orbit": bool(orbit_path),
+            "date": date,
+            "satellite_family": "S1",
+            "satellite": satellite,
+            "satellite_mode": str(meta.get("product_type") or "").upper() or None,
+            "receiving_station": None,
+            "absolute_orbit": str(meta.get("absolute_orbit") or "") or None,
+            "relative_orbit": str(meta.get("relative_orbit") or "") or None,
+            "orbit_direction": str(meta.get("orbit_direction") or "").upper() or None,
+            "imaging_mode": str(meta.get("imaging_mode") or "").upper() or None,
+            "look_direction": None,
+            "polarization": polarization,
+            "product_type": str(meta.get("product_type") or "").upper() or None,
+            "product_level": "L1",
+            "source_product_token": meta.get("source_product_token"),
+            "center_lon": center_lon,
+            "center_lat": center_lat,
+            "center_bucket": self._center_bucket(center_lon, center_lat),
+            "bbox": bbox,
+            "start_time_utc": self._datetime_to_iso(start_dt),
+            "stop_time_utc": self._datetime_to_iso(stop_dt),
+            "start_time_utc_dt": start_dt,
+            "stop_time_utc_dt": stop_dt,
+            "manifest_path": meta.get("manifest_path"),
+            "polarization_channels": polarizations,
+            "execution_note": "Sentinel-1 SBAS is discovery/planning only; Gamma TOPS execution is not enabled.",
+        }
+
+    @staticmethod
+    def _parse_s1_scene_name(source_name: str) -> dict[str, Any]:
+        base = SbasInsarProductionService._strip_s1_suffix(source_name)
+        match = S1_SOURCE_RE.match(base)
+        if not match:
+            return {}
+        data = match.groupdict()
+        class_token = str(data.get("class") or "").upper()
+        start_dt = SbasInsarProductionService._parse_s1_datetime(data.get("start"))
+        stop_dt = SbasInsarProductionService._parse_s1_datetime(data.get("stop"))
+        return {
+            "logical_product_uid": base,
+            "satellite": str(data.get("satellite") or "").upper(),
+            "imaging_mode": str(data.get("mode") or "").upper(),
+            "product_type": str(data.get("product") or "").upper(),
+            "source_product_token": class_token,
+            "polarization": class_token[-2:] if len(class_token) >= 2 else class_token,
+            "absolute_orbit": str(data.get("absolute_orbit") or "").lstrip("0") or data.get("absolute_orbit"),
+            "date": str(data.get("start") or "")[:8],
+            "start_time_utc_dt": start_dt,
+            "stop_time_utc_dt": stop_dt,
+            "filename_datatake": str(data.get("datatake") or "").upper(),
+            "filename_product_uid": str(data.get("product_uid") or "").upper(),
+        }
+
+    def _parse_s1_manifest(self, source_path: Path) -> dict[str, Any]:
+        if source_path.is_dir():
+            manifest_path = source_path / "manifest.safe"
+            if not manifest_path.is_file():
+                return {"manifest_parse_status": "MISSING"}
+            try:
+                data = manifest_path.read_bytes()
+            except OSError as exc:
+                return {"manifest_parse_status": "FAILED", "manifest_parse_error": str(exc)}
+            return {
+                "manifest_parse_status": "OK",
+                "manifest_path": str(manifest_path),
+                **self._parse_s1_manifest_bytes(data),
+            }
+
+        try:
+            with zipfile.ZipFile(source_path) as archive:
+                manifest_name = next(
+                    (
+                        name for name in archive.namelist()
+                        if name.lower().endswith("/manifest.safe") or name.lower() == "manifest.safe"
+                    ),
+                    None,
+                )
+                if not manifest_name:
+                    return {"manifest_parse_status": "MISSING"}
+                return {
+                    "manifest_parse_status": "OK",
+                    "manifest_path": manifest_name,
+                    **self._parse_s1_manifest_bytes(archive.read(manifest_name)),
+                }
+        except Exception as exc:
+            return {"manifest_parse_status": "FAILED", "manifest_parse_error": str(exc)}
+
+    def _parse_s1_manifest_bytes(self, data: bytes) -> dict[str, Any]:
+        try:
+            root = ET.fromstring(data)
+        except Exception as exc:
+            return {"manifest_parse_status": "FAILED", "manifest_parse_error": str(exc)}
+        start_dt = self._parse_s1_datetime(self._first_text_by_local_name(root, {"startTime"}))
+        stop_dt = self._parse_s1_datetime(self._first_text_by_local_name(root, {"stopTime"}))
+        pols = [
+            str(item).strip().upper()
+            for item in self._texts_by_local_name(root, "transmitterReceiverPolarisation")
+            if str(item).strip()
+        ]
+        polygon = self._s1_polygon_from_coordinates(self._first_text_by_local_name(root, {"coordinates"}))
+        bbox = self._bbox_from_points(polygon)
+        center_lon, center_lat = self._centroid_from_points(polygon)
+        return {
+            "start_time_utc_dt": start_dt,
+            "stop_time_utc_dt": stop_dt,
+            "product_type": self._clean_upper(self._first_text_by_local_name(root, {"productType"})),
+            "imaging_mode": self._clean_upper(self._first_text_by_local_name(root, {"mode"})),
+            "orbit_direction": self._clean_upper(self._first_text_by_local_name(root, {"pass"})),
+            "polarization_channels": pols,
+            "absolute_orbit": self._clean_text(self._first_text_by_local_name(root, {"orbitNumber"})),
+            "relative_orbit": self._clean_text(self._first_text_by_local_name(root, {"relativeOrbitNumber"})),
+            "bbox": bbox,
+            "center_lon": center_lon,
+            "center_lat": center_lat,
+            "coverage_polygon": polygon,
+        }
+
+    @staticmethod
+    def _first_text_by_local_name(root: ET.Element, names: set[str]) -> str | None:
+        wanted = {name.lower() for name in names}
+        for element in root.iter():
+            tag = str(element.tag).split("}")[-1].lower()
+            if tag not in wanted:
+                continue
+            text = (element.text or "").strip()
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _texts_by_local_name(root: ET.Element, name: str) -> list[str]:
+        wanted = str(name or "").lower()
+        values: list[str] = []
+        for element in root.iter():
+            tag = str(element.tag).split("}")[-1].lower()
+            if tag != wanted:
+                continue
+            text = (element.text or "").strip()
+            if text and text not in values:
+                values.append(text)
+        return values
+
+    @staticmethod
+    def _s1_polygon_from_coordinates(text: str | None) -> list[tuple[float, float]] | None:
+        if not text:
+            return None
+        points: list[tuple[float, float]] = []
+        for token in re.split(r"\s+", text.strip()):
+            parts = [part for part in re.split(r"[,;]", token) if part]
+            if len(parts) < 2:
+                continue
+            try:
+                first = float(parts[0])
+                second = float(parts[1])
+            except ValueError:
+                continue
+            if abs(first) > 90.0 and abs(second) <= 90.0:
+                lon, lat = first, second
+            else:
+                lon, lat = second, first
+            points.append((lon, lat))
+        if len(points) < 3:
+            return None
+        if points[0] != points[-1]:
+            points.append(points[0])
+        return points
+
+    @staticmethod
+    def _bbox_from_points(points: list[tuple[float, float]] | None) -> dict[str, float] | None:
+        if not points:
+            return None
+        lons = [float(point[0]) for point in points]
+        lats = [float(point[1]) for point in points]
+        return {
+            "min_lon": min(lons),
+            "min_lat": min(lats),
+            "max_lon": max(lons),
+            "max_lat": max(lats),
+        }
+
+    @staticmethod
+    def _centroid_from_points(points: list[tuple[float, float]] | None) -> tuple[float | None, float | None]:
+        if not points:
+            return None, None
+        unique = points[:-1] if len(points) > 1 and points[0] == points[-1] else points
+        if not unique:
+            return None, None
+        return (
+            sum(float(point[0]) for point in unique) / len(unique),
+            sum(float(point[1]) for point in unique) / len(unique),
+        )
+
+    @staticmethod
+    def _centroid_from_bbox(bbox: dict[str, Any] | None) -> tuple[float | None, float | None]:
+        if not bbox:
+            return None, None
+        try:
+            return (
+                (float(bbox["min_lon"]) + float(bbox["max_lon"])) / 2,
+                (float(bbox["min_lat"]) + float(bbox["max_lat"])) / 2,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None, None
+
+    @staticmethod
+    def _clean_text(value: Any) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    @staticmethod
+    def _clean_upper(value: Any) -> str | None:
+        text = str(value or "").strip().upper()
+        return text or None
+
+    @staticmethod
+    def _strip_s1_suffix(name: str) -> str:
+        lower = str(name or "").lower()
+        if lower.endswith(".zip"):
+            return str(name)[:-4]
+        if lower.endswith(".safe"):
+            return str(name)[:-5]
+        return str(name or "")
+
+    @staticmethod
+    def _parse_s1_datetime(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.startswith("UTC="):
+            text = text[4:]
+        text = text.rstrip("Z")
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y%m%dT%H%M%S.%f",
+            "%Y%m%dT%H%M%S",
+        ):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _datetime_to_iso(value: datetime | None) -> str | None:
+        if not value:
+            return None
+        return value.isoformat(timespec="seconds") + "Z"
+
+    def _find_s1_orbit(
+        self,
+        orbit_roots: list[Path],
+        satellite: str,
+        start_dt: datetime | None,
+        stop_dt: datetime | None,
+    ) -> Path | None:
+        if not satellite or not start_dt:
+            return None
+        stop_dt = stop_dt or start_dt
+        candidates: list[tuple[int, float, Path]] = []
+        for root in orbit_roots:
+            try:
+                paths = root.rglob("S1*.EOF")
+            except OSError:
+                continue
+            for path in paths:
+                parsed = self._parse_s1_eof_name(path.name)
+                if not parsed:
+                    continue
+                if parsed.get("satellite") != satellite:
+                    continue
+                valid_start = parsed.get("valid_start")
+                valid_stop = parsed.get("valid_stop")
+                if not valid_start or not valid_stop:
+                    continue
+                if valid_start <= start_dt and valid_stop >= stop_dt:
+                    quality_rank = 0 if "POEORB" in str(parsed.get("orbit_type") or "") else 1
+                    coverage_margin = (start_dt - valid_start).total_seconds() + (valid_stop - stop_dt).total_seconds()
+                    candidates.append((quality_rank, -coverage_margin, path))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1], str(item[2])))
+        return candidates[0][2]
+
+    @staticmethod
+    def _parse_s1_eof_name(name: str) -> dict[str, Any] | None:
+        match = S1_EOF_RE.match(str(name or ""))
+        if not match:
+            return None
+        data = match.groupdict()
+        return {
+            "satellite": str(data.get("satellite") or "").upper(),
+            "orbit_type": str(data.get("orbit_type") or "").upper(),
+            "valid_start": SbasInsarProductionService._parse_s1_datetime(data.get("valid_start")),
+            "valid_stop": SbasInsarProductionService._parse_s1_datetime(data.get("valid_stop")),
+            "generation": SbasInsarProductionService._parse_s1_datetime(data.get("generation")),
+        }
+
+    @staticmethod
+    def _dedupe_s1_scenes(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        by_uid: dict[str, dict[str, Any]] = {}
+        for scene in scenes:
+            uid = str(scene.get("logical_product_uid") or scene.get("scene_name") or "").strip()
+            if not uid:
+                continue
+            current = by_uid.get(uid)
+            if current is None:
+                by_uid[uid] = scene
+                continue
+            current_score = 2 if current.get("source_format") == "S1_SAFE_DIR" else 1
+            scene_score = 2 if scene.get("source_format") == "S1_SAFE_DIR" else 1
+            if scene_score > current_score:
+                by_uid[uid] = scene
+        return list(by_uid.values())
+
+    @staticmethod
+    def _normalize_sensor_family(value: Any) -> str:
+        text = str(value or "LT1").strip().upper().replace("-", "")
+        if text in {"S1", "S1A", "S1B", "S1C", "SENTINEL1", "SENTINEL1A", "SENTINEL1B", "SENTINEL1C"}:
+            return "S1"
+        return "LT1"
+
+    @staticmethod
+    def _ensure_lt1_execution_enabled(manifest: dict[str, Any]) -> None:
+        raw_profile = str(manifest.get("profile_code") or "").strip().lower()
+        sensor_family = SbasInsarProductionService._normalize_sensor_family(
+            manifest.get("sensor_family") or ((manifest.get("stack") or {}).get("satellite"))
+        )
+        if raw_profile.startswith("s1_") or sensor_family == "S1" or manifest.get("execution_enabled") is False:
+            raise ValueError(
+                "Sentinel-1 Gamma SBAS is currently discovery/planning only; "
+                "Gamma TOPS/SBAS execution scripts are not enabled."
+            )
 
     def _parse_lt1_scene(self, scene_dir: Path, orbit_roots: list[Path]) -> dict[str, Any]:
         scene_name = scene_dir.name
@@ -4170,6 +5243,311 @@ class SbasInsarProductionService:
             "or generate a PyINT Gamma DEM cache for this LT1 stack. "
             f"Details: {detail}"
         )
+
+    def _resolve_expert_dem_import_source(self, stack_manifest: dict[str, Any]) -> dict[str, Any]:
+        errors: list[str] = []
+        explicit_candidates = [
+            ("GAMMA_SBAS_DEM_PATH", settings.GAMMA_SBAS_DEM_PATH),
+            ("IDL_DINSAR_DEM_BASE_FILE", settings.IDL_DINSAR_DEM_BASE_FILE),
+            ("ISCE2_DEM_PATH", settings.ISCE2_DEM_PATH),
+            ("PYINT_PREPARED_DEM_PATH", settings.PYINT_PREPARED_DEM_PATH),
+            ("TIMESERIES_DEM_PATH", settings.TIMESERIES_DEM_PATH),
+        ]
+        stack_bbox = self._stack_bbox_union(stack_manifest)
+        if not stack_bbox:
+            raise ValueError("Expert Gamma SBAS DEM selection requires auditable scene bbox coverage.")
+        for label, raw_path in explicit_candidates:
+            for candidate in self._expert_dem_import_candidate_paths(raw_path):
+                if not candidate.is_file():
+                    continue
+                coverage = self._infer_dem_import_source_coverage(candidate)
+                if stack_bbox and coverage.get("min_lon") is None:
+                    errors.append(f"{label} coverage is not auditable for full stack bbox: {candidate}")
+                    continue
+                covers_stack_bbox = self._bbox_contains(coverage, stack_bbox, margin_degrees=0.05) if stack_bbox and coverage else None
+                if stack_bbox and coverage and not covers_stack_bbox:
+                    errors.append(f"{label} does not cover full stack bbox: {candidate}")
+                    continue
+                return {
+                    "source_label": label,
+                    "source_type": "dem_import_source",
+                    "windows_path": str(candidate),
+                    "wsl_path": self._windows_path_to_wsl_mount(str(candidate)),
+                    "coverage": coverage,
+                    "covers_stack_bbox": covers_stack_bbox,
+                    "stack_bbox": stack_bbox,
+                    "selection_note": "Selected DEM source for expert dem_import; runtime Gamma DEM cache is not accepted.",
+                }
+            if str(raw_path or "").strip():
+                errors.append(f"{label} has no readable DEM import source: {raw_path}")
+        detail = "; ".join(errors) if errors else "no configured DEM source"
+        raise FileNotFoundError(
+            "No usable DEM source was found for expert Gamma SBAS dem_import. "
+            "Configure GAMMA_SBAS_DEM_PATH, IDL_DINSAR_DEM_BASE_FILE, ISCE2_DEM_PATH, PYINT_PREPARED_DEM_PATH, "
+            "or TIMESERIES_DEM_PATH to a readable source raster covering the full stack bbox. "
+            f"Details: {detail}"
+        )
+
+    def _materialize_expert_dem_import_source(self, run_dir: Path, dem_source: dict[str, Any]) -> dict[str, Any]:
+        stack_bbox = self._normalize_bbox(dem_source.get("stack_bbox"))
+        coverage = self._normalize_bbox(dem_source.get("coverage"))
+        raw_path = str(dem_source.get("windows_path") or dem_source.get("wsl_path") or "").strip()
+        source_path = Path(self._path_to_windows(raw_path) or raw_path)
+        if not stack_bbox or not coverage or not source_path.is_file():
+            return dem_source
+        raster_suffix = source_path.suffix.lower()
+        direct_geotiff_source = raster_suffix in {".tif", ".tiff"}
+        if raster_suffix not in {"", ".tif", ".tiff", ".img", ".wgs84", ".vrt"}:
+            return dem_source
+
+        source_area = self._bbox_area(coverage)
+        stack_area = self._bbox_area(stack_bbox)
+        if direct_geotiff_source and source_area <= max(stack_area * 8.0, 2.0):
+            return dem_source
+
+        margin = 0.25
+        clip_bbox = {
+            "min_lon": max(float(coverage["min_lon"]), float(stack_bbox["min_lon"]) - margin),
+            "min_lat": max(float(coverage["min_lat"]), float(stack_bbox["min_lat"]) - margin),
+            "max_lon": min(float(coverage["max_lon"]), float(stack_bbox["max_lon"]) + margin),
+            "max_lat": min(float(coverage["max_lat"]), float(stack_bbox["max_lat"]) + margin),
+        }
+        if not self._bbox_contains(clip_bbox, stack_bbox):
+            raise ValueError(f"DEM crop bbox does not cover stack bbox: crop={clip_bbox}, stack={stack_bbox}")
+
+        clip_path = run_dir / "dem" / "expert_dem_import_clip.tif"
+        clip_meta_path = run_dir / "state" / "dem_import_clip.json"
+        if clip_path.is_file():
+            clip_coverage = self._dem_coverage_from_raster(clip_path)
+            if clip_coverage.get("driver") == "GTiff" and self._bbox_contains(clip_coverage, stack_bbox, margin_degrees=0.02):
+                clipped = {
+                    **dem_source,
+                    "source_type": "dem_import_source_clip",
+                    "original_windows_path": str(source_path),
+                    "original_wsl_path": self._windows_path_to_wsl_mount(str(source_path)),
+                    "windows_path": str(clip_path),
+                    "wsl_path": self._windows_path_to_wsl_mount(str(clip_path)),
+                    "coverage": clip_coverage,
+                    "clip_bbox": clip_bbox,
+                    "selection_note": "Selected run-local DEM clip for expert dem_import to avoid full-raster Gamma memory allocation.",
+                }
+                self._write_json(clip_meta_path, clipped)
+                return clipped
+
+        self._crop_raster_dem_to_bbox(source_path, clip_path, clip_bbox)
+        clip_coverage = self._dem_coverage_from_raster(clip_path)
+        if not self._bbox_contains(clip_coverage, stack_bbox, margin_degrees=0.02):
+            raise ValueError(
+                "Run-local DEM clip does not cover stack bbox after raster crop: "
+                f"clip_coverage={clip_coverage}, stack={stack_bbox}"
+            )
+        clipped = {
+            **dem_source,
+            "source_type": "dem_import_source_clip",
+            "original_windows_path": str(source_path),
+            "original_wsl_path": self._windows_path_to_wsl_mount(str(source_path)),
+            "windows_path": str(clip_path),
+            "wsl_path": self._windows_path_to_wsl_mount(str(clip_path)),
+            "coverage": clip_coverage,
+            "clip_bbox": clip_bbox,
+            "source_area_sq_deg": source_area,
+            "stack_area_sq_deg": stack_area,
+            "selection_note": "Selected run-local DEM clip for expert dem_import to avoid full-raster Gamma memory allocation.",
+        }
+        self._write_json(clip_meta_path, clipped)
+        return clipped
+
+    @staticmethod
+    def _crop_raster_dem_to_bbox(source_path: Path, clip_path: Path, bbox_lonlat: dict[str, float]) -> None:
+        try:
+            import rasterio  # type: ignore
+            from rasterio.warp import transform_bounds  # type: ignore
+            from rasterio.windows import Window, from_bounds  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("rasterio is required to crop large Gamma SBAS DEM import sources") from exc
+
+        clip_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = clip_path.with_suffix(f"{clip_path.suffix}.tmp")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        with rasterio.open(source_path) as src:
+            if not src.crs:
+                raise ValueError(f"DEM raster has no CRS and cannot be cropped by stack bbox: {source_path}")
+            left = float(bbox_lonlat["min_lon"])
+            bottom = float(bbox_lonlat["min_lat"])
+            right = float(bbox_lonlat["max_lon"])
+            top = float(bbox_lonlat["max_lat"])
+            if not getattr(src.crs, "is_geographic", False):
+                left, bottom, right, top = transform_bounds(
+                    "EPSG:4326",
+                    src.crs,
+                    left,
+                    bottom,
+                    right,
+                    top,
+                    densify_pts=21,
+                )
+            raw_window = from_bounds(left, bottom, right, top, transform=src.transform)
+            col_off = max(0, int(math.floor(raw_window.col_off)))
+            row_off = max(0, int(math.floor(raw_window.row_off)))
+            col_end = min(src.width, int(math.ceil(raw_window.col_off + raw_window.width)))
+            row_end = min(src.height, int(math.ceil(raw_window.row_off + raw_window.height)))
+            width = col_end - col_off
+            height = row_end - row_off
+            if width <= 0 or height <= 0:
+                raise ValueError(f"DEM crop window is empty for bbox {bbox_lonlat}: {source_path}")
+            window = Window(col_off, row_off, width, height)
+            profile = src.profile.copy()
+            profile.update(
+                driver="GTiff",
+                width=width,
+                height=height,
+                transform=src.window_transform(window),
+                BIGTIFF="IF_SAFER",
+            )
+            with rasterio.open(tmp_path, "w", **profile) as dst:
+                chunk_lines = 2048
+                for local_row in range(0, height, chunk_lines):
+                    rows = min(chunk_lines, height - local_row)
+                    read_window = Window(col_off, row_off + local_row, width, rows)
+                    write_window = Window(0, local_row, width, rows)
+                    dst.write(src.read(window=read_window), window=write_window)
+        tmp_path.replace(clip_path)
+
+    def _expert_dem_import_candidate_paths(self, raw_path: str | None) -> list[Path]:
+        text = str(raw_path or "").strip()
+        if not text:
+            return []
+        win_text = self._path_to_windows(text) or text
+        base = Path(win_text)
+        suffixes = {".tif", ".tiff", ".dem", ".hgt", ".img", ".wgs84"}
+        candidates: list[Path] = []
+        if base.is_dir():
+            for pattern in ("*.tif", "*.tiff", "*.dem", "*.hgt", "*.img", "*.wgs84"):
+                candidates.extend(sorted(base.glob(pattern)))
+        else:
+            candidates.append(base)
+            if base.suffix.lower() not in suffixes:
+                candidates.extend(Path(f"{win_text}{suffix}") for suffix in (".tif", ".tiff", ".dem", ".wgs84"))
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+        return deduped
+
+    def _infer_dem_import_source_coverage(self, path: Path) -> dict[str, Any]:
+        par_candidates = [
+            Path(f"{path}.par"),
+            path.with_suffix(f"{path.suffix}.par") if path.suffix else Path(f"{path}.par"),
+            path.with_suffix(".dem.par"),
+            path.with_suffix(".par"),
+        ]
+        for par_path in par_candidates:
+            params = self._parse_gamma_params(par_path)
+            coverage = self._dem_coverage_from_params(params)
+            if coverage.get("min_lon") is not None:
+                coverage["coverage_source"] = str(par_path)
+                return coverage
+        raster_coverage = self._dem_coverage_from_raster(path)
+        if raster_coverage.get("min_lon") is not None:
+            return raster_coverage
+        return {"coverage_source": "unavailable"}
+
+    def _dem_coverage_from_raster(self, path: Path) -> dict[str, Any]:
+        try:
+            import rasterio  # type: ignore
+            from rasterio.warp import transform_bounds  # type: ignore
+
+            with rasterio.open(path) as dataset:
+                bounds = dataset.bounds
+                crs = dataset.crs
+                if crs:
+                    if crs.to_epsg() == 4326 or getattr(crs, "is_geographic", False):
+                        min_lon, min_lat, max_lon, max_lat = bounds.left, bounds.bottom, bounds.right, bounds.top
+                    else:
+                        min_lon, min_lat, max_lon, max_lat = transform_bounds(
+                            crs,
+                            "EPSG:4326",
+                            bounds.left,
+                            bounds.bottom,
+                            bounds.right,
+                            bounds.top,
+                            densify_pts=21,
+                        )
+                else:
+                    min_lon, min_lat, max_lon, max_lat = bounds.left, bounds.bottom, bounds.right, bounds.top
+                return {
+                    "coverage_source": f"rasterio:{path}",
+                    "min_lon": float(min_lon),
+                    "min_lat": float(min_lat),
+                    "max_lon": float(max_lon),
+                    "max_lat": float(max_lat),
+                    "width": int(dataset.width),
+                    "nlines": int(dataset.height),
+                    "driver": str(getattr(dataset, "driver", "") or ""),
+                    "crs": str(crs) if crs else None,
+                    "area_sq_deg": max(0.0, (float(max_lon) - float(min_lon)) * (float(max_lat) - float(min_lat))),
+                }
+        except Exception:
+            pass
+
+        try:
+            from osgeo import gdal, osr  # type: ignore
+
+            dataset = gdal.Open(str(path))
+            if dataset is None:
+                return {"coverage_source": "unavailable"}
+            transform = dataset.GetGeoTransform(can_return_null=True)
+            if not transform:
+                return {"coverage_source": "unavailable"}
+            width = int(dataset.RasterXSize)
+            height = int(dataset.RasterYSize)
+            corners = [
+                (0, 0),
+                (width, 0),
+                (width, height),
+                (0, height),
+            ]
+            points = [
+                (
+                    transform[0] + col * transform[1] + row * transform[2],
+                    transform[3] + col * transform[4] + row * transform[5],
+                )
+                for col, row in corners
+            ]
+            projection = dataset.GetProjection()
+            if projection:
+                src = osr.SpatialReference()
+                src.ImportFromWkt(projection)
+                dst = osr.SpatialReference()
+                dst.ImportFromEPSG(4326)
+                transformer = osr.CoordinateTransformation(src, dst)
+                transformed = []
+                for x, y in points:
+                    lon, lat, *_ = transformer.TransformPoint(float(x), float(y))
+                    transformed.append((lon, lat))
+                points = transformed
+            lons = [float(item[0]) for item in points]
+            lats = [float(item[1]) for item in points]
+            min_lon, max_lon = min(lons), max(lons)
+            min_lat, max_lat = min(lats), max(lats)
+            return {
+                "coverage_source": f"gdal:{path}",
+                "min_lon": min_lon,
+                "min_lat": min_lat,
+                "max_lon": max_lon,
+                "max_lat": max_lat,
+                "width": width,
+                "nlines": height,
+                "crs": projection or None,
+                "area_sq_deg": max(0.0, (max_lon - min_lon) * (max_lat - min_lat)),
+            }
+        except Exception:
+            return {"coverage_source": "unavailable"}
 
     def _gamma_dem_candidate_paths(self, raw_path: str | None) -> list[Path]:
         text = str(raw_path or "").strip()
@@ -4997,6 +6375,395 @@ class SbasInsarProductionService:
             return 0.0
         return width * height if width > 0 and height > 0 else 0.0
 
+    def _build_discovery_scene_groups(
+        self,
+        *,
+        observation_key: str,
+        group_scenes: list[dict[str, Any]],
+        discovery_mode: str,
+        require_orbits: bool,
+        min_scenes: int,
+        min_common_overlap_ratio: float,
+        cluster_source: str,
+    ) -> list[dict[str, Any]]:
+        mode = self._normalize_discovery_mode(discovery_mode)
+        clusters = self._cluster_aoi_scenes(group_scenes)
+        scene_groups: list[dict[str, Any]] = []
+        seen_scene_keys: set[tuple[str, ...]] = set()
+
+        for cluster_index, cluster in enumerate(clusters):
+            primary_key = None
+            if mode == "aoi" or len(clusters) > 1:
+                primary_key = self._aoi_cluster_key(observation_key, cluster)
+                if len(clusters) > 1:
+                    primary_key = f"{primary_key}|cluster_{cluster_index + 1}"
+            primary_scenes = self._prepare_candidate_group_scenes(
+                cluster,
+                cluster_key=primary_key,
+                cluster_source=cluster_source,
+                variant="primary_cluster",
+            )
+            primary_scenes = self._select_date_keyed_stack_scenes(primary_scenes)
+            self._append_discovery_scene_group(
+                scene_groups,
+                seen_scene_keys,
+                primary_scenes,
+                variant="primary_cluster",
+            )
+
+            for subgroup_index, subgroup in enumerate(
+                self._extract_common_overlap_subgroups(
+                    cluster,
+                    require_orbits=require_orbits,
+                    min_scenes=min_scenes,
+                    min_common_overlap_ratio=min_common_overlap_ratio,
+                )
+            ):
+                subgroup_key = self._substack_group_key(observation_key, subgroup)
+                subgroup_scenes = self._prepare_candidate_group_scenes(
+                    subgroup,
+                    cluster_key=subgroup_key,
+                    cluster_source=cluster_source,
+                    variant=f"common_overlap_substack_{subgroup_index + 1}",
+                )
+                self._append_discovery_scene_group(
+                    scene_groups,
+                    seen_scene_keys,
+                    subgroup_scenes,
+                    variant="common_overlap_substack",
+                )
+
+        return scene_groups
+
+    def _append_discovery_scene_group(
+        self,
+        scene_groups: list[dict[str, Any]],
+        seen_scene_keys: set[tuple[str, ...]],
+        scenes: list[dict[str, Any]],
+        *,
+        variant: str,
+    ) -> None:
+        key = self._scene_identity_key(scenes)
+        if not key or key in seen_scene_keys:
+            return
+        seen_scene_keys.add(key)
+        scene_groups.append({"variant": variant, "scenes": scenes})
+
+    def _prepare_candidate_group_scenes(
+        self,
+        scenes: list[dict[str, Any]],
+        *,
+        cluster_key: str | None,
+        cluster_source: str,
+        variant: str,
+    ) -> list[dict[str, Any]]:
+        prepared = []
+        for scene in scenes:
+            item = {
+                **scene,
+                "aoi_cluster_source": cluster_source,
+                "discovery_group_variant": variant,
+            }
+            if cluster_key:
+                item["aoi_cluster_key"] = cluster_key
+            else:
+                item.pop("aoi_cluster_key", None)
+            prepared.append(item)
+        return prepared
+
+    @staticmethod
+    def _scene_identity_key(scenes: list[dict[str, Any]]) -> tuple[str, ...]:
+        values = [
+            str(scene.get("scene_name") or scene.get("scene_dir_windows") or scene.get("date") or "").strip()
+            for scene in scenes
+        ]
+        return tuple(sorted(value for value in values if value))
+
+    @staticmethod
+    def _hash_identity_values(values: list[str] | tuple[str, ...]) -> str | None:
+        filtered = [str(value or "").strip() for value in values if str(value or "").strip()]
+        if not filtered:
+            return None
+        return hashlib.sha1("|".join(filtered).encode("utf-8", errors="ignore")).hexdigest()
+
+    def _scene_identity_summary(self, scenes: list[dict[str, Any]]) -> dict[str, Any]:
+        scene_names = self._scene_identity_key(scenes)
+        dates = tuple(sorted(
+            str(scene.get("date") or "").strip()
+            for scene in scenes
+            if str(scene.get("date") or "").strip()
+        ))
+        return {
+            "scene_identity_key": scene_names,
+            "scene_identity_hash": self._hash_identity_values(scene_names),
+            "scene_name_count": len(scene_names),
+            "scene_name_preview": list(scene_names[:3]),
+            "scene_names": list(scene_names),
+            "date_sequence_key": dates,
+            "date_sequence_hash": self._hash_identity_values(dates),
+        }
+
+    def _annotate_stack_candidate_identity(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        existing_run_index: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
+        by_date_sequence: dict[str, list[dict[str, Any]]] = {}
+        for candidate in candidates:
+            identity = self._scene_identity_summary(candidate.get("scenes") or [])
+            candidate["scene_identity_hash"] = identity["scene_identity_hash"]
+            candidate["scene_name_count"] = identity["scene_name_count"]
+            candidate["scene_name_preview"] = identity["scene_name_preview"]
+            candidate["scene_names"] = identity["scene_names"]
+            candidate["date_sequence_hash"] = identity["date_sequence_hash"]
+            key = identity.get("date_sequence_hash")
+            if key:
+                by_date_sequence.setdefault(str(key), []).append(candidate)
+
+        for group in by_date_sequence.values():
+            group.sort(key=self._stack_candidate_rank, reverse=True)
+            scene_hashes = {
+                str(item.get("scene_identity_hash") or "")
+                for item in group
+                if item.get("scene_identity_hash")
+            }
+            for index, candidate in enumerate(group, start=1):
+                siblings = [
+                    {
+                        "stack_id": item.get("stack_id"),
+                        "scene_identity_hash": item.get("scene_identity_hash"),
+                        "center_bucket": item.get("center_bucket"),
+                        "center": item.get("center"),
+                        "admin_region": item.get("admin_region"),
+                        "common_overlap_ratio": item.get("common_overlap_ratio"),
+                    }
+                    for item in group
+                    if item is not candidate
+                ]
+                candidate["same_date_sequence_candidate_count"] = len(group)
+                candidate["same_date_sequence_rank"] = index
+                candidate["same_date_sequence_distinct_scene_group_count"] = len(scene_hashes)
+                candidate["same_date_sequence_siblings"] = siblings[:12]
+                candidate["same_date_sequence_has_different_scene_groups"] = len(scene_hashes) > 1
+
+        run_index = existing_run_index or {}
+        for candidate in candidates:
+            scene_hash = str(candidate.get("scene_identity_hash") or "")
+            candidate["existing_same_scene_runs"] = run_index.get(scene_hash, []) if scene_hash else []
+
+    def _existing_run_identity_index(self) -> dict[str, list[dict[str, Any]]]:
+        run_root = self.production_root / "runs"
+        index: dict[str, list[dict[str, Any]]] = {}
+        if not run_root.exists():
+            return index
+        for manifest_path in sorted(run_root.glob("*/run_manifest.json")):
+            try:
+                manifest = self._read_json(manifest_path)
+                stack_manifest = self._load_stack_manifest_for_run(manifest_path.parent, manifest)
+                identity = self._scene_identity_summary(stack_manifest.get("scenes") or [])
+                scene_hash = identity.get("scene_identity_hash")
+                if not scene_hash:
+                    continue
+                stack = stack_manifest.get("stack") or manifest.get("stack") or {}
+                coverage = self._build_stack_geographic_coverage(stack_manifest)
+                index.setdefault(str(scene_hash), []).append(
+                    {
+                        "run_id": manifest.get("run_id") or manifest_path.parent.name,
+                        "run_label": manifest.get("run_label"),
+                        "status": manifest.get("status") or "UNKNOWN",
+                        "created_at": manifest.get("created_at"),
+                        "stack_id": manifest.get("stack_id") or stack_manifest.get("stack_id"),
+                        "scene_count": manifest.get("scene_count") or identity.get("scene_name_count"),
+                        "pair_count": manifest.get("pair_count"),
+                        "center_bucket": stack.get("center_bucket"),
+                        "date_start": coverage.get("date_start"),
+                        "date_end": coverage.get("date_end"),
+                    }
+                )
+            except Exception:
+                continue
+        for runs in index.values():
+            runs.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return index
+
+    def _load_stack_manifest_for_run(self, run_dir: Path, run_manifest: dict[str, Any]) -> dict[str, Any]:
+        stack_manifest = self._read_optional_json(run_dir / "stack_manifest.json")
+        if stack_manifest:
+            return stack_manifest
+        stack_manifest_path = Path(str(run_manifest.get("stack_manifest_path") or ""))
+        if stack_manifest_path.is_file():
+            return self._read_optional_json(stack_manifest_path) or {}
+        return {}
+
+    def _substack_group_key(self, observation_key: str, scenes: list[dict[str, Any]]) -> str:
+        digest_source = "|".join(self._scene_identity_key(scenes))
+        digest = hashlib.sha1(digest_source.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        dates = [
+            str(scene.get("date") or "").strip()
+            for scene in scenes
+            if str(scene.get("date") or "").strip()
+        ]
+        date_start = min(dates) if dates else "unknown"
+        date_end = max(dates) if dates else "unknown"
+        return f"{observation_key}|substack_{date_start}_{date_end}_{digest}"
+
+    def _extract_common_overlap_subgroups(
+        self,
+        scenes: list[dict[str, Any]],
+        *,
+        require_orbits: bool,
+        min_scenes: int,
+        min_common_overlap_ratio: float,
+    ) -> list[list[dict[str, Any]]]:
+        threshold = max(0.0, float(min_common_overlap_ratio or 0.0))
+        if threshold <= 0:
+            return []
+        usable = [
+            scene for scene in scenes
+            if scene.get("has_orbit") or not require_orbits
+        ]
+        usable = [
+            scene for scene in usable
+            if self._normalize_bbox(scene.get("bbox")) and str(scene.get("date") or "").strip()
+        ]
+        if len(usable) < min_scenes:
+            return []
+
+        subgroups: list[list[dict[str, Any]]] = []
+        seen: set[tuple[str, ...]] = set()
+        seeds = sorted(
+            usable,
+            key=lambda item: (
+                str(item.get("date") or ""),
+                float(item.get("center_lon") or 0.0),
+                float(item.get("center_lat") or 0.0),
+                str(item.get("scene_name") or ""),
+            ),
+        )
+        for seed in seeds:
+            subgroup = self._grow_common_overlap_subgroup(
+                seed=seed,
+                scenes=usable,
+                min_common_overlap_ratio=threshold,
+            )
+            if len(subgroup) < min_scenes:
+                continue
+            if self._scene_common_overlap_ratio(subgroup) < threshold:
+                continue
+            key = self._scene_identity_key(subgroup)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            subgroups.append(subgroup)
+
+        subgroups.sort(
+            key=lambda items: (
+                -len(items),
+                -self._scene_common_overlap_ratio(items),
+                self._subgroup_temporal_gap_score(items),
+                self._scene_identity_key(items),
+            )
+        )
+        return subgroups[:12]
+
+    def _grow_common_overlap_subgroup(
+        self,
+        *,
+        seed: dict[str, Any],
+        scenes: list[dict[str, Any]],
+        min_common_overlap_ratio: float,
+    ) -> list[dict[str, Any]]:
+        selected = [seed]
+        selected_names = {str(seed.get("scene_name") or "")}
+
+        while True:
+            selected_dates = {str(scene.get("date") or "").strip() for scene in selected}
+            best_scene: dict[str, Any] | None = None
+            best_score: tuple[Any, ...] | None = None
+            for scene in scenes:
+                scene_name = str(scene.get("scene_name") or "")
+                if scene_name in selected_names:
+                    continue
+                scene_date = str(scene.get("date") or "").strip()
+                if not scene_date or scene_date in selected_dates:
+                    continue
+                trial = selected + [scene]
+                ratio = self._scene_common_overlap_ratio(trial)
+                if ratio < min_common_overlap_ratio:
+                    continue
+                score = (
+                    len(trial),
+                    ratio,
+                    -self._scene_distance(seed, scene),
+                    str(scene.get("date") or ""),
+                    str(scene.get("scene_name") or ""),
+                )
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_scene = scene
+            if best_scene is None:
+                break
+            selected.append(best_scene)
+            selected_names.add(str(best_scene.get("scene_name") or ""))
+
+        return sorted(selected, key=lambda item: (str(item.get("date") or ""), str(item.get("scene_name") or "")))
+
+    def _scene_common_overlap_ratio(self, scenes: list[dict[str, Any]]) -> float:
+        bbox_intersection = self._bbox_intersection([scene.get("bbox") for scene in scenes])
+        bbox_union = self._stack_bbox_union({"scenes": scenes})
+        union_area = self._bbox_area(bbox_union)
+        if not bbox_intersection or union_area <= 0:
+            return 0.0
+        return self._bbox_area(bbox_intersection) / union_area
+
+    def _scene_distance(self, first: dict[str, Any], second: dict[str, Any]) -> float:
+        first_lon = self._as_float(first.get("center_lon")) or 0.0
+        first_lat = self._as_float(first.get("center_lat")) or 0.0
+        second_lon = self._as_float(second.get("center_lon")) or 0.0
+        second_lat = self._as_float(second.get("center_lat")) or 0.0
+        return math.hypot(first_lon - second_lon, first_lat - second_lat)
+
+    def _subgroup_temporal_gap_score(self, scenes: list[dict[str, Any]]) -> int:
+        gaps = self._temporal_gaps([
+            str(scene.get("date") or "")
+            for scene in scenes
+            if str(scene.get("date") or "").strip()
+        ])
+        return max(gaps) if gaps else 0
+
+    def _dedupe_stack_candidates(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        by_scene_key: dict[tuple[str, ...], dict[str, Any]] = {}
+        for candidate in candidates:
+            scene_key = self._scene_identity_key(candidate.get("scenes") or [])
+            if not scene_key:
+                continue
+            current = by_scene_key.get(scene_key)
+            if current is None or self._stack_candidate_rank(candidate) > self._stack_candidate_rank(current):
+                by_scene_key[scene_key] = candidate
+
+        by_stack_id: dict[str, dict[str, Any]] = {}
+        for candidate in by_scene_key.values():
+            stack_id = str(candidate.get("stack_id") or "")
+            if not stack_id:
+                continue
+            current = by_stack_id.get(stack_id)
+            if current is None or self._stack_candidate_rank(candidate) > self._stack_candidate_rank(current):
+                by_stack_id[stack_id] = candidate
+        return list(by_stack_id.values())
+
+    @staticmethod
+    def _stack_candidate_rank(candidate: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            int(candidate.get("status") == "READY"),
+            int(candidate.get("usable_scene_count") or 0),
+            float(candidate.get("common_overlap_ratio") or 0.0),
+            -int(candidate.get("missing_orbit_count") or 0),
+            -int(candidate.get("max_temporal_gap_days") or 0),
+            str(candidate.get("date_start") or ""),
+            str(candidate.get("stack_id") or ""),
+        )
+
     def _cluster_aoi_scenes(self, scenes: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         sorted_scenes = sorted(
             scenes,
@@ -5047,6 +6814,108 @@ class SbasInsarProductionService:
             spatial_key = f"center_{self._center_bucket(lon, lat)}"
         return f"{observation_key}|{spatial_key}"
 
+    def _select_date_keyed_stack_scenes(self, scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Gamma expert scripts key SLC/RSLC products by date, so a run can use one scene per date."""
+        duplicate_audit = self._duplicate_scene_date_audit(scenes)
+        duplicate_dates = set(duplicate_audit.get("duplicate_dates") or [])
+        if not duplicate_dates:
+            return list(scenes)
+
+        overlap = self._bbox_intersection([scene.get("bbox") for scene in scenes])
+        if overlap:
+            target_lon = (overlap["min_lon"] + overlap["max_lon"]) / 2
+            target_lat = (overlap["min_lat"] + overlap["max_lat"]) / 2
+        else:
+            center = self._stack_center({"scenes": scenes}) or {}
+            target_lon = self._as_float(center.get("lon")) or 0.0
+            target_lat = self._as_float(center.get("lat")) or 0.0
+
+        selected: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+        by_date: dict[str, list[dict[str, Any]]] = {}
+        for scene in scenes:
+            date = str(scene.get("date") or "").strip()
+            if not date:
+                continue
+            by_date.setdefault(date, []).append(scene)
+
+        def score(scene: dict[str, Any]) -> tuple[float, float, str]:
+            bbox = self._normalize_bbox(scene.get("bbox"))
+            if bbox and overlap:
+                common = self._bbox_intersection([bbox, overlap])
+                overlap_area = self._bbox_area(common)
+            else:
+                overlap_area = 0.0
+            lon = self._as_float(scene.get("center_lon")) or target_lon
+            lat = self._as_float(scene.get("center_lat")) or target_lat
+            center_distance = math.hypot(lon - target_lon, lat - target_lat)
+            return (overlap_area, -center_distance, str(scene.get("scene_name") or ""))
+
+        for date in sorted(by_date):
+            candidates = by_date[date]
+            winner = max(candidates, key=score)
+            selected.append(
+                {
+                    **winner,
+                    "date_keyed_scene_selected": True,
+                    "same_date_scene_count": len(candidates),
+                    "same_date_selection_policy": "max_common_overlap_then_nearest_cluster_center",
+                }
+            )
+            for candidate in candidates:
+                if candidate is winner:
+                    continue
+                excluded.append(
+                    {
+                        **candidate,
+                        "date_keyed_scene_excluded": True,
+                        "exclude_reason": "same_date_scene_not_selected_for_gamma_date_keyed_stack",
+                        "selected_scene_name": winner.get("scene_name"),
+                        "same_date_scene_count": len(candidates),
+                    }
+                )
+
+        duplicate_audit["policy"] = "one_scene_per_date"
+        duplicate_audit["selection_policy"] = "max_common_overlap_then_nearest_cluster_center"
+        duplicate_audit["excluded_scene_count"] = len(excluded)
+        for scene in selected:
+            scene["date_keyed_duplicate_audit"] = duplicate_audit
+            scene["date_keyed_excluded_scenes"] = excluded
+        return selected
+
+    @staticmethod
+    def _duplicate_scene_date_audit(scenes: list[dict[str, Any]]) -> dict[str, Any]:
+        by_date: dict[str, list[dict[str, Any]]] = {}
+        for scene in scenes:
+            date = str(scene.get("date") or "").strip()
+            if date:
+                by_date.setdefault(date, []).append(scene)
+        duplicate_groups = []
+        for date, items in sorted(by_date.items()):
+            if len(items) <= 1:
+                continue
+            duplicate_groups.append(
+                {
+                    "date": date,
+                    "count": len(items),
+                    "scene_names": [str(item.get("scene_name") or "") for item in items],
+                    "centers": [
+                        {
+                            "lon": item.get("center_lon"),
+                            "lat": item.get("center_lat"),
+                        }
+                        for item in items
+                    ],
+                }
+            )
+        return {
+            "has_duplicate_dates": bool(duplicate_groups),
+            "duplicate_dates": [item["date"] for item in duplicate_groups],
+            "duplicate_groups": duplicate_groups,
+            "scene_count": len(scenes),
+            "unique_date_count": len(by_date),
+        }
+
     def _build_stack_candidate(
         self,
         scenes: list[dict[str, Any]],
@@ -5055,9 +6924,24 @@ class SbasInsarProductionService:
         require_orbits: bool,
         discovery_mode: str = "strict",
         aoi_summary: dict[str, Any] | None = None,
-        min_common_overlap_ratio: float = 0.0,
+        min_common_overlap_ratio: float | None = None,
     ) -> dict[str, Any]:
         scenes = sorted(scenes, key=lambda item: str(item.get("date") or ""))
+        date_keyed_duplicate_audit = {}
+        date_keyed_excluded_scenes: list[dict[str, Any]] = []
+        for scene in scenes:
+            if scene.get("date_keyed_duplicate_audit"):
+                date_keyed_duplicate_audit = scene.get("date_keyed_duplicate_audit") or {}
+            if scene.get("date_keyed_excluded_scenes"):
+                date_keyed_excluded_scenes = scene.get("date_keyed_excluded_scenes") or []
+        scenes = [
+            {
+                key: value
+                for key, value in scene.items()
+                if key not in {"date_keyed_duplicate_audit", "date_keyed_excluded_scenes"}
+            }
+            for scene in scenes
+        ]
         first = scenes[0]
         orbit_ready = [scene for scene in scenes if scene.get("has_orbit")]
         usable = orbit_ready if require_orbits else scenes
@@ -5085,7 +6969,9 @@ class SbasInsarProductionService:
         )
         if mode == "aoi" and usable and not bbox_intersection:
             blockers.append("no common overlap across usable scenes")
-        if mode == "aoi" and min_common_overlap_ratio > 0 and common_overlap_ratio < min_common_overlap_ratio:
+        if mode != "aoi" and usable and not bbox_intersection:
+            blockers.append("no common overlap across usable scenes")
+        if min_common_overlap_ratio > 0 and common_overlap_ratio < min_common_overlap_ratio:
             blockers.append(
                 f"common_overlap_ratio {common_overlap_ratio:.3f} < min_common_overlap_ratio {min_common_overlap_ratio:.3f}"
             )
@@ -5106,6 +6992,7 @@ class SbasInsarProductionService:
             "discovery_mode": mode,
             "aoi": aoi_summary,
             "group_key": group_key,
+            "sensor_family": first.get("satellite_family") or self._normalize_sensor_family(first.get("satellite")),
             "hard_group_fields": [
                 "satellite",
                 "satellite_mode",
@@ -5113,17 +7000,18 @@ class SbasInsarProductionService:
                 "orbit_direction",
                 "imaging_mode",
                 "polarization",
+                "footprint_common_overlap_cluster",
             ] if mode == "aoi" else [
                 "satellite",
                 "satellite_mode",
-                "receiving_station",
                 "relative_orbit",
                 "orbit_direction",
                 "imaging_mode",
                 "polarization",
-                "center_bucket",
+                "footprint_common_overlap_cluster",
             ],
-            "soft_group_fields": ["receiving_station", "center_bucket"] if mode == "aoi" else [],
+            "soft_group_fields": ["receiving_station", "center_bucket"],
+            "grouping_strategy": first.get("aoi_cluster_source") or "footprint_common_overlap",
             "satellite": first.get("satellite"),
             "satellite_mode": first.get("satellite_mode"),
             "receiving_station": first.get("receiving_station"),
@@ -5146,6 +7034,7 @@ class SbasInsarProductionService:
             "bbox": bbox_union,
             "bbox_intersection": bbox_intersection,
             "common_overlap_ratio": common_overlap_ratio,
+            "min_common_overlap_ratio": min_common_overlap_ratio,
             "aoi_overlap_ratio_min": min(aoi_overlap_values) if aoi_overlap_values else None,
             "aoi_overlap_ratio_max": max(aoi_overlap_values) if aoi_overlap_values else None,
             "aoi_overlap_ratio_mean": (
@@ -5155,12 +7044,31 @@ class SbasInsarProductionService:
             "center": center,
             "admin_region": admin_region,
             "scenes": scenes,
+            "date_keyed_duplicate_audit": date_keyed_duplicate_audit or self._duplicate_scene_date_audit(scenes),
+            "date_keyed_excluded_scenes": date_keyed_excluded_scenes,
         }
 
     @staticmethod
     def _stable_id(value: str) -> str:
         digest = hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:12]
         return f"sbas_{digest}"
+
+    @staticmethod
+    def _effective_min_common_overlap_ratio(value: Any) -> float:
+        try:
+            requested = float(value or 0.0)
+        except (TypeError, ValueError):
+            requested = 0.0
+        try:
+            configured = float(
+                settings.GAMMA_SBAS_MIN_COMMON_OVERLAP_RATIO
+                or GAMMA_SBAS_FALLBACK_MIN_COMMON_OVERLAP_RATIO
+            )
+        except (TypeError, ValueError):
+            configured = GAMMA_SBAS_FALLBACK_MIN_COMMON_OVERLAP_RATIO
+        requested = min(1.0, max(0.0, requested))
+        configured = min(1.0, max(0.0, configured))
+        return max(requested, configured)
 
     @staticmethod
     def _temporal_gaps(dates: list[str]) -> list[int]:
@@ -5240,6 +7148,14 @@ class SbasInsarProductionService:
     def _write_script(path: Path, lines: list[str]) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         text = "\n".join(lines)
+        commands = SbasInsarProductionService._extract_shell_command_tokens(text)
+        blocking_interactive = sorted(set(GAMMA_SBAS_BLOCKING_INTERACTIVE_TOOLS) & commands)
+        if blocking_interactive:
+            raise ValueError(
+                "Refusing to write an interactive Gamma SBAS production script: "
+                f"{path} contains {', '.join(blocking_interactive)}. "
+                f"{GAMMA_SBAS_UNATTENDED_POLICY}"
+            )
         try:
             path.write_text(text, encoding="utf-8", newline="\n")
             return path
@@ -5276,6 +7192,20 @@ class SbasInsarProductionService:
         if not run_dir.is_dir():
             raise FileNotFoundError(f"run not found: {clean_id}")
         return run_dir
+
+    def _resolve_production_delete_path(self, value: Any) -> Path | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        path = Path(text)
+        if not path.is_absolute():
+            path = self.production_root / path
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self.production_root.resolve())
+        except ValueError as exc:
+            raise ValueError(f"refusing to delete path outside SBAS production root: {resolved}") from exc
+        return resolved
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:
@@ -5316,6 +7246,71 @@ class SbasInsarProductionService:
         }
         self._write_json(run_dir / "workspace.json", workspace)
         return workspace
+
+    def _ensure_s1_planning_workspace(self, run_dir: Path) -> dict[str, Any]:
+        dirs = ("RAW", "orbits", "planning", "logs", "scripts", "state", "publish")
+        created: dict[str, str] = {}
+        for dirname in dirs:
+            path = run_dir / dirname
+            path.mkdir(parents=True, exist_ok=True)
+            created[dirname] = str(path)
+        workspace = {
+            "schema": "insar.s1-gamma-sbas-planning-workspace/v1",
+            "run_root": str(run_dir),
+            "directories": created,
+            "layout_source": "Sentinel-1 Gamma SBAS planning profile",
+            "execution_enabled": False,
+        }
+        self._write_json(run_dir / "workspace.json", workspace)
+        return workspace
+
+    def _build_s1_workflow_manifest(
+        self,
+        run_dir: Path,
+        run_manifest: dict[str, Any],
+        stack_manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        steps = []
+        for template in S1_GAMMA_SBAS_PLANNING_STEPS:
+            steps.append(
+                {
+                    **dict(template),
+                    "enabled": False,
+                    "script": None,
+                    "script_wsl": None,
+                    "log": str(run_dir / "logs" / f"{template['id']}.log"),
+                    "log_wsl": self._windows_path_to_wsl_mount(str(run_dir / "logs" / f"{template['id']}.log")),
+                    "expert_tools": [],
+                }
+            )
+        return {
+            "schema": "insar.s1-gamma-sbas-workflow-planning/v1",
+            "run_id": run_manifest.get("run_id") or run_dir.name,
+            "workflow_code": "sbas_insar",
+            "processor_code": "gamma_ipta_sbas",
+            "engine_code": "gamma",
+            "profile_code": "s1_gamma_sbas",
+            "runtime_id": settings.GAMMA_SBAS_RUNTIME_ID,
+            "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "run_root": str(run_dir),
+            "run_root_wsl": self._windows_path_to_wsl_mount(str(run_dir)),
+            "execution_enabled": False,
+            "execution_blocker": "Sentinel-1 Gamma TOPS/SBAS scripts have not been verified.",
+            "stack": stack_manifest.get("stack") or {},
+            "scenes": stack_manifest.get("scenes") or [],
+            "pair_network": stack_manifest.get("pair_network") or {},
+            "directories": {
+                key: str(run_dir / key)
+                for key in ("RAW", "orbits", "planning", "logs", "scripts", "state", "publish")
+            },
+            "steps": steps,
+            "expert_document": {
+                "schema": "insar.s1-gamma-sbas-design/v1",
+                "source": "docs/SENTINEL1_GAMMA_SBAS_NO_STITCH_DESIGN.md",
+                "section_count": 0,
+                "steps": [],
+            },
+        }
 
     def _build_workflow_manifest(
         self,
@@ -5455,7 +7450,7 @@ class SbasInsarProductionService:
                     logs.append(str(workflow_step.get("log")))
             status = str(template.get("implementation_status") or "planned")
             if planned and status.startswith("implemented"):
-                status = "planned_bridge"
+                status = "planned"
             expert_steps.append(
                 {
                     "id": template.get("id"),
@@ -5467,12 +7462,14 @@ class SbasInsarProductionService:
                     "mapped_workflow_steps": mapped_workflow_steps,
                     "enabled": enabled,
                     "optional": optional,
-                    "command_count": len(template.get("commands") or []),
-                    "commands": list(template.get("commands") or []),
-                    "scripts": scripts,
-                    "logs": logs,
-                }
-            )
+            "command_count": len(template.get("commands") or []),
+            "commands": list(template.get("commands") or []),
+            "manual_qc_tools": list(template.get("manual_qc_tools") or []),
+            "unattended_policy": template.get("unattended_policy"),
+            "scripts": scripts,
+            "logs": logs,
+        }
+    )
         return expert_steps
 
     def _summarize_workflow_state(self, workflow_manifest: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
@@ -5537,142 +7534,59 @@ class SbasInsarProductionService:
         params: dict[str, Any],
         reference_date: str,
     ) -> dict[str, dict[str, Any]]:
+        self._ensure_gamma_date_keyed_stack(stack_manifest)
+        scenes = sorted(stack_manifest.get("scenes") or [], key=lambda item: str(item.get("date") or ""))
+        if not scenes:
+            raise ValueError("Gamma SBAS expert workflow requires at least one LT1 scene")
+        if not reference_date or reference_date not in {str(scene.get("date") or "") for scene in scenes}:
+            reference_date = str(scenes[len(scenes) // 2].get("date") or "").strip()
+        if not reference_date:
+            raise ValueError("Gamma SBAS expert workflow requires a reference date")
+
+        rlks = self._bounded_int(params.get("rlks"), default=8, minimum=1, maximum=64)
+        azlks = self._bounded_int(params.get("azlks"), default=8, minimum=1, maximum=64)
+        reference_window = self._bounded_int(params.get("reference_window"), default=16, minimum=1, maximum=256)
+        dem_source = self._resolve_expert_dem_import_source(stack_manifest)
+        dem_source = self._materialize_expert_dem_import_source(run_dir, dem_source)
+
+        writers = {
+            "01_workspace_data": self._write_expert_workspace_script,
+            "02_import_lt1_slc": self._write_expert_import_slc_script,
+            "03_reference_mli": self._write_expert_reference_mli_script,
+            "04_dem_lookup": self._write_expert_dem_lookup_script,
+            "05_coreg_prep": self._write_expert_coreg_prep_script,
+            "06_coregister_scenes": self._write_expert_coregister_scenes_script,
+            "07_rmli_average": self._write_expert_rmli_average_script,
+            "08_diff_network": self._write_expert_diff_network_script,
+            "09_filter_unwrap": self._write_expert_filter_unwrap_script,
+            "10_detrend_atm": self._write_expert_detrend_atm_script,
+            "11_sbas_inversion": self._write_expert_sbas_inversion_script,
+            "12_outputs_points": self._write_expert_outputs_points_script,
+        }
+        context = {
+            "run_dir": run_dir,
+            "scenes": scenes,
+            "reference_date": reference_date,
+            "rlks": rlks,
+            "azlks": azlks,
+            "reference_window": reference_window,
+            "dem_source": dem_source,
+        }
         script_records: dict[str, dict[str, Any]] = {}
-
-        workspace_script = run_dir / "scripts" / "01_workspace_data.sh"
-        workspace_script.parent.mkdir(parents=True, exist_ok=True)
-        workspace_script.write_text(
-            "\n".join(
-                [
-                    "#!/usr/bin/env bash",
-                    "set -euo pipefail",
-                    f'RUN_ROOT="{self._windows_path_to_wsl_mount(str(run_dir))}"',
-                    'mkdir -p "${RUN_ROOT}"/{RAW,SLC,dem,rslc_prep,mli_dir,diff_dir,diff1_dir,sbas,publish,logs,scripts,state}',
-                    'find "${RUN_ROOT}" -maxdepth 1 -type d -printf "%f\\n" | sort',
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-            newline="\n",
-        )
-        script_records["01_workspace_data"] = self._script_record(
-            workspace_script,
-            notes=["Expert section 1 workspace/data-layout check."],
-        )
-
-        try:
-            baseline_script = self._write_baseline_audit_script(
-                run_dir,
-                stack_manifest=stack_manifest,
-                rlks=int(params.get("rlks") or 8),
-                azlks=int(params.get("azlks") or 8),
-                max_delta_n=1,
-            )
-            for step_id, filename in (
-                ("01_import_slc", "01_import_slc.sh"),
-                ("02_import_lt1_slc", "02_import_lt1_slc.sh"),
-                ("03_reference_mli", "03_reference_mli.sh"),
-            ):
-                target = run_dir / "scripts" / filename
-                self._copy_script_alias(baseline_script, target)
-                script_records[step_id] = self._script_record(
-                    target,
-                    notes=["Current bridge reuses verified baseline-audit import/multilook/base_calc script."],
-                )
-        except Exception as exc:
-            script_records["01_import_slc"] = {"notes": [f"script not ready: {exc}"]}
-            script_records["02_import_lt1_slc"] = {"notes": [f"script not ready: {exc}"]}
-            script_records["03_reference_mli"] = {"notes": [f"script not ready: {exc}"]}
-
-        coreg = run_manifest.get("coregistration") or {}
-        coreg_script = coreg.get("script_path")
-        if coreg_script:
-            source = Path(self._path_to_windows(coreg_script) or coreg_script)
-            for step_id, filename in (
-                ("02_coregister_stack", "02_coregister_stack.sh"),
-                ("05_coreg_prep", "05_coreg_prep.sh"),
-                ("06_coregister_scenes", "06_coregister_scenes.sh"),
-                ("07_rmli_average", "07_rmli_average.sh"),
-            ):
-                target = run_dir / "scripts" / filename
-                self._copy_script_alias(source, target)
-                script_records[step_id] = self._script_record(target)
-
-        rdc_dem = run_manifest.get("rdc_dem") or {}
-        rdc_script = rdc_dem.get("script_path")
-        if rdc_script:
-            source = Path(self._path_to_windows(rdc_script) or rdc_script)
-            for step_id, filename in (
-                ("03_prepare_dem", "03_prepare_dem.sh"),
-                ("04_dem_lookup", "04_dem_lookup.sh"),
-            ):
-                target = run_dir / "scripts" / filename
-                self._copy_script_alias(source, target)
-                script_records[step_id] = self._script_record(target)
-
-        interferograms = run_manifest.get("interferograms") or {}
-        intf_script = interferograms.get("script_path")
-        if intf_script:
-            source = Path(self._path_to_windows(intf_script) or intf_script)
-            for step_id, filename in (
-                ("04_build_network_diff", "04_build_network_diff.sh"),
-                ("08_diff_network", "08_diff_network.sh"),
-                ("09_filter_unwrap", "09_filter_unwrap.sh"),
-            ):
-                target = run_dir / "scripts" / filename
-                self._copy_script_alias(source, target)
-                script_records[step_id] = self._script_record(target)
-
-        detrend_atm = run_manifest.get("detrend_atm") or {}
-        detrend_script = detrend_atm.get("script_path")
-        if detrend_script:
-            source = Path(self._path_to_windows(detrend_script) or detrend_script)
-            for step_id, filename in (
-                ("05_detrend_atm", "05_detrend_atm.sh"),
-                ("10_detrend_atm", "10_detrend_atm.sh"),
-            ):
-                target = run_dir / "scripts" / filename
-                self._copy_script_alias(source, target)
-                script_records[step_id] = self._script_record(target)
-
-        ipta = run_manifest.get("ipta_timeseries") or {}
-        ipta_script = ipta.get("script_path")
-        if ipta_script:
-            source = Path(self._path_to_windows(ipta_script) or ipta_script)
-            for step_id, filename in (
-                ("06_sbas_inversion", "06_sbas_inversion.sh"),
-                ("11_sbas_inversion", "11_sbas_inversion.sh"),
-            ):
-                target = run_dir / "scripts" / filename
-                self._copy_script_alias(source, target)
-                script_records[step_id] = self._script_record(target)
-
-        publish = run_manifest.get("publish_products") or {}
-        publish_script = publish.get("script_path")
-        if publish_script:
-            target = run_dir / "scripts" / "07_publish_products.sh"
-            self._copy_script_alias(Path(self._path_to_windows(publish_script) or publish_script), target)
-            script_records["07_publish_products"] = self._script_record(target)
-
-        monitor = run_manifest.get("monitor_point_products") or {}
-        monitor_script = monitor.get("script_path")
-        if monitor_script:
-            target = run_dir / "scripts" / "08_point_timeseries.sh"
-            self._copy_script_alias(Path(self._path_to_windows(monitor_script) or monitor_script), target)
-            script_records["08_point_timeseries"] = self._script_record(target)
-        if publish_script or monitor_script:
-            target = run_dir / "scripts" / "12_outputs_points.sh"
-            wrapper_lines = ["#!/usr/bin/env bash", "set -euo pipefail"]
-            if publish_script:
-                wrapper_lines.append(f'bash "{self._windows_path_to_wsl_mount(str(Path(self._path_to_windows(publish_script) or publish_script)))}"')
-            if monitor_script:
-                wrapper_lines.append(f'bash "{self._windows_path_to_wsl_mount(str(Path(self._path_to_windows(monitor_script) or monitor_script)))}"')
-            wrapper_lines.append("")
-            target.write_text("\n".join(wrapper_lines), encoding="utf-8", newline="\n")
-            script_records["12_outputs_points"] = self._script_record(
-                target,
-                notes=["Expert section 12 wrapper runs publish products followed by monitoring-point extraction when both scripts are available."],
-            )
+        for template in GAMMA_SBAS_WORKFLOW_STEPS:
+            step_id = str(template.get("id") or "")
+            writer = writers.get(step_id)
+            if not writer:
+                continue
+            script_path = writer(**context)
+            audit = self._audit_expert_step_script(step_id, script_path)
+            script_records[step_id] = self._script_record(script_path, notes=audit.get("notes") or [])
+            script_records[step_id]["command_audit"] = audit
+        audit_summary = self._audit_expert_workflow_scripts(script_records)
+        self._write_json(run_dir / "expert_command_audit.json", audit_summary)
+        if not audit_summary.get("ready"):
+            problems = "; ".join(audit_summary.get("problems") or [])
+            raise ValueError(f"Gamma SBAS expert command audit failed: {problems}")
         return script_records
 
     def _script_record(self, path: Path, *, notes: list[str] | None = None) -> dict[str, Any]:
@@ -5689,6 +7603,980 @@ class SbasInsarProductionService:
         if source.resolve() == target.resolve():
             return
         target.write_text(source.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8", newline="\n")
+
+    @staticmethod
+    def _extract_shell_command_tokens(script_text: str) -> set[str]:
+        tokens: set[str] = set()
+        for line in script_text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            for separator in (";", "&&", "||"):
+                stripped = stripped.replace(separator, "\n")
+            for segment in stripped.splitlines():
+                part = segment.strip()
+                if not part or part.startswith("#"):
+                    continue
+                first_word = part.split(None, 1)[0]
+                normalized_first_word = first_word.strip("'\"{}()")
+                if normalized_first_word in {
+                    "if",
+                    "then",
+                    "else",
+                    "fi",
+                    "for",
+                    "while",
+                    "do",
+                    "done",
+                    "{",
+                    "}",
+                    "local",
+                    "test",
+                    "echo",
+                    "printf",
+                    "cp",
+                    "rm",
+                    "mkdir",
+                    "ln",
+                    "cd",
+                    "read",
+                    "return",
+                    "exit",
+                    ":",
+                    "source",
+                    "set",
+                }:
+                    continue
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", part):
+                    continue
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", part.split("$(", 1)[0]):
+                    continue
+                match = re.match(r'(?:"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"\s+)?([A-Za-z0-9_._-]+)', part)
+                if match:
+                    tokens.add(match.group(1))
+        return tokens
+
+    def _audit_expert_step_script(self, step_id: str, script_path: Path) -> dict[str, Any]:
+        text = script_path.read_text(encoding="utf-8", errors="ignore") if script_path.is_file() else ""
+        commands = self._extract_shell_command_tokens(text)
+        required = set(GAMMA_SBAS_REQUIRED_STEP_TOOLS.get(step_id) or set())
+        missing = sorted(required - commands)
+        forbidden = sorted(set(GAMMA_SBAS_FORBIDDEN_DEFAULT_TOOLS) & commands)
+        blocking_interactive = sorted(set(GAMMA_SBAS_BLOCKING_INTERACTIVE_TOOLS) & commands)
+        manual_qc_tools = set()
+        for template in GAMMA_SBAS_WORKFLOW_STEPS:
+            if str(template.get("id") or "") == step_id:
+                manual_qc_tools = set(template.get("manual_qc_tools") or [])
+                break
+        manual_qc_not_executed = sorted(manual_qc_tools - commands)
+        ready = not missing and not forbidden and not blocking_interactive
+        notes = []
+        if ready:
+            notes.append("Expert command audit passed.")
+        if missing:
+            notes.append("Missing required expert commands: " + ", ".join(missing))
+        if forbidden:
+            notes.append("Forbidden legacy commands present: " + ", ".join(forbidden))
+        if blocking_interactive:
+            notes.append("Blocking interactive commands present: " + ", ".join(blocking_interactive))
+        if manual_qc_not_executed:
+            notes.append(
+                "Manual QC display commands intentionally not executed in unattended production: "
+                + ", ".join(manual_qc_not_executed)
+            )
+        return {
+            "schema": "insar.gamma-sbas-expert-step-command-audit/v1",
+            "step_id": step_id,
+            "script": str(script_path),
+            "ready": ready,
+            "commands": sorted(commands),
+            "required_commands": sorted(required),
+            "missing_required_commands": missing,
+            "forbidden_commands": forbidden,
+            "blocking_interactive_commands": blocking_interactive,
+            "manual_qc_tools": sorted(manual_qc_tools),
+            "manual_qc_tools_not_executed": manual_qc_not_executed,
+            "unattended_policy": GAMMA_SBAS_UNATTENDED_POLICY,
+            "notes": notes,
+        }
+
+    def _audit_expert_workflow_scripts(self, script_records: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        step_audits = {
+            step_id: record.get("command_audit") or {}
+            for step_id, record in script_records.items()
+        }
+        problems: list[str] = []
+        for step_id, audit in step_audits.items():
+            if not audit.get("ready"):
+                missing = ", ".join(audit.get("missing_required_commands") or [])
+                forbidden = ", ".join(audit.get("forbidden_commands") or [])
+                interactive = ", ".join(audit.get("blocking_interactive_commands") or [])
+                detail = "; ".join(
+                    item
+                    for item in [
+                        f"missing={missing}" if missing else "",
+                        f"forbidden={forbidden}" if forbidden else "",
+                        f"interactive={interactive}" if interactive else "",
+                    ]
+                    if item
+                )
+                problems.append(f"{step_id}: {detail or 'command audit failed'}")
+        ready = not problems and len(step_audits) >= len(GAMMA_SBAS_WORKFLOW_STEPS)
+        if len(step_audits) < len(GAMMA_SBAS_WORKFLOW_STEPS):
+            problems.append("not all expert workflow scripts were materialized")
+            ready = False
+        return {
+            "schema": "insar.gamma-sbas-expert-workflow-command-audit/v1",
+            "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "ready": ready,
+            "step_count": len(step_audits),
+            "expected_step_count": len(GAMMA_SBAS_WORKFLOW_STEPS),
+            "problems": problems,
+            "steps": step_audits,
+            "forbidden_default_tools": sorted(GAMMA_SBAS_FORBIDDEN_DEFAULT_TOOLS),
+            "blocking_interactive_tools": sorted(GAMMA_SBAS_BLOCKING_INTERACTIVE_TOOLS),
+            "unattended_policy": GAMMA_SBAS_UNATTENDED_POLICY,
+        }
+
+    def _expert_script_header(self, run_dir: Path, *, reference_date: str, rlks: int, azlks: int) -> list[str]:
+        env_script = (
+            self._windows_path_to_wsl_mount(settings.GAMMA_SBAS_ENV_SCRIPT or settings.PYINT_GAMMA_ENV_SCRIPT)
+            or f"{self._windows_path_to_wsl_mount(settings.PROJECT_ROOT)}/deploy/wsl/profiles/gamma_env.sh"
+        )
+        return [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            "",
+            f'RUN_ROOT="{self._windows_path_to_wsl_mount(str(run_dir))}"',
+            'RAW_DIR="${RUN_ROOT}/RAW"',
+            'SLC_DIR="${RUN_ROOT}/SLC"',
+            'DEM_DIR="${RUN_ROOT}/dem"',
+            'RSLC_DIR="${RUN_ROOT}/rslc_prep"',
+            'MLI_DIR="${RUN_ROOT}/mli_dir"',
+            'DIFF_DIR="${RUN_ROOT}/diff_dir"',
+            'DIFF1_DIR="${RUN_ROOT}/diff1_dir"',
+            'SBAS_DIR="${RUN_ROOT}/sbas"',
+            'PUBLISH_DIR="${RUN_ROOT}/publish"',
+            'LOG_DIR="${RUN_ROOT}/logs"',
+            'STATE_DIR="${RUN_ROOT}/state"',
+            f'REF_DATE="{reference_date}"',
+            f'RLKS="{rlks}"',
+            f'AZLKS="{azlks}"',
+            f'source "{env_script}" >/dev/null 2>&1',
+            'mkdir -p "${RAW_DIR}" "${SLC_DIR}" "${DEM_DIR}" "${RSLC_DIR}" "${MLI_DIR}" "${DIFF_DIR}" "${DIFF1_DIR}" "${SBAS_DIR}" "${PUBLISH_DIR}" "${LOG_DIR}" "${STATE_DIR}"',
+            "",
+        ]
+
+    @staticmethod
+    def _bash_array(name: str, values: list[str]) -> list[str]:
+        return [f"{name}=("] + [f'  "{value}"' for value in values] + [")"]
+
+    @staticmethod
+    def _unique_scene_dates(scenes: list[dict[str, Any]]) -> list[str]:
+        dates: list[str] = []
+        seen: set[str] = set()
+        for scene in scenes:
+            date = str(scene.get("date") or "").strip()
+            if date and date not in seen:
+                dates.append(date)
+                seen.add(date)
+        return dates
+
+    @classmethod
+    def _ensure_gamma_date_keyed_stack(cls, stack_manifest: dict[str, Any]) -> None:
+        scenes = stack_manifest.get("scenes") or []
+        audit = cls._duplicate_scene_date_audit(scenes)
+        if not audit.get("has_duplicate_dates"):
+            return
+        examples: list[str] = []
+        for group in audit.get("duplicate_groups") or []:
+            names = [name for name in (group.get("scene_names") or []) if name]
+            label = f"{group.get('date')}({group.get('count')})"
+            if names:
+                label = f"{label}: {', '.join(names[:3])}"
+            examples.append(label)
+        detail = "; ".join(examples[:5])
+        raise ValueError(
+            "Gamma SBAS expert workflow is date-keyed and cannot execute a stack with "
+            f"multiple scenes on the same acquisition date. Rebuild the stack as one scene per date. {detail}"
+        )
+
+    def _write_expert_workspace_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                'find "${RUN_ROOT}" -maxdepth 1 -type d -printf "%f\\n" | sort >"${STATE_DIR}/expert_workspace_dirs.txt"',
+                ': >"${STATE_DIR}/scene_dates.txt"',
+            ]
+        )
+        for scene in scenes:
+            lines.append(f'echo "{scene.get("date")}" >>"${{STATE_DIR}}/scene_dates.txt"')
+        lines.extend(
+            [
+                f'echo "{dem_source.get("wsl_path")}" >"${{STATE_DIR}}/dem_import_source.txt"',
+                'test "$(wc -l <"${STATE_DIR}/scene_dates.txt")" -gt 0',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "01_workspace_data.sh", lines)
+
+    def _write_expert_import_slc_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                'run_scene() {',
+                '  local date="$1"',
+                '  local tiff="$2"',
+                '  local meta="$3"',
+                '  local slc="${SLC_DIR}/${date}.slc"',
+                '  local par="${SLC_DIR}/${date}.slc.par"',
+                '  local width=""',
+                '  {',
+                '    echo "== expert import LT1 SLC ${date} =="',
+                '    test -r "${tiff}"',
+                '    test -r "${meta}"',
+                '    par_LT1_SLC "${tiff}" "${meta}" "${par}" "${slc}" 0',
+                '    cp -f "${par}" "${par}.orig"',
+                '    ORB_filt_spline.py "${par}.orig" "${par}" --ignore_start 3 --ignore_end 17 --degree 5',
+                '    SLC_corners "${par}"',
+                '    width="$(awk \'$1 == "range_samples:" {print $2; exit}\' "${par}")"',
+                '    test -n "${width}"',
+                '    echo "manual QC display commands are skipped in unattended production: disSLC dismph_fft"',
+                '    test -s "${slc}"',
+                '    test -s "${par}"',
+                '    test -s "${par}.orig"',
+                '  } >"${LOG_DIR}/${date}_expert_import_slc.log" 2>&1',
+                '}',
+                "",
+            ]
+        )
+        for scene in scenes:
+            lines.append(
+                "run_scene "
+                f'"{scene.get("date")}" '
+                f'"{scene.get("tiff_wsl")}" '
+                f'"{scene.get("meta_wsl")}"'
+            )
+        lines.extend(
+            [
+                ': >"${SLC_DIR}/SLC_tab"',
+            ]
+        )
+        for scene in scenes:
+            date = str(scene.get("date") or "")
+            lines.append(f'printf "%s %s\\n" "${{SLC_DIR}}/{date}.slc" "${{SLC_DIR}}/{date}.slc.par" >>"${{SLC_DIR}}/SLC_tab"')
+        lines.extend(
+            [
+                'test "$(wc -l <"${SLC_DIR}/SLC_tab")" -eq ' + str(len(scenes)),
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "02_import_lt1_slc.sh", lines)
+
+    def _write_expert_reference_mli_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                'REF_SLC="${SLC_DIR}/${REF_DATE}.slc"',
+                'REF_PAR="${SLC_DIR}/${REF_DATE}.slc.par"',
+                'REF_MLI="${MLI_DIR}/${REF_DATE}_${RLKS}_${AZLKS}.mli"',
+                'REF_MLI_PAR="${MLI_DIR}/${REF_DATE}_${RLKS}_${AZLKS}.mli.par"',
+                '{',
+                '  echo "== expert reference MLI ${REF_DATE} =="',
+                '  test -s "${REF_SLC}"',
+                '  test -s "${REF_PAR}"',
+                '  multi_look "${REF_SLC}" "${REF_PAR}" "${REF_MLI}" "${REF_MLI_PAR}" "${RLKS}" "${AZLKS}"',
+                '  width="$(grep range_samples "${REF_MLI_PAR}" | awk \'{print $2; exit}\')"',
+                '  lines="$(grep azimuth_lines "${REF_MLI_PAR}" | awk \'{print $2; exit}\')"',
+                '  test -n "${width}"',
+                '  test -n "${lines}"',
+                '  ras_dB "${REF_MLI}" "${width}" 1 0 1 1 - - gray.cm "${REF_MLI}.bmp" 0 1',
+                '  SLC_corners "${REF_MLI_PAR}"',
+                '  cp -f "${REF_MLI}" "${MLI_DIR}/${REF_DATE}.mli"',
+                '  cp -f "${REF_MLI_PAR}" "${MLI_DIR}/${REF_DATE}.mli.par"',
+                '} >"${LOG_DIR}/${REF_DATE}_expert_reference_mli.log" 2>&1',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "03_reference_mli.sh", lines)
+
+    def _write_expert_dem_lookup_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        dem_wsl = str(dem_source.get("wsl_path") or "").strip()
+        if not dem_wsl:
+            raise ValueError("expert DEM lookup requires a source DEM for dem_import")
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                f'DEM_SRC="{dem_wsl}"',
+                'REF_MLI="${MLI_DIR}/${REF_DATE}.mli"',
+                'REF_MLI_PAR="${MLI_DIR}/${REF_DATE}.mli.par"',
+                'SRTM_DEM="${DEM_DIR}/SRTM.dem"',
+                'SRTM_DEM_PAR="${DEM_DIR}/SRTM.dem.par"',
+                'SRTM_DEM_FILL="${DEM_DIR}/SRTM_dem_fill"',
+                'SEG_DEM_PAR="${DEM_DIR}/${REF_DATE}_seg.dem_par"',
+                'SEG_DEM="${DEM_DIR}/${REF_DATE}_seg.dem"',
+                'LT="${DEM_DIR}/${REF_DATE}.lt"',
+                'LS_MAP="${DEM_DIR}/${REF_DATE}.ls_map"',
+                'INC="${DEM_DIR}/${REF_DATE}.inc"',
+                'PSI="${DEM_DIR}/${REF_DATE}.psi"',
+                'PIX="${DEM_DIR}/${REF_DATE}.pix"',
+                'GAMMA0="${DEM_DIR}/${REF_DATE}.gamma0"',
+                'DIFF_PAR="${DEM_DIR}/${REF_DATE}.diff_par"',
+                'OFFS="${DEM_DIR}/${REF_DATE}.offs"',
+                'SNR="${DEM_DIR}/${REF_DATE}.snr"',
+                'COFFS="${DEM_DIR}/${REF_DATE}.coffs"',
+                'COFFSETS="${DEM_DIR}/${REF_DATE}.coffsets"',
+                'LT_FINE="${DEM_DIR}/${REF_DATE}.lt_fine"',
+                'HGT="${DEM_DIR}/${REF_DATE}.hgt"',
+                'REF_GEO="${DEM_DIR}/${REF_DATE}.geo"',
+                'BLANK="${DEM_DIR}/${REF_DATE}.blank"',
+                '{',
+                '  echo "== expert DEM import and lookup ${REF_DATE} =="',
+                '  test -s "${DEM_SRC}"',
+                '  test -s "${REF_MLI}"',
+                '  test -s "${REF_MLI_PAR}"',
+                '  dem_import "${DEM_SRC}" "${SRTM_DEM}" "${SRTM_DEM_PAR}" 0 1 0 - - - - - -',
+                '  dem_width="$(awk \'$1 == "width:" {print $2; exit}\' "${SRTM_DEM_PAR}")"',
+                '  dem_lines="$(awk \'$1 == "nlines:" {print $2; exit}\' "${SRTM_DEM_PAR}")"',
+                '  mli_width="$(awk \'$1 == "range_samples:" {print $2; exit}\' "${REF_MLI_PAR}")"',
+                '  mli_lines="$(awk \'$1 == "azimuth_lines:" {print $2; exit}\' "${REF_MLI_PAR}")"',
+                '  test -n "${dem_width}"',
+                '  test -n "${dem_lines}"',
+                '  test -n "${mli_width}"',
+                '  test -n "${mli_lines}"',
+                '  fill_gaps "${SRTM_DEM}" "${dem_width}" "${SRTM_DEM_FILL}" 0 4 0',
+                '  gc_map2 "${REF_MLI_PAR}" "${SRTM_DEM_PAR}" "${SRTM_DEM_FILL}" "${SEG_DEM_PAR}" "${SEG_DEM}" "${LT}" - - "${LS_MAP}" "${INC}" "${PSI}" "${PIX}" - 8 1',
+                '  seg_width="$(awk \'$1 == "width:" {print $2; exit}\' "${SEG_DEM_PAR}")"',
+                '  seg_lines="$(awk \'$1 == "nlines:" {print $2; exit}\' "${SEG_DEM_PAR}")"',
+                '  test -n "${seg_width}"',
+                '  test -n "${seg_lines}"',
+                '  pixel_area "${REF_MLI_PAR}" "${SEG_DEM_PAR}" "${SEG_DEM}" "${LT}" "${LS_MAP}" "${INC}" "${PIX}" "${GAMMA0}" - - 1',
+                '  : >"${BLANK}"',
+                '  create_diff_par "${REF_MLI_PAR}" - "${DIFF_PAR}" 1 0 <"${BLANK}"',
+                '  offset_pwrm "${GAMMA0}" "${REF_MLI}" "${DIFF_PAR}" "${OFFS}" "${SNR}" 256 256 "${DEM_DIR}/${REF_DATE}.offsets" 1 64 64 0.2',
+                '  offset_fitm "${OFFS}" "${SNR}" "${DIFF_PAR}" "${COFFS}" "${COFFSETS}" 0.2 1',
+                '  gc_map_fine "${LT}" "${seg_width}" "${DIFF_PAR}" "${LT_FINE}" 1',
+                '  geocode "${LT_FINE}" "${SEG_DEM}" "${seg_width}" "${HGT}" "${mli_width}" "${mli_lines}"',
+                '  geocode_back "${REF_MLI}" "${mli_width}" "${LT_FINE}" "${REF_GEO}" "${seg_width}" "${seg_lines}" 5 0',
+                '  test -s "${LT_FINE}"',
+                '  test -s "${HGT}"',
+                '  test -s "${SEG_DEM_PAR}"',
+                '} >"${LOG_DIR}/${REF_DATE}_expert_dem_lookup.log" 2>&1',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "04_dem_lookup.sh", lines)
+
+    def _write_expert_coreg_prep_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        dates = self._unique_scene_dates(scenes)
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                'cp -f "${SLC_DIR}/SLC_tab" "${RSLC_DIR}/SLC_tab"',
+                ': >"${RSLC_DIR}/dates"',
+            ]
+        )
+        for date in dates:
+            lines.append(f'echo "{date}" >>"${{RSLC_DIR}}/dates"')
+        lines.extend(
+            [
+                'cp -f "${SLC_DIR}/${REF_DATE}.slc" "${RSLC_DIR}/${REF_DATE}.rslc"',
+                'cp -f "${SLC_DIR}/${REF_DATE}.slc.par" "${RSLC_DIR}/${REF_DATE}.rslc.par"',
+                ': >"${RSLC_DIR}/rslc_tab"',
+                'printf "%s %s\\n" "${RSLC_DIR}/${REF_DATE}.rslc" "${RSLC_DIR}/${REF_DATE}.rslc.par" >>"${RSLC_DIR}/rslc_tab"',
+                'test -s "${RSLC_DIR}/${REF_DATE}.rslc"',
+                'test -s "${RSLC_DIR}/${REF_DATE}.rslc.par"',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "05_coreg_prep.sh", lines)
+
+    def _write_expert_coregister_scenes_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        dates = self._unique_scene_dates(scenes)
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(self._bash_array("DATES", dates))
+        lines.extend(
+            [
+                'REF_RSLC="${RSLC_DIR}/${REF_DATE}.rslc"',
+                'REF_RSLC_PAR="${RSLC_DIR}/${REF_DATE}.rslc.par"',
+                'coreg_scene() {',
+                '  local date="$1"',
+                '  local slc="${SLC_DIR}/${date}.slc"',
+                '  local slc_par="${SLC_DIR}/${date}.slc.par"',
+                '  local off="${RSLC_DIR}/${REF_DATE}_${date}.off"',
+                '  local offs="${RSLC_DIR}/${REF_DATE}_${date}.offs"',
+                '  local snr="${RSLC_DIR}/${REF_DATE}_${date}.snr"',
+                '  local coffs="${RSLC_DIR}/${REF_DATE}_${date}.coffs"',
+                '  local coffsets="${RSLC_DIR}/${REF_DATE}_${date}.coffsets"',
+                '  local rslc="${RSLC_DIR}/${date}.rslc"',
+                '  local rslc_par="${RSLC_DIR}/${date}.rslc.par"',
+                '  {',
+                '    echo "== expert coreg ${date} -> ${REF_DATE} =="',
+                '    if [ "${date}" = "${REF_DATE}" ]; then echo "reference scene already prepared"; return; fi',
+                '    test -s "${REF_RSLC}"',
+                '    test -s "${REF_RSLC_PAR}"',
+                '    test -s "${slc}"',
+                '    test -s "${slc_par}"',
+                '    create_offset "${REF_RSLC_PAR}" "${slc_par}" "${off}" 1 "${RLKS}" "${AZLKS}" 0',
+                '    init_offset_orbit "${REF_RSLC_PAR}" "${slc_par}" "${off}"',
+                '    init_offset "${REF_RSLC}" "${slc}" "${REF_RSLC_PAR}" "${slc_par}" "${off}" "${RLKS}" "${AZLKS}"',
+                '    offset_pwr "${REF_RSLC}" "${slc}" "${REF_RSLC_PAR}" "${slc_par}" "${off}" "${offs}" "${snr}" 64 64 "${RSLC_DIR}/${REF_DATE}_${date}.offsets" 2 64 64 0.2',
+                '    offset_fit "${offs}" "${snr}" "${off}" "${coffs}" "${coffsets}" 0.2 1',
+                '    SLC_interp "${slc}" "${REF_RSLC_PAR}" "${slc_par}" "${off}" "${rslc}" "${rslc_par}"',
+                '    test -s "${rslc}"',
+                '    test -s "${rslc_par}"',
+                '  } >"${LOG_DIR}/${REF_DATE}_${date}_expert_coreg.log" 2>&1',
+                '}',
+                'for date in "${DATES[@]}"; do coreg_scene "${date}"; done',
+                ': >"${RSLC_DIR}/rslc_tab"',
+                'for date in "${DATES[@]}"; do printf "%s %s\\n" "${RSLC_DIR}/${date}.rslc" "${RSLC_DIR}/${date}.rslc.par" >>"${RSLC_DIR}/rslc_tab"; done',
+                'test "$(wc -l <"${RSLC_DIR}/rslc_tab")" -eq "${#DATES[@]}"',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "06_coregister_scenes.sh", lines)
+
+    def _write_expert_rmli_average_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                'cd "${RSLC_DIR}"',
+                'mk_mli_all rslc_tab . "${RLKS}" "${AZLKS}" 1 1.0 0.4 mli.ave',
+                'width="$(grep range_samples mli.ave.par | awk \'{print $2; exit}\')"',
+                'lines="$(grep azimuth_lines mli.ave.par | awk \'{print $2; exit}\')"',
+                'test -n "${width}"',
+                'test -n "${lines}"',
+                'ras_dB mli.ave "${width}" 1 0 1 1 - - gray.cm mli.ave.bmp 0 1',
+                'cp -f mli.ave "${MLI_DIR}/mli.ave"',
+                'cp -f mli.ave.par "${MLI_DIR}/mli.ave.par"',
+                'cp -f mli.ave.bmp "${MLI_DIR}/mli.ave.bmp" || true',
+                ': >"${MLI_DIR}/RMLI_tab"',
+                'while read -r rslc rslc_par; do',
+                '  date="$(basename "${rslc}" .rslc)"',
+                '  ln -sf "${RSLC_DIR}/${date}.rmli" "${MLI_DIR}/${date}.rmli"',
+                '  ln -sf "${RSLC_DIR}/${date}.rmli.par" "${MLI_DIR}/${date}.rmli.par"',
+                '  [ -f "${RSLC_DIR}/${date}.rmli.bmp" ] && ln -sf "${RSLC_DIR}/${date}.rmli.bmp" "${MLI_DIR}/${date}.rmli.bmp" || true',
+                '  printf "%s %s\\n" "${MLI_DIR}/${date}.rmli" "${MLI_DIR}/${date}.rmli.par" >>"${MLI_DIR}/RMLI_tab"',
+                'done < rslc_tab',
+                'test "$(wc -l <"${MLI_DIR}/RMLI_tab")" -gt 0',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "07_rmli_average.sh", lines)
+
+    def _write_expert_diff_network_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                'cd "${DIFF_DIR}"',
+                'ln -sf "${RSLC_DIR}/rslc_tab" rslc_tab',
+                'ln -sf "${MLI_DIR}/mli.ave" mli.ave',
+                'ln -sf "${MLI_DIR}/mli.ave.par" mli.ave.par',
+                'ln -sf "${DEM_DIR}/${REF_DATE}.hgt" "${REF_DATE}.hgt"',
+                'base_calc rslc_tab "${RSLC_DIR}/${REF_DATE}.rslc.par" bprep_file itab 1 1 - - 1 3650 1',
+                'base_plot rslc_tab "${RSLC_DIR}/${REF_DATE}.rslc.par" itab bprep_file 1',
+                'mk_diff_2d rslc_tab itab 0 "${REF_DATE}.hgt" - mli.ave "${MLI_DIR}" . "${RLKS}" "${AZLKS}" 3 1 1 0 -u',
+                'test -s itab',
+                'ls *.diff > diff.list',
+                'test -s diff.list',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "08_diff_network.sh", lines)
+
+    def _write_expert_filter_unwrap_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                'cd "${DIFF_DIR}"',
+                'width="$(awk \'$1 == "range_samples:" {print $2; exit}\' "${MLI_DIR}/mli.ave.par")"',
+                'lines="$(awk \'$1 == "azimuth_lines:" {print $2; exit}\' "${MLI_DIR}/mli.ave.par")"',
+                'test -n "${width}"',
+                'test -n "${lines}"',
+                'r_seed="$(( width / 2 ))"',
+                'a_seed="$(( lines / 2 ))"',
+                'mk_adf_2d rslc_tab itab mli.ave . 5 0.6 32 8 -u',
+                'ls *.adf.cc > cc.list',
+                'test -s cc.list',
+                'ave_image cc.list "${width}" mean.cc',
+                'rascc_mask mean.cc - "${width}" 1 1 - 1 1 0.20',
+                'mk_unw_2d rslc_tab itab mli.ave . 0.20 0 1 1 1 1 "${r_seed}" "${a_seed}" 1 -u',
+                'mk_unw_2d rslc_tab itab mli.ave . - - 1 1 1 1 "${r_seed}" "${a_seed}" 1 mean.cc_mask.bmp -u',
+                ': > unw.list',
+                'while read -r i1 i2 pair_idx use_flag; do',
+                '  [ "${use_flag}" = "1" ] || continue',
+                '  d1="$(awk -v n="${i1}" \'NR == n {print $1; exit}\' rslc_tab)"',
+                '  d2="$(awk -v n="${i2}" \'NR == n {print $1; exit}\' rslc_tab)"',
+                '  date1="$(basename "${d1}" .rslc)"',
+                '  date2="$(basename "${d2}" .rslc)"',
+                '  unw="${date1}_${date2}.adf.unw"',
+                '  test -s "${unw}"',
+                '  echo "${unw}" >> unw.list',
+                'done < itab',
+                'test -s unw.list',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "09_filter_unwrap.sh", lines)
+
+    def _write_expert_detrend_atm_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                'cd "${DIFF_DIR}"',
+                'width="$(awk \'$1 == "range_samples:" {print $2; exit}\' "${MLI_DIR}/mli.ave.par")"',
+                'test -n "${width}"',
+                'valid_float_count() {',
+                '  local path="$1"',
+                '  python - "${path}" <<\'PY\'',
+                'import sys',
+                'from pathlib import Path',
+                'import numpy as np',
+                '',
+                'path = Path(sys.argv[1])',
+                'if not path.is_file():',
+                '    print(0)',
+                '    raise SystemExit(0)',
+                'data = np.fromfile(path, dtype=">f4")',
+                'valid = np.isfinite(data) & (data != 0.0) & (np.abs(data) < 1.0e20)',
+                'print(int(valid.sum()))',
+                'PY',
+                '}',
+                ': > unw_atmsub_tab',
+                'while read -r unw; do',
+                '  test -s "${unw}"',
+                '  pair="${unw%.adf.unw}"',
+                '  off="${pair}.off"',
+                '  diff_par="${pair}.diff_par"',
+                '  create_diff_par "${off}" "${off}" "${diff_par}" 0 0',
+                '  quad_fit "${unw}" "${diff_par}" 5 5 - - 3 "${pair}.unw_linear"',
+                '  quad_sub "${unw}" "${diff_par}" "${pair}.unw_sub_linear" 0 0',
+                '  rasdt_pwr "${pair}.unw_sub_linear" mli.ave "${width}" 1 - 1 1 -6.28 6.28 1 rmg.cm "${pair}.unw_sub_linear.bmp" 1.0 0.35 8 || true',
+                '  unw_sub_linear_valid="$(valid_float_count "${pair}.unw_sub_linear")"',
+                '  if [ "${unw_sub_linear_valid}" -le 0 ]; then',
+                '    echo "no valid pixels in ${pair}.unw_sub_linear" >&2',
+                '    exit 1',
+                '  fi',
+                '  selected_mfrac=""',
+                '  for mfrac in 0.20 0.10 0.05; do',
+                '    echo "atm_mod_2d_attempt pair=${pair} mfrac=${mfrac}"',
+                '    rm -f "${pair}.a0" "${pair}.a1" "${pair}.atm_sigma" "${pair}.atm_sigma_h" "${pair}.atm_s1" "${pair}.a0_fill" "${pair}.a1_fill" "${pair}.atm_model" "${pair}.unw.atmsub"',
+                '    atm_rc=0',
+                '    atm_mod_2d "${pair}.unw_sub_linear" "${DEM_DIR}/${REF_DATE}.hgt" "${pair}.adf.cc" "${diff_par}" - 0 "${pair}.a0" "${pair}.a1" "${pair}.atm_sigma" "${pair}.atm_sigma_h" "${pair}.atm_s1" 512 512 64 64 7000 - 0.15 "${mfrac}" - - 1 || atm_rc=$?',
+                '    if [ "${atm_rc}" -ne 0 ]; then',
+                '      echo "atm_mod_2d failed pair=${pair} mfrac=${mfrac}" >&2',
+                '      continue',
+                '    fi',
+                '    a0_valid="$(valid_float_count "${pair}.a0")"',
+                '    a1_valid="$(valid_float_count "${pair}.a1")"',
+                '    if [ "${a0_valid}" -le 0 ] && [ "${a1_valid}" -le 0 ]; then',
+                '      echo "atm_mod_2d produced no nonzero model coefficients pair=${pair} mfrac=${mfrac} a0_valid=${a0_valid} a1_valid=${a1_valid}" >&2',
+                '      continue',
+                '    fi',
+                '    patch_width="$(awk \'$1 == "offset_estimation_range_samples:" {print $2; exit}\' "${diff_par}")"',
+                '    test -n "${patch_width}"',
+                '    fill_gaps "${pair}.a0" "${patch_width}" "${pair}.a0_fill" 0 4 0',
+                '    fill_gaps "${pair}.a1" "${patch_width}" "${pair}.a1_fill" 0 4 0',
+                '    atm_sim_2d "${diff_par}" "${DEM_DIR}/${REF_DATE}.hgt" "${pair}.a0_fill" "${pair}.a1_fill" "${pair}.atm_model" -',
+                '    atm_valid="$(valid_float_count "${pair}.atm_model")"',
+                '    if [ "${atm_valid}" -le 0 ]; then',
+                '      echo "atm_sim_2d produced no nonzero model pair=${pair} mfrac=${mfrac}" >&2',
+                '      continue',
+                '    fi',
+                '    sub_phase "${pair}.unw_sub_linear" "${pair}.atm_model" "${diff_par}" "${pair}.unw.atmsub" 0 0 0',
+                '    atmsub_valid="$(valid_float_count "${pair}.unw.atmsub")"',
+                '    if [ "${atmsub_valid}" -le 0 ]; then',
+                '      echo "sub_phase produced no valid pixels pair=${pair} mfrac=${mfrac}" >&2',
+                '      continue',
+                '    fi',
+                '    selected_mfrac="${mfrac}"',
+                '    echo "atm_correction_selected pair=${pair} mfrac=${selected_mfrac} unw_sub_linear_valid=${unw_sub_linear_valid} a0_valid=${a0_valid} a1_valid=${a1_valid} atm_valid=${atm_valid} atmsub_valid=${atmsub_valid}"',
+                '    break',
+                '  done',
+                '  if [ -z "${selected_mfrac}" ]; then',
+                '    echo "atmospheric correction failed for ${pair}; tried mfrac 0.20, 0.10, 0.05 and produced no valid ${pair}.unw.atmsub" >&2',
+                '    exit 1',
+                '  fi',
+                '  test -s "${pair}.unw.atmsub"',
+                '  echo "${DIFF_DIR}/${pair}.unw.atmsub" >> unw_atmsub_tab',
+                'done < unw.list',
+                'cp -f unw_atmsub_tab "${SBAS_DIR}/unw_atmsub_tab"',
+                'cp -f itab "${SBAS_DIR}/itab"',
+                'cp -f "${MLI_DIR}/RMLI_tab" "${SBAS_DIR}/RMLI_tab"',
+                'test -s "${SBAS_DIR}/unw_atmsub_tab"',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "10_detrend_atm.sh", lines)
+
+    def _write_expert_sbas_inversion_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        reference_dt = None
+        try:
+            reference_dt = datetime.strptime(reference_date, "%Y%m%d")
+        except ValueError:
+            reference_dt = None
+        temporal_reference_date = reference_date
+        temporal_candidates: list[tuple[int, str]] = []
+        for scene in scenes:
+            date = str(scene.get("date") or "").strip()
+            if not date or date == reference_date:
+                continue
+            if reference_dt is not None:
+                try:
+                    delta = abs((datetime.strptime(date, "%Y%m%d") - reference_dt).days)
+                except ValueError:
+                    delta = 999999
+            else:
+                delta = len(temporal_candidates)
+            temporal_candidates.append((delta, date))
+        if temporal_candidates:
+            temporal_reference_date = sorted(temporal_candidates, key=lambda item: (item[0], item[1]))[0][1]
+
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                'cd "${SBAS_DIR}"',
+                'mkdir -p ras',
+                'width="$(awk \'$1 == "range_samples:" {print $2; exit}\' "${MLI_DIR}/mli.ave.par")"',
+                'lines="$(awk \'$1 == "azimuth_lines:" {print $2; exit}\' "${MLI_DIR}/mli.ave.par")"',
+                'test -n "${width}"',
+                'test -n "${lines}"',
+                f'REFERENCE_WINDOW="{reference_window}"',
+                f'GEOM_REF_MLI_PAR="${{MLI_DIR}}/{reference_date}.rmli.par"',
+                f'TREF_MLI_PAR="${{MLI_DIR}}/{temporal_reference_date}.rmli.par"',
+                'test -s "${GEOM_REF_MLI_PAR}"',
+                'test -s "${TREF_MLI_PAR}"',
+                'cp -f "${MLI_DIR}/mli.ave.par" mli.ave.par',
+                'rm -f diff1.sigma_ts diff2.sigma_ts diff.sigma_ts hgt_correction_1 itab_ts unw.atmsub_1_tab final_unw_tab',
+                'rm -f ras/diff*.tab ras/diff*.diff ras/diff*.bmp',
+                'WIDTH="${width}" LINES="${lines}" REFERENCE_WINDOW="${REFERENCE_WINDOW}" python - <<\'PY\' > reference_region.txt.tmp',
+                'import os',
+                'from pathlib import Path',
+                'import numpy as np',
+                '',
+                'width = int(os.environ["WIDTH"])',
+                'lines = int(os.environ["LINES"])',
+                'requested_window = int(os.environ["REFERENCE_WINDOW"])',
+                'candidate_windows = [16, 8, 4]',
+                'center_x = width // 2',
+                'center_y = lines // 2',
+                'pairs = [Path(line.strip()) for line in Path("unw_atmsub_tab").read_text().splitlines() if line.strip()]',
+                'if not pairs:',
+                    '    raise SystemExit("unw_atmsub_tab is empty")',
+                'valid_layers = []',
+                'for path in pairs:',
+                '    data = np.fromfile(path, dtype=">f4", count=width * lines)',
+                '    if data.size != width * lines:',
+                '        raise SystemExit(f"incomplete unwrapped phase file: {path}")',
+                '    arr = data.reshape((lines, width))',
+                '    valid = np.isfinite(arr) & (arr != 0.0) & (np.abs(arr) < 1.0e20)',
+                '    valid_layers.append(valid)',
+                '',
+                'common_valid = np.logical_and.reduce(valid_layers)',
+                '',
+                'def window_sums(mask, window):',
+                '    arr = mask.astype(np.uint8)',
+                '    integral = np.pad(arr, ((1, 0), (1, 0)), mode="constant").cumsum(axis=0).cumsum(axis=1)',
+                '    return integral[window:, window:] - integral[:-window, window:] - integral[window:, :-window] + integral[:-window, :-window]',
+                '',
+                'def best_complete_window(sums, expected, window):',
+                '    complete = sums == expected',
+                '    if not bool(complete.any()):',
+                '        return None',
+                '    half = window // 2',
+                '    best = None',
+                '    for y0 in range(complete.shape[0]):',
+                '        xs = np.flatnonzero(complete[y0])',
+                '        if xs.size == 0:',
+                '            continue',
+                '        y = y0 + half',
+                '        distances = np.abs(xs + half - center_x) + abs(y - center_y)',
+                '        idx = int(np.argmin(distances))',
+                '        candidate = (int(distances[idx]), int(xs[idx] + half), int(y))',
+                '        if best is None or candidate < best:',
+                '            best = candidate',
+                '    return best',
+                '',
+                'diagnostics = []',
+                'for window in candidate_windows:',
+                '    expected = window * window',
+                '    sums = window_sums(common_valid, window)',
+                '    max_valid = int(sums.max()) if sums.size else 0',
+                '    diagnostics.append(f"{window}x{window}:max={max_valid}/{expected}")',
+                '    best = best_complete_window(sums, expected, window)',
+                '    if best is not None:',
+                '        _, x, y = best',
+                '        print(x, y, expected, expected * len(valid_layers), window)',
+                '        break',
+                'else:',
+                '    raise SystemExit("no complete reference window found for allowed windows (minimum 4x4); tried " + ", ".join(diagnostics))',
+                'PY',
+                'mv -f reference_region.txt.tmp reference_region.txt',
+                'read -r r_ref a_ref min_valid total_valid actual_reference_window < reference_region.txt',
+                'echo "selected_reference_region range=${r_ref} azimuth=${a_ref} min_valid=${min_valid} total_valid=${total_valid} window=${actual_reference_window} requested_window=${REFERENCE_WINDOW} fallback_ladder=16,8,4"',
+                'if [ "${actual_reference_window}" != "${REFERENCE_WINDOW}" ]; then',
+                '  echo "reference_window_degraded from=${REFERENCE_WINDOW} to=${actual_reference_window}" >&2',
+                'fi',
+                'mb unw_atmsub_tab RMLI_tab itab - itab_ts ras/diff1 1 diff1.sigma_ts 1 hgt_correction_1 "${r_ref}" "${a_ref}" "${actual_reference_window}" "${actual_reference_window}" 1.0 "${GEOM_REF_MLI_PAR}" "${TREF_MLI_PAR}" 0',
+                ': > unw.atmsub_1_tab',
+                'while read -r unw; do',
+                '  test -s "${unw}"',
+                '  base="$(basename "${unw}" .unw.atmsub)"',
+                '  sim="${unw}_sim"',
+                '  test -s "${sim}"',
+                '  real_to_cpx - "${unw}" "${base}.unw.atmsub.cpx" "${width}" 1',
+                '  unw_model "${base}.unw.atmsub.cpx" "${sim}" "${base}.unw.atmsub_1" "${width}" "${r_ref}" "${a_ref}"',
+                '  echo "${SBAS_DIR}/${base}.unw.atmsub_1" >> unw.atmsub_1_tab',
+                'done < unw_atmsub_tab',
+                'mb unw.atmsub_1_tab RMLI_tab itab - itab_ts ras/diff2 1 diff2.sigma_ts 0 - "${r_ref}" "${a_ref}" "${actual_reference_window}" "${actual_reference_window}" 1.0 "${GEOM_REF_MLI_PAR}" "${TREF_MLI_PAR}" 0',
+                'cp -f unw.atmsub_1_tab final_unw_tab',
+                'mb final_unw_tab RMLI_tab itab - itab_ts ras/diff 0 diff.sigma_ts 0 - "${r_ref}" "${a_ref}" "${actual_reference_window}" "${actual_reference_window}" 0.5 "${GEOM_REF_MLI_PAR}" "${TREF_MLI_PAR}" 0',
+                'find ras -maxdepth 1 -type f -name "diff_*.diff" | sort > ras/diff.tab',
+                'test -s diff.sigma_ts',
+                'test -s itab_ts',
+                'test -s ras/diff.tab',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "11_sbas_inversion.sh", lines)
+
+    def _write_expert_outputs_points_script(
+        self,
+        *,
+        run_dir: Path,
+        scenes: list[dict[str, Any]],
+        reference_date: str,
+        rlks: int,
+        azlks: int,
+        reference_window: int,
+        dem_source: dict[str, Any],
+    ) -> Path:
+        lines = self._expert_script_header(run_dir, reference_date=reference_date, rlks=rlks, azlks=azlks)
+        lines.extend(
+            [
+                'cd "${SBAS_DIR}"',
+                'mkdir -p "${PUBLISH_DIR}/geotiff" "${PUBLISH_DIR}/points"',
+                'width="$(awk \'$1 == "range_samples:" {print $2; exit}\' mli.ave.par)"',
+                'dem_width="$(awk \'$1 == "width:" {print $2; exit}\' "${DEM_DIR}/${REF_DATE}_seg.dem_par")"',
+                'dem_lines="$(awk \'$1 == "nlines:" {print $2; exit}\' "${DEM_DIR}/${REF_DATE}_seg.dem_par")"',
+                'test -n "${width}"',
+                'test -n "${dem_width}"',
+                'test -n "${dem_lines}"',
+                'az_lines="$(awk \'$1 == "azimuth_lines:" {print $2; exit}\' mli.ave.par)"',
+                'test -n "${az_lines}"',
+                'replace_values diff.sigma_ts 0.5 0.0 diff.sigma_ts.masked "${width}" 1 2 0',
+                'rasdt_pwr diff.sigma_ts.masked - "${width}" 1 0 1 1 0.0 1.5 1 cc.cm diff.sigma_ts.masked.bmp 1.0 0.35 8',
+                ': > disp.TS_tab',
+                'while read -r item; do',
+                '  date="$(basename "${item}")"',
+                '  masked="ras/${date}.masked"',
+                '  mask_data "${item}" "${width}" "${masked}" diff.sigma_ts.masked.bmp 0',
+                '  dispmap "${masked}" - mli.ave.par - "ras/${date}.disp" 0 0',
+                '  echo "${SBAS_DIR}/ras/${date}.disp" >> disp.TS_tab',
+                'done < ras/diff.tab',
+                'ts_rate disp.TS_tab RMLI_tab itab_ts - los_def_rate los_def_const los_def_sigma 0',
+                'rasdt_pwr los_def_rate "${MLI_DIR}/mli.ave" "${width}" 1 0 1 1 -0.08 0.08 0 hls.cm los_def_rate.bmp 1.0 0.35 24',
+                'geocode_back los_def_rate "${width}" "${DEM_DIR}/${REF_DATE}.lt_fine" geo_los_def_rate "${dem_width}" "${dem_lines}" 5 0',
+                'data2geotiff "${DEM_DIR}/${REF_DATE}_seg.dem_par" geo_los_def_rate 2 "${PUBLISH_DIR}/geotiff/geo_los_def_rate.tif"',
+                'geocode_back los_def_rate.bmp "${width}" "${DEM_DIR}/${REF_DATE}.lt_fine" geo_los_def_rate.bmp "${dem_width}" "${dem_lines}" 0 2',
+                'data2geotiff "${DEM_DIR}/${REF_DATE}_seg.dem_par" geo_los_def_rate.bmp 0 "${PUBLISH_DIR}/geotiff/geo_los_def_rate_rgb.tif"',
+                'python3 - "${width}" "${az_lines}" "${PUBLISH_DIR}/points/disp_point_sel.txt" "${PUBLISH_DIR}/points/disp_point_selection.json" <<\'PY\'',
+                'import sys',
+                'import json',
+                'from datetime import datetime',
+                'import numpy as np',
+                '',
+                'width = int(sys.argv[1])',
+                'lines = int(sys.argv[2])',
+                'selection_txt = sys.argv[3]',
+                'selection_json = sys.argv[4]',
+                'count = width * lines',
+                'rate = np.fromfile("los_def_rate", dtype=">f4", count=count)',
+                'sigma = np.fromfile("diff.sigma_ts.masked", dtype=">f4", count=count)',
+                'count = min(rate.size, sigma.size, count)',
+                'if count < width * lines:',
+                '    lines = count // width',
+                '    count = width * lines',
+                'rate = rate[:count].reshape(lines, width)',
+                'sigma = sigma[:count].reshape(lines, width)',
+                'yy, xx = np.indices(rate.shape, dtype=np.float32)',
+                'edge = (xx > width * 0.08) & (xx < width * 0.92) & (yy > lines * 0.08) & (yy < lines * 0.92)',
+                'valid = np.isfinite(rate) & np.isfinite(sigma) & (rate != 0.0) & (sigma > 0.0) & edge',
+                'abs_rate = np.abs(rate)',
+                'definitions = [',
+                '    ("toward_high_rate_low_sigma", "趋近雷达高形变低残差点", "rate > 0，且绝对速率位于高分位，残差低，用于检查明显正向形变区域。"),',
+                '    ("away_high_rate_low_sigma", "远离雷达高形变低残差点", "rate < 0，且绝对速率位于高分位，残差低，用于检查明显负向形变区域。"),',
+                '    ("high_abs_rate_low_sigma", "高绝对速率低残差点", "不区分正负，优先选择绝对速率高且残差低的有效点。"),',
+                '    ("stable_low_sigma", "近零低残差代表点", "绝对速率位于低分位且残差低，用于对照相对稳定区域。"),',
+                '    ("center_valid", "覆盖区中心有效点", "从有效像元中选取最接近雷达网格中心的点，用于空间位置对照。"),',
+                ']',
+                'selected = []',
+                'min_dist2 = float(max(32, int(min(width, lines) * 0.08)) ** 2)',
+                'def add_point(definition, candidate, score):',
+                '    if not np.any(candidate):',
+                '        return',
+                '    filtered = candidate.copy()',
+                '    for existing in selected:',
+                '        filtered &= ((xx - float(existing["img_x"])) ** 2 + (yy - float(existing["img_y"])) ** 2) >= min_dist2',
+                '    if not np.any(filtered):',
+                '        filtered = candidate',
+                '    safe_score = np.full(rate.shape, -np.inf, dtype=np.float64)',
+                '    safe_score[filtered] = score[filtered]',
+                '    if not np.any(np.isfinite(safe_score[filtered])):',
+                '        return',
+                '    y, x = np.unravel_index(int(np.nanargmax(safe_score)), safe_score.shape)',
+                '    point = (int(x), int(y))',
+                '    if not any(point[0] == item["img_x"] and point[1] == item["img_y"] for item in selected):',
+                '        key, label, description = definition',
+                '        selected.append({"img_x": point[0], "img_y": point[1], "selection_key": key, "selection_label": label, "selection_description": description})',
+                'if np.any(valid):',
+                '    abs_valid = abs_rate[valid]',
+                '    sig_valid = sigma[valid]',
+                '    high_abs = float(np.percentile(abs_valid, 85))',
+                '    low_abs = float(np.percentile(abs_valid, 25))',
+                '    low_sigma = float(np.percentile(sig_valid, 40))',
+                '    low_sig = valid & (sigma <= low_sigma)',
+                '    if not np.any(low_sig):',
+                '        low_sig = valid',
+                '    denom = np.maximum(sigma.astype(np.float64), 1.0e-6)',
+                '    add_point(definitions[0], low_sig & (rate > 0.0) & (abs_rate >= high_abs), rate / denom)',
+                '    add_point(definitions[1], low_sig & (rate < 0.0) & (abs_rate >= high_abs), -rate / denom)',
+                '    add_point(definitions[2], low_sig & (abs_rate >= high_abs), abs_rate / denom)',
+                '    add_point(definitions[3], low_sig & (abs_rate <= low_abs), 1.0 / ((abs_rate + 1.0) * denom))',
+                '    cx, cy = (width - 1) / 2.0, (lines - 1) / 2.0',
+                '    add_point(definitions[4], valid, -((xx - cx) ** 2 + (yy - cy) ** 2))',
+                'if not selected:',
+                '    key, label, description = definitions[4]',
+                '    selected.append({"img_x": width // 2, "img_y": lines // 2, "selection_key": key, "selection_label": label, "selection_description": description})',
+                'selected = selected[:5]',
+                'for index, item in enumerate(selected, start=1):',
+                '    item["selection_rank"] = index',
+                'with open(selection_txt, "w", encoding="utf-8") as handle:',
+                '    for item in selected:',
+                '        handle.write(f"{item[\'img_x\']} {item[\'img_y\']}\\n")',
+                'payload = {"schema": "insar.gamma-sbas-expert-monitor-point-selection/v1", "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z", "source": "auto_representative_points", "selection_count": len(selected), "strategy": "auto_representative_points", "strategy_note": "自动选取趋近/远离雷达高形变、绝对高形变、近零稳定和中心有效点；时序仍由 Gamma disp_prt_2d 输出。", "points": selected}',
+                'with open(selection_json, "w", encoding="utf-8") as handle:',
+                '    json.dump(payload, handle, ensure_ascii=False, indent=2)',
+                'PY',
+                'disp_prt_2d disp.TS_tab RMLI_tab itab_ts - 3 "${PUBLISH_DIR}/points/disp_point_sel.txt" "${DEM_DIR}/${REF_DATE}.hgt" los_def_rate diff.sigma_ts.masked "${PUBLISH_DIR}/points/items.txt" "${PUBLISH_DIR}/points/disp_point.txt" 3 1 0',
+                'test -s "${PUBLISH_DIR}/geotiff/geo_los_def_rate.tif"',
+                'test -s "${PUBLISH_DIR}/geotiff/geo_los_def_rate_rgb.tif"',
+                'test -s "${PUBLISH_DIR}/points/items.txt"',
+                'test -s "${PUBLISH_DIR}/points/disp_point.txt"',
+                "",
+            ]
+        )
+        return self._write_script(run_dir / "scripts" / "12_outputs_points.sh", lines)
 
     def _build_monitor_point_config(
         self,
@@ -5917,6 +8805,8 @@ class SbasInsarProductionService:
         rlks: int,
         azlks: int,
     ) -> Path:
+        # Legacy bridge writer retained for old stage endpoints; the default LT1 Gamma SBAS
+        # workflow now executes the expert-document scripts generated above.
         scripts_dir = run_dir / "scripts"
         script_path = scripts_dir / "02_coreg_common_ref.sh"
         gamma_root = run_dir / "work" / "gamma"
@@ -6074,6 +8964,8 @@ class SbasInsarProductionService:
         rlks: int,
         dem_source: dict[str, Any],
     ) -> Path:
+        # Legacy bridge writer retained for old stage endpoints; not used by the
+        # default expert-document workflow.
         scripts_dir = run_dir / "scripts"
         script_path = scripts_dir / "03_prepare_rdc_dem.sh"
         gamma_root = run_dir / "work" / "gamma"
@@ -6214,6 +9106,8 @@ class SbasInsarProductionService:
         azlks: int,
         unwrap_threshold: float,
     ) -> Path:
+        # Legacy bridge writer retained for old stage endpoints; not used by the
+        # default expert-document workflow.
         scripts_dir = run_dir / "scripts"
         script_path = scripts_dir / "04_diff_unwrap_common_ref.sh"
         gamma_root = run_dir / "work" / "gamma"
@@ -6341,11 +9235,11 @@ class SbasInsarProductionService:
             '      "${diff}" "${RLKS}" "${AZLKS}" "${SPS_FLAG}" "${AZF_FLAG}" - 1 1',
             '    adf "${diff}" "${diff_filt}" "${cc}" "${width}" 0.4 - 5',
             '    cc_wave "${diff_filt}" "${mli1}" "${mli2}" "${cc}" "${width}" 5 5',
-            '    rasmph_pwr "${diff_filt}" "${mli1}" "${width}" - - - - - - - - - "${cc}" - 0.1',
-            '    rasdt_pwr "${cc}" "${mli1}" "${width}" 1 0 1 1 0.1 1.0 1',
+            '    rasmph_pwr "${diff_filt}" "${mli1}" "${width}" - - - - rmg.cm "${diff_filt}.bmp" 1.0 0.35 8',
+            '    rasdt_pwr "${cc}" "${mli1}" "${width}" 1 0 1 1 0.1 1.0 1 cc.cm "${cc}.bmp" 1.0 0.35 8',
             '    rascc_mask "${cc}" "${mli1}" "${width}" 1 1 0 1 1 "${UNWRAP_THRESHOLD}" 0.0 0.1 0.9 1 .35 1 "${mask}"',
             '    mcf "${diff_filt}" "${cc}" "${mask}" "${unw}" "${width}" 2 0 0 "${width}" "${lines}" 1 1 - "${r_ref}" "${a_ref}" 1',
-            '    rasdt_pwr "${unw}" "${mli1}" "${width}" 1 0 1 1 -3.14 3.14 1',
+            '    rasdt_pwr "${unw}" "${mli1}" "${width}" 1 0 1 1 -3.14 3.14 1 rmg.cm "${unw}.bmp" 1.0 0.35 8',
             '    ls -lh "${sim_unw}" "${diff}" "${diff_filt}" "${cc}" "${mask}" "${unw}"',
             '  } >"${LOG_DIR}/${pair}_diff_unwrap_common.log" 2>&1',
             "",
@@ -8127,13 +11021,48 @@ class SbasInsarProductionService:
     def _build_command_manifest(self, run_manifest: dict[str, Any], stack_manifest: dict[str, Any]) -> dict[str, Any]:
         scenes = stack_manifest.get("scenes") or []
         pair_network = stack_manifest.get("pair_network") or {}
+        sensor_family = self._normalize_sensor_family(
+            run_manifest.get("sensor_family") or stack_manifest.get("sensor_family")
+        )
+        if sensor_family == "S1":
+            return {
+                "schema": "insar.gamma-command-manifest/v1",
+                "run_id": run_manifest["run_id"],
+                "engine": "gamma",
+                "processor_code": "gamma_ipta_sbas",
+                "profile_code": "s1_gamma_sbas",
+                "execution_enabled": False,
+                "reason_execution_disabled": "Sentinel-1 Gamma TOPS/SBAS execution scripts are not enabled yet.",
+                "stage_plan": [dict(item) for item in S1_GAMMA_SBAS_PLANNING_STEPS],
+                "inputs": {
+                    "scene_count": len(scenes),
+                    "scenes": [
+                        {
+                            "date": scene.get("date"),
+                            "scene_name": scene.get("scene_name"),
+                            "source_format": scene.get("source_format"),
+                            "source_wsl": scene.get("source_wsl"),
+                            "orbit_wsl": scene.get("orbit_wsl"),
+                            "relative_orbit": scene.get("relative_orbit"),
+                            "orbit_direction": scene.get("orbit_direction"),
+                            "imaging_mode": scene.get("imaging_mode"),
+                            "polarization": scene.get("polarization"),
+                        }
+                        for scene in scenes
+                    ],
+                    "pair_count": len(pair_network.get("pairs") or []),
+                    "pair_network_strategy": pair_network.get("strategy"),
+                },
+                "expected_outputs": [],
+                "next_manual_review": "Verify Sentinel-1 subswath/burst policy and implement dedicated Gamma TOPS/SBAS scripts before enabling execution.",
+            }
         return {
             "schema": "insar.gamma-command-manifest/v1",
             "run_id": run_manifest["run_id"],
             "engine": "gamma",
             "processor_code": "gamma_ipta_sbas",
-            "execution_enabled": False,
-            "reason_execution_disabled": "The managed Gamma runner is intentionally not attached in this planning slice.",
+            "execution_enabled": True,
+            "reason_execution_disabled": None,
             "stage_plan": [dict(item) for item in GAMMA_STAGE_PLAN],
             "expert_document_steps": [dict(item) for item in GAMMA_SBAS_EXPERT_DOCUMENT_STEPS],
             "inputs": {
@@ -8157,6 +11086,9 @@ class SbasInsarProductionService:
 
     def _build_run_card(self, run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         stack = manifest.get("stack") or {}
+        stack_manifest = self._load_stack_manifest_for_run(run_dir, manifest)
+        identity = self._scene_identity_summary(stack_manifest.get("scenes") or [])
+        stack_from_manifest = stack_manifest.get("stack") or {}
         try:
             coverage = self._build_run_geographic_coverage(run_dir, manifest)
         except Exception:
@@ -8169,6 +11101,9 @@ class SbasInsarProductionService:
             "workflow_code": manifest.get("workflow_code"),
             "processor_code": manifest.get("processor_code"),
             "engine_code": manifest.get("engine_code"),
+            "sensor_family": manifest.get("sensor_family") or self._normalize_sensor_family(stack.get("satellite")),
+            "profile_code": manifest.get("profile_code"),
+            "execution_enabled": manifest.get("execution_enabled", True),
             "stack_id": manifest.get("stack_id"),
             "scene_count": manifest.get("scene_count"),
             "pair_count": manifest.get("pair_count"),
@@ -8176,11 +11111,17 @@ class SbasInsarProductionService:
             "discovery_mode": manifest.get("discovery_mode"),
             "aoi": manifest.get("aoi"),
             "common_overlap_ratio": manifest.get("common_overlap_ratio"),
+            "min_common_overlap_ratio": manifest.get("min_common_overlap_ratio"),
+            "scene_identity_hash": manifest.get("scene_identity_hash") or identity.get("scene_identity_hash"),
+            "scene_name_count": manifest.get("scene_name_count") or identity.get("scene_name_count"),
+            "scene_name_preview": manifest.get("scene_name_preview") or identity.get("scene_name_preview") or [],
+            "scene_names": manifest.get("scene_names") or identity.get("scene_names") or [],
+            "date_sequence_hash": manifest.get("date_sequence_hash") or identity.get("date_sequence_hash"),
             "platform": stack.get("satellite"),
             "relative_orbit": stack.get("relative_orbit"),
             "direction": stack.get("orbit_direction"),
             "polarization": stack.get("polarization"),
-            "center_bucket": stack.get("center_bucket"),
+            "center_bucket": stack.get("center_bucket") or stack_from_manifest.get("center_bucket"),
             "reference_date": stack.get("reference_date"),
             "date_start": coverage.get("date_start"),
             "date_end": coverage.get("date_end"),

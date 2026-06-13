@@ -8,7 +8,6 @@ import {
   queueImportJob,
   queueDinsarJob,
   getRecentRuns,
-  getActiveTasks,
   forceCancelTask,
   extractDispResults,
   getTaskOverview,
@@ -16,6 +15,8 @@ import {
   deleteRun,
 } from './api/idl';
 import { scanDinsarResults } from './api/dinsar';
+import TaskStatusPanel from './components/tasks/TaskStatusPanel';
+import useTaskMonitor from './hooks/useTaskMonitor';
 
 import { getStatistics } from './api/stats';
 
@@ -34,9 +35,15 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
   const [recentRuns, setRecentRuns] = useState([]);
   const [isBusy, setIsBusy] = useState(false);
   const [message, setMessage] = useState('');
-  const [runningTask, setRunningTask] = useState(null); // active IDL task from backend
-  const [showUnlockInput, setShowUnlockInput] = useState(false);
-  const [unlockPassword, setUnlockPassword] = useState('');
+  const [showCancelInput, setShowCancelInput] = useState(false);
+  const [cancelPassword, setCancelPassword] = useState('');
+  const idlTaskMonitor = useTaskMonitor({
+    taskTypes: ['IDL_IMPORT', 'IDL_DINSAR'],
+    showRecent: true,
+    recentLimit: 1,
+    pollRecentMs: 10000,
+  });
+  const runningTask = idlTaskMonitor.activeTasks[0] || null;
 
   const [importRootDir, setImportRootDir] = useState('');
   const [importNumToProcess, setImportNumToProcess] = useState(0);
@@ -58,20 +65,12 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
   const [dinsarInspect, setDinsarInspect] = useState(null);
 
   const refreshData = useCallback(async () => {
-    const [s, runs, tasks] = await Promise.all([
+    const [s, runs] = await Promise.all([
       getEnviStatus(),
       getRecentRuns(20),
-      getActiveTasks().catch(() => []),
     ]);
     setStatus(s);
     setRecentRuns(Array.isArray(runs?.runs) ? runs.runs : []);
-    // Find any running IDL task (IDL_IMPORT or IDL_DINSAR)
-    const taskList = Array.isArray(tasks) ? tasks : [];
-    const active = taskList.find(
-      (t) => ['IDL_IMPORT', 'IDL_DINSAR'].includes(t.task_type) &&
-             ['PENDING', 'RUNNING'].includes(t.status)
-    );
-    setRunningTask(active || null);
   }, []);
 
   useEffect(() => {
@@ -186,17 +185,18 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
     }
   };
 
-  const handleForceUnlock = async () => {
-    if (!runningTask || !unlockPassword) return;
+  const handleCancelRunningTask = async () => {
+    if (!runningTask || !cancelPassword) return;
     try {
-      await forceCancelTask(runningTask.task_id, unlockPassword);
-      setMessage('任务已强制取消，前端已解锁。');
-      setShowUnlockInput(false);
-      setUnlockPassword('');
+      await forceCancelTask(runningTask.task_id, cancelPassword);
+      setMessage('任务取消请求已提交。');
+      setShowCancelInput(false);
+      setCancelPassword('');
+      await idlTaskMonitor.refreshRecentTasks();
       await refreshData();
     } catch (error) {
-      const detail = error?.response?.data?.detail || error?.message || '解锁失败';
-      setMessage(`强制解锁失败: ${detail}`);
+      const detail = error?.response?.data?.detail || error?.message || '取消失败';
+      setMessage(`取消任务失败: ${detail}`);
     }
   };
 
@@ -220,7 +220,7 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
     );
   };
 
-  // Buttons are locked when: submitting API call, readOnly user, or a backend task is running
+  // Buttons are locally disabled when submitting API calls or an IDL task is already active.
   const isLocked = isBusy || !!runningTask;
 
   const demDisplay = status?.dem_base_file || '-';
@@ -245,71 +245,46 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
         </div>
       </div>
 
-      {/* Running task indicator */}
-      {runningTask && (
-        <div style={{
-          ...cardStyle,
-          background: '#fffbeb',
-          borderColor: '#f59e0b',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ fontSize: '16px' }}>&#9881;</span>
-            <div style={{ flex: 1, fontSize: '13px' }}>
-              <strong style={{ color: '#b45309' }}>
-                {runningTask.task_type === 'IDL_IMPORT' ? 'Import' : 'D-InSAR'} 任务运行中
-              </strong>
-              {runningTask.progress > 0 && (
-                <span style={{ color: '#92400e', marginLeft: '8px', fontVariantNumeric: 'tabular-nums' }}>
-                  {runningTask.progress}%
-                </span>
-              )}
-              <div style={{ color: '#92400e', marginTop: '3px', fontSize: '12px', wordBreak: 'break-all' }}>
-                {runningTask.message || runningTask.status}
-              </div>
-              {runningTask.progress > 0 && (
-                <div style={{ marginTop: '5px', height: '6px', background: '#fde68a', borderRadius: '3px', overflow: 'hidden' }}>
-                  <div style={{
-                    height: '100%',
-                    width: `${runningTask.progress}%`,
-                    background: '#f59e0b',
-                    borderRadius: '3px',
-                    transition: 'width 0.5s ease',
-                  }} />
-                </div>
-              )}
-            </div>
-            {!readOnly && !showUnlockInput && (
-              <button
-                type="button"
-                onClick={() => setShowUnlockInput(true)}
-                style={{
-                  padding: '3px 10px',
-                  borderRadius: '4px',
-                  border: '1px solid #dc2626',
-                  background: '#fef2f2',
-                  color: '#dc2626',
-                  fontSize: '12px',
-                  cursor: 'pointer',
-                }}
-              >
-                强制解锁
-              </button>
-            )}
-          </div>
-          {showUnlockInput && (
+      <TaskStatusPanel
+        title="ENVI / SARscape 任务"
+        activeTasks={idlTaskMonitor.activeTasks}
+        recentTasks={idlTaskMonitor.recentTasks}
+        latestTask={idlTaskMonitor.latestTask}
+        isBusy={idlTaskMonitor.isBusy}
+        idleText="当前没有正在执行的 ENVI / SARscape 任务。"
+        action={runningTask && !readOnly && !showCancelInput ? (
+          <button
+            type="button"
+            onClick={() => setShowCancelInput(true)}
+            style={{
+              padding: '3px 10px',
+              borderRadius: '4px',
+              border: '1px solid #dc2626',
+              background: '#fef2f2',
+              color: '#dc2626',
+              fontSize: '12px',
+              cursor: 'pointer',
+            }}
+          >
+            取消任务
+          </button>
+        ) : null}
+        footer={runningTask ? (
+          <>
+          {showCancelInput && (
             <div style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
               <input
                 type="password"
                 placeholder="输入管理员密码"
-                value={unlockPassword}
-                onChange={(e) => setUnlockPassword(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleForceUnlock()}
+                value={cancelPassword}
+                onChange={(e) => setCancelPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleCancelRunningTask()}
                 style={{ padding: '4px 8px', fontSize: '12px', borderRadius: '4px', border: '1px solid #d1d5db', width: '160px' }}
               />
               <button
                 type="button"
-                onClick={handleForceUnlock}
-                disabled={!unlockPassword}
+                onClick={handleCancelRunningTask}
+                disabled={!cancelPassword}
                 style={{
                   padding: '4px 10px',
                   borderRadius: '4px',
@@ -317,28 +292,29 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
                   background: '#dc2626',
                   color: '#fff',
                   fontSize: '12px',
-                  cursor: unlockPassword ? 'pointer' : 'not-allowed',
-                  opacity: unlockPassword ? 1 : 0.5,
+                  cursor: cancelPassword ? 'pointer' : 'not-allowed',
+                  opacity: cancelPassword ? 1 : 0.5,
                 }}
               >
                 确认取消
               </button>
               <button
                 type="button"
-                onClick={() => { setShowUnlockInput(false); setUnlockPassword(''); }}
+                onClick={() => { setShowCancelInput(false); setCancelPassword(''); }}
                 style={{ padding: '4px 10px', borderRadius: '4px', border: '1px solid #d1d5db', background: '#fff', fontSize: '12px', cursor: 'pointer' }}
               >
                 取消
               </button>
             </div>
           )}
-          {!showUnlockInput && (
+          {!showCancelInput && (
             <div style={{ fontSize: '11px', color: '#92400e', marginTop: '4px', marginLeft: '26px' }}>
-              按钮已锁定，等待任务完成
+              同类 ENVI/SARscape 任务运行中，当前提交按钮暂不可用。
             </div>
           )}
-        </div>
-      )}
+          </>
+        ) : null}
+      />
 
       {/* Task 状态总览 */}
       <div style={cardStyle}>

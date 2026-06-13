@@ -231,10 +231,10 @@
   { zh: '运行中', en: 'Running' },
   { zh: '引擎', en: 'Engine' },
   { zh: '任务运行中', en: 'Task Running' },
-  { zh: '强制解锁', en: 'Force Unlock' },
+  { zh: '取消任务', en: 'Cancel Task' },
   { zh: '输入管理员密码', en: 'Enter admin password' },
   { zh: '确认取消', en: 'Confirm Cancel' },
-  { zh: '按钮已锁定，等待任务完成', en: 'Buttons locked, waiting for task completion' },
+  { zh: '同类任务运行中，当前提交按钮暂不可用。', en: 'A similar task is running. Submit buttons are temporarily unavailable.' },
   { zh: 'Task 状态总览', en: 'Task Status Overview' },
   { zh: '加载中...', en: 'Loading...' },
   { zh: '刷新', en: 'Refresh' },
@@ -300,8 +300,8 @@
   { zh: '扫描入库触发失败', en: 'Result scan trigger failed' },
   { zh: '提取完成', en: 'Extraction complete' },
   { zh: '总览加载失败', en: 'Overview load failed' },
-  { zh: '任务已强制取消，前端已解锁。', en: 'Task force-cancelled, UI unlocked.' },
-  { zh: '强制解锁失败', en: 'Force unlock failed' },
+  { zh: '任务取消请求已提交。', en: 'Task cancellation requested.' },
+  { zh: '取消任务失败', en: 'Task cancellation failed' },
   { zh: '任务已入队', en: 'Task queued' },
 
   // --- HazardPointPanel ---

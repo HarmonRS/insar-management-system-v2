@@ -2,13 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import apiClient from '../api/client';
 import { normalizeTaskStatus } from '../utils/appUiHelpers';
 
-const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES', 'UNPACK_SENTINEL1', 'GF3_UNPACK', 'GF3_SARSCAPE_PRODUCE', 'GF3_SARSCAPE_SYNC', 'GF3_SARSCAPE_CLEAN', 'SCAN_ASSET_INVENTORY', 'COPY_DATA']);
-
-const isTaskNonBlocking = (taskId, taskType, nonBlockingTaskIds = []) => (
-  NON_BLOCKING_TASK_TYPES.has(String(taskType || '').toUpperCase())
-  || nonBlockingTaskIds.includes(taskId)
-);
-
 export default function useGlobalTaskControl({
   currentUser,
   licenseOk,
@@ -16,32 +9,15 @@ export default function useGlobalTaskControl({
   setActiveTasks,
   pendingTaskIds,
   setPendingTaskIds,
-  nonBlockingTaskIds,
-  setNonBlockingTaskIds,
-  isGlobalLocked,
-  setIsGlobalLocked,
   setIsCheckingTasks,
   handleTaskCompletionRef,
-  initializeAppDataRef,
-  addLog,
 }) {
-  const [forceUnlockPwd, setForceUnlockPwd] = useState('');
-  const [showForceUnlock, setShowForceUnlock] = useState(false);
-  const lastLockTimeRef = useRef(null);
-
-  const isGlobalLockedRef = useRef(isGlobalLocked);
-  useEffect(() => {
-    isGlobalLockedRef.current = isGlobalLocked;
-    if (isGlobalLocked) {
-      lastLockTimeRef.current = Date.now();
-    }
-  }, [isGlobalLocked]);
+  const [cancelTaskPwd, setCancelTaskPwd] = useState('');
+  const [showCancelTask, setShowCancelTask] = useState(false);
 
   // Stable refs so SSE handler doesn't need to re-subscribe on every render
   const pendingTaskIdsRef = useRef(pendingTaskIds);
   useEffect(() => { pendingTaskIdsRef.current = pendingTaskIds; }, [pendingTaskIds]);
-  const nonBlockingTaskIdsRef = useRef(nonBlockingTaskIds);
-  useEffect(() => { nonBlockingTaskIdsRef.current = nonBlockingTaskIds; }, [nonBlockingTaskIds]);
 
   const handleTasksUpdate = useCallback(async (tasks) => {
     setActiveTasks(tasks);
@@ -51,26 +27,13 @@ export default function useGlobalTaskControl({
     setIsCheckingTasks(false);
 
     const currentPending = pendingTaskIdsRef.current;
-    let updatedPending = currentPending;
-    let effectiveNonBlockingTaskIds = Array.from(new Set([
-      ...nonBlockingTaskIdsRef.current,
-      ...tasks
-        .filter((task) => NON_BLOCKING_TASK_TYPES.has(String(task.task_type || '').toUpperCase()))
-        .map((task) => task.task_id),
-    ]));
 
     // 如果 pendingTaskIds 为空，但 activeTasks 有任务，说明是刷新后的初始化
     // 需要将 activeTasks 中的任务添加到 pendingTaskIds
     if (currentPending.length === 0 && hasRunningTasks) {
       const activeTaskIds = tasks.map((t) => t.task_id);
-      const nextNonBlockingIds = tasks
-        .filter((task) => NON_BLOCKING_TASK_TYPES.has(String(task.task_type || '').toUpperCase()))
-        .map((task) => task.task_id);
       console.log('初始化：将活跃任务添加到 pending 列表:', activeTaskIds);
       setPendingTaskIds(activeTaskIds);
-      setNonBlockingTaskIds(nextNonBlockingIds);
-      updatedPending = activeTaskIds;
-      effectiveNonBlockingTaskIds = nextNonBlockingIds;
     }
 
     if (currentPending.length > 0) {
@@ -121,47 +84,16 @@ export default function useGlobalTaskControl({
 
         if (reallyFinishedIds.length > 0) {
           console.log('真正完成的任务:', reallyFinishedIds);
-          setPendingTaskIds((prev) => {
-            const newPending = prev.filter((id) => !reallyFinishedIds.includes(id));
-            updatedPending = newPending;
-            return newPending;
-          });
-          setNonBlockingTaskIds((prev) => prev.filter((id) => !reallyFinishedIds.includes(id)));
-          effectiveNonBlockingTaskIds = effectiveNonBlockingTaskIds.filter((id) => !reallyFinishedIds.includes(id));
-        } else {
-          // 没有真正完成的任务，保持 updatedPending 不变
-          updatedPending = currentPending;
+          setPendingTaskIds((prev) => prev.filter((id) => !reallyFinishedIds.includes(id)));
         }
       }
     }
 
-    // 只有当没有运行中的任务且没有待处理的任务时，才解锁
-    const blockingRunningTasks = tasks.filter((task) => (
-      !isTaskNonBlocking(task.task_id, task.task_type, effectiveNonBlockingTaskIds)
-    ));
-    const blockingPendingTaskIds = updatedPending.filter((taskId) => (
-      !effectiveNonBlockingTaskIds.includes(taskId)
-    ));
-    const shouldBeLocked = blockingRunningTasks.length > 0 || blockingPendingTaskIds.length > 0;
-
-    if (shouldBeLocked !== isGlobalLockedRef.current) {
-      setIsGlobalLocked(shouldBeLocked);
-      if (!shouldBeLocked) {
-        addLog('success', '后台任务已完成，正在同步最新数据...');
-        setTimeout(() => {
-          initializeAppDataRef.current?.({ refreshRadarSearch: true });
-        }, 500);
-      }
-    }
   }, [
     setActiveTasks,
     setIsCheckingTasks,
     handleTaskCompletionRef,
     setPendingTaskIds,
-    setNonBlockingTaskIds,
-    setIsGlobalLocked,
-    addLog,
-    initializeAppDataRef,
   ]);
 
   // Fallback polling (used when SSE is unavailable)
@@ -216,22 +148,22 @@ export default function useGlobalTaskControl({
     };
   }, [currentUser, licenseOk, syncActiveTasks, handleTasksUpdate]);
 
-  const handleForceUnlock = useCallback(() => {
-    if (!forceUnlockPwd || activeTasks.length === 0) return;
+  const handleCancelActiveTasks = useCallback(() => {
+    if (!cancelTaskPwd || activeTasks.length === 0) return;
     Promise.all(activeTasks.map((task) =>
-      apiClient.post(`/tasks/${task.task_id}/force-cancel`, { password: forceUnlockPwd }).catch(() => {})
+      apiClient.post(`/tasks/${task.task_id}/force-cancel`, { password: cancelTaskPwd }).catch(() => {})
     )).then(() => {
-      setForceUnlockPwd('');
-      setShowForceUnlock(false);
+      setCancelTaskPwd('');
+      setShowCancelTask(false);
       syncActiveTasks();
     });
-  }, [activeTasks, forceUnlockPwd, syncActiveTasks]);
+  }, [activeTasks, cancelTaskPwd, syncActiveTasks]);
 
   return {
-    forceUnlockPwd,
-    setForceUnlockPwd,
-    showForceUnlock,
-    setShowForceUnlock,
-    handleForceUnlock,
+    cancelTaskPwd,
+    setCancelTaskPwd,
+    showCancelTask,
+    setShowCancelTask,
+    handleCancelActiveTasks,
   };
 }

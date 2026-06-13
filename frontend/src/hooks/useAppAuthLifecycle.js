@@ -15,7 +15,6 @@ export default function useAppAuthLifecycle({
   setHasRadarSearched,
   setCurrentUser,
   setAuthChecked,
-  setIsGlobalLocked,
   setPendingTaskIds,
   setLicenseLoading,
   setLicenseStatus,
@@ -72,7 +71,6 @@ export default function useAppAuthLifecycle({
       setHasRadarSearched(false);
       clearRadarSearchResults();
       setCurrentUser(null);
-      setIsGlobalLocked(false);
       setPendingTaskIds([]);
       prevLicenseOkRef.current = false;
       setAuthChecked(true);
@@ -82,7 +80,6 @@ export default function useAppAuthLifecycle({
     radarSearchRequestSeqRef,
     setHasRadarSearched,
     setCurrentUser,
-    setIsGlobalLocked,
     setPendingTaskIds,
     prevLicenseOkRef,
     setAuthChecked,

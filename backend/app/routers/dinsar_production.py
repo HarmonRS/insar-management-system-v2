@@ -40,6 +40,12 @@ PYINT_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
     minimum=1,
     maximum=10,
 )
+LANDSAR_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
+    "LANDSAR_PRODUCTION_JOB_MAX_ATTEMPTS",
+    1,
+    minimum=1,
+    maximum=10,
+)
 
 
 class RunJobRequest(BaseModel):
@@ -243,7 +249,12 @@ async def submit_run(
         "extra": dict(req.extra or {}),
     }
 
-    from ..services.job_handlers import JOB_TYPE_IDL_RUN_DINSAR, JOB_TYPE_ISCE2_RUN, JOB_TYPE_PYINT_RUN
+    from ..services.job_handlers import (
+        JOB_TYPE_IDL_RUN_DINSAR,
+        JOB_TYPE_ISCE2_RUN,
+        JOB_TYPE_LANDSAR_RUN,
+        JOB_TYPE_PYINT_RUN,
+    )
     create_managed_run = False
     normalized_extra = dict(payload["extra"])
 
@@ -252,7 +263,7 @@ async def submit_run(
         job_type = JOB_TYPE_IDL_RUN_DINSAR
         max_attempts = DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS
         create_managed_run = True
-    elif req.engine_code in {"isce2", "pyint"}:
+    elif req.engine_code in {"isce2", "pyint", "landsar"}:
         if hasattr(engine, "normalize_extra"):
             try:
                 payload["extra"] = engine.normalize_extra(payload["extra"])
@@ -263,9 +274,13 @@ async def submit_run(
             job_type = JOB_TYPE_ISCE2_RUN
             max_attempts = ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS
             create_managed_run = True
-        else:
+        elif req.engine_code == "pyint":
             job_type = JOB_TYPE_PYINT_RUN
             max_attempts = PYINT_PRODUCTION_JOB_MAX_ATTEMPTS
+            create_managed_run = True
+        else:
+            job_type = JOB_TYPE_LANDSAR_RUN
+            max_attempts = LANDSAR_PRODUCTION_JOB_MAX_ATTEMPTS
             create_managed_run = True
         if validation_summary is not None:
             validated_task_count = validation_summary.get("task_count", 0)

@@ -25,9 +25,15 @@ from ..models import (
 from ..idl_service import get_idl_status
 from .product_package_schema import CANONICAL_PACKAGE_SCHEMA
 from .pairing_state_service import pairing_state_service
+from .sbas_insar_catalog_service import sbas_insar_catalog_service
 from .wsl_runtime_registry import wsl_runtime_registry
 
 
+ALLOWED_PRODUCT_PACKAGE_SCHEMAS = {
+    CANONICAL_PACKAGE_SCHEMA,
+    "insar.gamma-ipta-sbas-run/v1",
+    "insar.gamma-sbas-run/v1",
+}
 DEFAULT_WORKER_TIMEOUT_SECONDS = 60
 DEFAULT_SCHEMA_CACHE_SECONDS = 120
 _SCHEMA_CACHE_LOCK = asyncio.Lock()
@@ -202,13 +208,22 @@ def _build_catalog_status(
     catalog_name: str,
     storage_root: str,
     enabled: bool = True,
+    storage_roots: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
+    normalized_roots = [str(item or "").strip() for item in (storage_roots or [storage_root]) if str(item or "").strip()]
+    if not normalized_roots and storage_root:
+        normalized_roots = [storage_root]
     return {
         "ok": False,
         "catalog_name": catalog_name,
         "enabled": enabled,
         "storage_root": storage_root,
-        "storage_root_exists": os.path.isdir(storage_root),
+        "storage_roots": normalized_roots,
+        "storage_root_exists": bool(storage_root) and os.path.isdir(storage_root),
+        "storage_roots_status": [
+            {"path": root, "exists": os.path.isdir(root)}
+            for root in normalized_roots
+        ],
         "state_present": False,
         "catalog_status": None,
         "needs_rebuild": None,
@@ -228,11 +243,13 @@ async def _check_catalog(
     catalog_name: str,
     storage_root: str,
     enabled: bool = True,
+    storage_roots: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     status = _build_catalog_status(
         catalog_name=catalog_name,
         storage_root=storage_root,
         enabled=enabled,
+        storage_roots=storage_roots,
     )
     if not enabled:
         status["ok"] = True
@@ -262,6 +279,16 @@ async def _check_catalog(
                 status["last_message"] = state.last_message
                 if state.storage_root:
                     status["storage_root"] = state.storage_root
+                    root_status_by_path = {
+                        item["path"]: item
+                        for item in status.get("storage_roots_status", [])
+                    }
+                    if state.storage_root not in root_status_by_path:
+                        status.setdefault("storage_roots", []).insert(0, state.storage_root)
+                        status.setdefault("storage_roots_status", []).insert(
+                            0,
+                            {"path": state.storage_root, "exists": os.path.isdir(state.storage_root)},
+                        )
                     status["storage_root_exists"] = os.path.isdir(state.storage_root)
 
             count_result = await db.execute(
@@ -273,7 +300,9 @@ async def _check_catalog(
 
             manifest_count = int(status["manifest_count"] or 0)
             needs_rebuild = bool(status["needs_rebuild"])
-            status["ok"] = bool(status["storage_root_exists"]) and not (
+            roots_status = status.get("storage_roots_status") or []
+            roots_exist = all(bool(item.get("exists")) for item in roots_status) if roots_status else bool(status["storage_root_exists"])
+            status["ok"] = roots_exist and not (
                 manifest_count > 0 and needs_rebuild
             )
     except Exception as exc:
@@ -299,10 +328,13 @@ async def _check_timeseries_result_catalog() -> Dict[str, Any]:
 
 
 async def _check_sbas_insar_result_catalog() -> Dict[str, Any]:
+    run_roots = sbas_insar_catalog_service.get_run_roots()
+    primary_root = run_roots[0] if run_roots else os.path.join(settings.GAMMA_SBAS_WORK_ROOT, "runs")
     return await _check_catalog(
         catalog_name="sbas_insar",
-        storage_root=os.path.join(settings.GAMMA_SBAS_WORK_ROOT, "runs"),
-        enabled=bool(settings.GAMMA_SBAS_ENABLED),
+        storage_root=primary_root,
+        storage_roots=run_roots,
+        enabled=bool(settings.GAMMA_SBAS_ENABLED or settings.LANDSAR_SBAS_ENABLED),
     )
 
 
@@ -389,6 +421,8 @@ def _sanitize_product_package_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         "ok": bool(payload.get("ok")),
         "total_count": int(payload.get("total_count") or 0),
         "canonical_count": int(payload.get("canonical_count") or 0),
+        "valid_schema_count": int(payload.get("valid_schema_count") or 0),
+        "invalid_schema_count": int(payload.get("invalid_schema_count") or 0),
         "missing_manifest_count": int(payload.get("missing_manifest_count") or 0),
         "missing_publish_dir_count": int(payload.get("missing_publish_dir_count") or 0),
         "missing_processor_count": int(payload.get("missing_processor_count") or 0),
@@ -1033,8 +1067,11 @@ async def _check_product_packages() -> Dict[str, Any]:
     status = {
         "ok": False,
         "canonical_schema": CANONICAL_PACKAGE_SCHEMA,
+        "allowed_schemas": sorted(ALLOWED_PRODUCT_PACKAGE_SCHEMAS),
         "total_count": 0,
         "canonical_count": 0,
+        "valid_schema_count": 0,
+        "invalid_schema_count": 0,
         "missing_manifest_count": 0,
         "missing_publish_dir_count": 0,
         "missing_processor_count": 0,
@@ -1077,8 +1114,13 @@ async def _check_product_packages() -> Dict[str, Any]:
             status["by_family"][family_key] = int(status["by_family"].get(family_key, 0)) + 1
             status["by_engine"][engine_key] = int(status["by_engine"].get(engine_key, 0)) + 1
 
-            if str(package_schema or "").strip() == CANONICAL_PACKAGE_SCHEMA:
+            schema_key = str(package_schema or "").strip()
+            if schema_key == CANONICAL_PACKAGE_SCHEMA:
                 status["canonical_count"] += 1
+            if schema_key in ALLOWED_PRODUCT_PACKAGE_SCHEMAS:
+                status["valid_schema_count"] += 1
+            else:
+                status["invalid_schema_count"] += 1
             if not str(manifest_path or "").strip() or not os.path.isfile(str(manifest_path)):
                 status["missing_manifest_count"] += 1
             if not str(publish_dir or "").strip() or not os.path.isdir(str(publish_dir)):
@@ -1097,7 +1139,7 @@ async def _check_product_packages() -> Dict[str, Any]:
                 status["missing_processor_count"] == 0,
                 status["missing_runtime_count"] == 0,
                 status["missing_native_output_count"] == 0,
-                status["canonical_count"] == status["total_count"],
+                status["invalid_schema_count"] == 0,
             ]
         )
     except Exception as exc:
@@ -1432,7 +1474,8 @@ async def get_health_status(
             wsl_runtime_status.get("ok"),
             pairing_system_status.get("ok"),
             (not settings.TIMESERIES_ENABLED) or timeseries_result_catalog_status.get("ok"),
-            (not settings.GAMMA_SBAS_ENABLED) or sbas_insar_result_catalog_status.get("ok"),
+            (not (settings.GAMMA_SBAS_ENABLED or settings.LANDSAR_SBAS_ENABLED))
+            or sbas_insar_result_catalog_status.get("ok"),
         ]
     )
 

@@ -11,8 +11,6 @@ import { normalizePagePayload } from '../utils/appHelpers';
 import { normalizeTaskStatus } from '../utils/appUiHelpers';
 import { DEFAULT_LIST_PAGE_SIZE } from '../config/appConstants';
 
-const NON_BLOCKING_TASK_TYPES = new Set(['UNPACK_ARCHIVES', 'UNPACK_SENTINEL1', 'GF3_UNPACK', 'GF3_SARSCAPE_PRODUCE', 'GF3_SARSCAPE_SYNC', 'GF3_SARSCAPE_CLEAN', 'SCAN_ASSET_INVENTORY', 'COPY_DATA']);
-
 export default function useDinsarOperations({
     onCleanupDinsarLayers,
     fetchRadarImagingDates,
@@ -26,7 +24,7 @@ export default function useDinsarOperations({
         setAiStatus, setActiveAiReport,
     } = useDinsarStore();
     const { setHazardPoints } = useHazardStore();
-    const { setPendingTaskIds, setNonBlockingTaskIds, setIsGlobalLocked } = useTaskStore();
+    const { setPendingTaskIds } = useTaskStore();
     const { currentUser } = useAuthStore();
     const {
         hasRadarSearched, radarPagination,
@@ -123,16 +121,8 @@ export default function useDinsarOperations({
     };
 
     const handleTaskStart = (taskId, message, options = {}) => {
-        const taskType = String(options?.taskType || '').trim().toUpperCase();
-        const isNonBlocking = !!options?.nonBlocking || NON_BLOCKING_TASK_TYPES.has(taskType);
         if (taskId) {
             setPendingTaskIds(prev => [...prev, taskId]);
-            if (isNonBlocking) {
-                setNonBlockingTaskIds(prev => [...new Set([...prev, taskId])]);
-            }
-        }
-        if (!isNonBlocking) {
-            setIsGlobalLocked(true);
         }
         if (message) addLog('info', message);
     };
@@ -313,7 +303,6 @@ export default function useDinsarOperations({
     const handleAnalyzeResult = async (resultId) => {
         if (!ensureCanOperate()) return;
         addLog('info', `正在对结果 ID:${resultId} 发起 AI 智能诊断任务...`);
-        setIsGlobalLocked(true);
         try {
             const response = await apiClient.post(`/ai/analyze-result/${resultId}`);
             const taskId = response.data.task_id;
@@ -322,7 +311,6 @@ export default function useDinsarOperations({
         } catch (error) {
             const msg = error.response?.data?.detail || error.message;
             addLog('error', `发起 AI 诊断失败: ${msg}`);
-            setIsGlobalLocked(false);
         }
     };
 

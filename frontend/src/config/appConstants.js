@@ -127,7 +127,7 @@ export const LEFT_GROUP_SECTIONS = {
     {
       key: 'psinsar',
       label: '时序InSAR',
-      tabs: ['psinsar_results', 'psinsar_analysis'],
+      tabs: ['psinsar_analysis'],
     },
   ],
   ai_analysis: [

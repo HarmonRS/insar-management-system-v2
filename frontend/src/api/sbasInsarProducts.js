@@ -12,8 +12,20 @@ export const listSbasInsarProducts = (params = {}) =>
 export const getSbasInsarProductDetail = productId =>
   apiClient.get(`/sbas-insar-products/${encodeURIComponent(productId)}`).then(r => r.data);
 
-export const getSbasInsarProductPreviewUrl = productId =>
-  `${apiClient.defaults.baseURL || '/api'}/sbas-insar-products/${encodeURIComponent(productId)}/preview`;
+export const querySbasInsarPointTimeseries = (productId, payload) =>
+  apiClient.post(`/sbas-insar-products/${encodeURIComponent(productId)}/point-timeseries`, payload).then(r => r.data);
 
-export const getSbasInsarProductAssetUrl = (productId, assetId) =>
-  `${apiClient.defaults.baseURL || '/api'}/sbas-insar-products/${encodeURIComponent(productId)}/assets/${encodeURIComponent(assetId)}`;
+const appendCacheKey = (url, cacheKey) =>
+  cacheKey ? `${url}?v=${encodeURIComponent(cacheKey)}` : url;
+
+export const getSbasInsarProductPreviewUrl = (productId, cacheKey = '') =>
+  appendCacheKey(
+    `${apiClient.defaults.baseURL || '/api'}/sbas-insar-products/${encodeURIComponent(productId)}/preview`,
+    cacheKey,
+  );
+
+export const getSbasInsarProductAssetUrl = (productId, assetId, cacheKey = '') =>
+  appendCacheKey(
+    `${apiClient.defaults.baseURL || '/api'}/sbas-insar-products/${encodeURIComponent(productId)}/assets/${encodeURIComponent(assetId)}`,
+    cacheKey,
+  );

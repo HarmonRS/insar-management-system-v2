@@ -857,7 +857,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                 <span>{en ? 'Overall' : '总体状态'}</span>
                 {renderBadge(
                   productPackages.ok,
-                  `${toNumber(productPackages.canonical_count)} / ${toNumber(productPackages.total_count)}`
+                  `${toNumber(productPackages.valid_schema_count ?? productPackages.canonical_count)} / ${toNumber(productPackages.total_count)}`
                 )}
               </div>
               <div className="health-card-row">

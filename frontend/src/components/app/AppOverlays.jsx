@@ -9,7 +9,7 @@ import { ModalLoadingFallback } from './AppLoadingFallbacks';
 const LazyPairingModal = lazy(() => import('../PairingModal'));
 const LazyPsStackModal = lazy(() => import('../PsStackModal'));
 const LazyDataInfoModal = lazy(() => import('../DataInfoModal'));
-const LazyActiveTasksOverlay = lazy(() => import('../ActiveTasksOverlay'));
+const LazyGlobalTaskCenter = lazy(() => import('../GlobalTaskCenter'));
 const LazyStatisticsDashboard = lazy(() => import('../../StatisticsDashboard'));
 const LazyAiReportModal = lazy(() => import('../AiReportModal'));
 const LazyMapExportModal = lazy(() => import('../MapExportModal'));
@@ -31,14 +31,13 @@ export default function AppOverlays({
     onRefreshLicenseStatus,
     licenseFileName,
     licenseUploadStatus,
-    isGlobalLocked,
     activeTasks,
-    showForceUnlock,
-    forceUnlockPwd,
-    onShowForceUnlock,
-    onForceUnlockPwdChange,
-    onForceUnlockConfirm,
-    onCancelForceUnlock,
+    showCancelTask,
+    cancelTaskPwd,
+    onShowCancelTask,
+    onCancelTaskPwdChange,
+    onCancelTaskConfirm,
+    onCloseCancelTask,
     mapExport,
 }) {
     const { language, t } = useI18n();
@@ -126,19 +125,19 @@ export default function AppOverlays({
                 </Suspense>
             )}
 
-            {isGlobalLocked && (
-                <Suspense fallback={<ModalLoadingFallback message="正在加载任务控制面板..." />}>
-                    <LazyActiveTasksOverlay
-                        isVisible={isGlobalLocked}
+            {activeTasks.length > 0 && (
+                <Suspense fallback={<ModalLoadingFallback message="正在加载任务中心..." />}>
+                    <LazyGlobalTaskCenter
+                        isVisible={activeTasks.length > 0}
                         activeTasks={activeTasks}
                         t={t}
                         isAdmin={isAdmin}
-                        showForceUnlock={showForceUnlock}
-                        forceUnlockPwd={forceUnlockPwd}
-                        onShowForceUnlock={onShowForceUnlock}
-                        onForceUnlockPwdChange={onForceUnlockPwdChange}
-                        onForceUnlockConfirm={onForceUnlockConfirm}
-                        onCancelForceUnlock={onCancelForceUnlock}
+                        showCancelTask={showCancelTask}
+                        cancelTaskPwd={cancelTaskPwd}
+                        onShowCancelTask={onShowCancelTask}
+                        onCancelTaskPwdChange={onCancelTaskPwdChange}
+                        onCancelTaskConfirm={onCancelTaskConfirm}
+                        onCloseCancelTask={onCloseCancelTask}
                     />
                 </Suspense>
             )}
