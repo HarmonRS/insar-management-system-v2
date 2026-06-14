@@ -2,6 +2,16 @@ import { useEffect } from 'react';
 import { useBatchStore, useUiStore, useAuthStore } from '../store';
 import { useI18n } from '../i18n/I18nContext';
 import useBatchOperations from '../hooks/useBatchOperations';
+import { getDinsarEngineMeta } from '../utils/dinsarEngines';
+
+function engineResultTone(status) {
+    const normalized = String(status || '').toLowerCase();
+    if (normalized === 'ready') return 'ready';
+    if (normalized === 'failed') return 'error';
+    if (normalized === 'blocked') return 'warn';
+    if (normalized === 'running') return 'info';
+    return 'neutral';
+}
 
 export default function BatchPanel() {
     const { language } = useI18n();
@@ -122,6 +132,24 @@ export default function BatchPanel() {
                                 {batchTab === 'dinsar' && (
                                     <div className="batch-item-meta">
                                         M: {item.master_imaging_date || '-'} / S: {item.slave_imaging_date || '-'}
+                                    </div>
+                                )}
+                                {batchTab === 'dinsar' && (
+                                    <div className="batch-engine-results">
+                                        {['sarscape', 'landsar', 'pyint'].map((engineCode) => {
+                                            const engineMeta = getDinsarEngineMeta(engineCode);
+                                            const result = item.engine_results?.[engineCode] || {};
+                                            const status = result.status || 'missing';
+                                            return (
+                                                <span
+                                                    key={engineCode}
+                                                    className={`batch-engine-chip tone-${engineResultTone(status)}`}
+                                                    title={result.skip_reason || result.run_key || ''}
+                                                >
+                                                    {engineMeta.shortLabel}: {status}
+                                                </span>
+                                            );
+                                        })}
                                     </div>
                                 )}
                             </div>

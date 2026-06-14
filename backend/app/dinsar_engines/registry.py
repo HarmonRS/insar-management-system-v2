@@ -29,12 +29,11 @@ def list_engines() -> List[DinsarEngine]:
 def _bootstrap() -> None:
     """Imports and registers all built-in engines."""
 
-    from .isce2_engine import Isce2Engine
     from .landsar_engine import LandsarEngine
     from .pyint_engine import PyintEngine
     from .sarscape_engine import SarscapeEngine
 
-    for engine in (SarscapeEngine(), Isce2Engine(), PyintEngine(), LandsarEngine()):
+    for engine in (SarscapeEngine(), PyintEngine(), LandsarEngine()):
         register(engine)
 
 

@@ -33,7 +33,6 @@ from .workflow_service import workflow_service
 
 
 TASK_TYPE_DINSAR_PRODUCTION = "IDL_RUN_DINSAR"
-TASK_TYPE_ISCE2_DINSAR_PRODUCTION = "ISCE2_RUN"
 TASK_TYPE_PYINT_DINSAR_PRODUCTION = "PYINT_RUN"
 TASK_TYPE_LANDSAR_DINSAR_PRODUCTION = "LANDSAR_RUN"
 RUN_STATUS_PENDING = "PENDING"
@@ -82,8 +81,6 @@ def _task_type_for_engine(engine_code: str) -> str:
     normalized = str(engine_code or "").strip().lower()
     if normalized == "sarscape":
         return TASK_TYPE_DINSAR_PRODUCTION
-    if normalized == "isce2":
-        return TASK_TYPE_ISCE2_DINSAR_PRODUCTION
     if normalized in {"pyint", "gamma"}:
         return TASK_TYPE_PYINT_DINSAR_PRODUCTION
     if normalized == "landsar":
@@ -95,8 +92,6 @@ def _workflow_name_for_engine(engine_code: str) -> str:
     normalized = str(engine_code or "").strip().lower()
     if normalized == "sarscape":
         return "dinsar_sarscape_production"
-    if normalized == "isce2":
-        return "dinsar_isce2_production"
     if normalized in {"pyint", "gamma"}:
         return "dinsar_pyint_gamma_production"
     if normalized == "landsar":
@@ -108,8 +103,6 @@ def _workflow_step_name_for_engine(engine_code: str) -> str:
     normalized = str(engine_code or "").strip().lower()
     if normalized == "sarscape":
         return RUNS_STEP_NAME
-    if normalized == "isce2":
-        return "Execute ISCE2 D-InSAR items"
     if normalized in {"pyint", "gamma"}:
         return "Execute PyINT/Gamma D-InSAR items"
     if normalized == "landsar":
@@ -546,8 +539,6 @@ def _safe_epoch(value: Optional[datetime]) -> Optional[int]:
 
 def _runtime_id_for_engine(engine_code: Optional[str]) -> Optional[str]:
     normalized = str(engine_code or "").strip().lower()
-    if normalized == "isce2":
-        return settings.ISCE2_RUNTIME_ID or None
     if normalized in {"pyint", "gamma"}:
         return settings.PYINT_RUNTIME_ID or None
     return None

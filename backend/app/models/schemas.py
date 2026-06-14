@@ -567,6 +567,7 @@ class DinsarTaskItem(BaseModel):
     scene_center_distance_meters: Optional[float] = None
     status: str
     remark: Optional[str] = None
+    engine_results: Optional[Dict[str, Any]] = None
     created_at: datetime
     updated_at: datetime
 

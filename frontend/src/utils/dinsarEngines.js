@@ -1,22 +1,12 @@
 export const DINSAR_ENGINE_ALL = '__ALL__';
 
-export const KNOWN_DINSAR_ENGINE_CODES = ['sarscape', 'envi', 'isce2', 'pyint', 'landsar'];
+export const KNOWN_DINSAR_ENGINE_CODES = ['sarscape', 'landsar', 'pyint'];
 
 const DINSAR_ENGINE_META = {
     sarscape: {
         label: 'ENVI / SARscape',
         shortLabel: 'ENVI',
         tone: 'envi',
-    },
-    envi: {
-        label: 'Legacy ENVI',
-        shortLabel: 'ENVI-L',
-        tone: 'envi',
-    },
-    isce2: {
-        label: 'ISCE2',
-        shortLabel: 'ISCE2',
-        tone: 'isce2',
     },
     pyint: {
         label: 'PyINT / Gamma',

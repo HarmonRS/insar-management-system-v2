@@ -4,7 +4,8 @@ import apiClient from '../api/client';
 import {
   getDinsarCatalogStatus,
   getDinsarProductDetail,
-  listDinsarProducts,
+  getDinsarProductCleanupPlan,
+  listDinsarProductPairs,
   queueDinsarCatalogRebuild,
   queueDinsarProductPublish,
 } from '../api/dinsarProducts';
@@ -22,6 +23,11 @@ const STATUS_TONE_MAP = {
   WARN: 'warn',
   ERROR: 'error',
   REBUILDING: 'info',
+  ready: 'ready',
+  missing: 'neutral',
+  failed: 'error',
+  blocked: 'warn',
+  legacy: 'neutral',
 };
 
 function formatDateTime(value) {
@@ -31,6 +37,19 @@ function formatDateTime(value) {
   } catch {
     return String(value);
   }
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (!Number.isFinite(size) || size <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let next = size;
+  let index = 0;
+  while (next >= 1024 && index < units.length - 1) {
+    next /= 1024;
+    index += 1;
+  }
+  return `${next.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
 function parseDirectoryList(value) {
@@ -48,6 +67,15 @@ function getMessageTone(message) {
 
 function StatusPill({ label, tone = 'neutral' }) {
   return <span className={`dinsar-status-pill tone-${tone}`}>{label}</span>;
+}
+
+function engineStatusTone(status) {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'ready') return 'ready';
+  if (normalized === 'failed') return 'error';
+  if (normalized === 'blocked') return 'warn';
+  if (normalized === 'running') return 'info';
+  return 'neutral';
 }
 
 function MetaField({ label, value, multiline = false }) {
@@ -68,8 +96,12 @@ export default function DinsarCatalogPanel({
 }) {
   const [catalogStatus, setCatalogStatus] = useState(null);
   const [products, setProducts] = useState([]);
+  const [productPairs, setProductPairs] = useState([]);
+  const [selectedPairKey, setSelectedPairKey] = useState('');
   const [selectedProductId, setSelectedProductId] = useState(null);
   const [selectedProduct, setSelectedProduct] = useState(null);
+  const [cleanupPlan, setCleanupPlan] = useState(null);
+  const [cleanupPlanLoading, setCleanupPlanLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
@@ -94,8 +126,8 @@ export default function DinsarCatalogPanel({
   );
 
   const engineOptions = useMemo(
-    () => buildDinsarEngineOptions(products, { includeKnown: true }),
-    [products]
+    () => buildDinsarEngineOptions([], { includeKnown: true }),
+    []
   );
   const selectedEngineMeta = useMemo(
     () => (engineFilter === DINSAR_ENGINE_ALL ? null : getDinsarEngineMeta(engineFilter)),
@@ -114,7 +146,7 @@ export default function DinsarCatalogPanel({
     try {
       const [statusData, productData] = await Promise.all([
         getDinsarCatalogStatus(),
-        listDinsarProducts({
+        listDinsarProductPairs({
           limit: listLimit,
           offset: 0,
           engine_code: engineFilter === DINSAR_ENGINE_ALL ? undefined : engineFilter,
@@ -122,18 +154,35 @@ export default function DinsarCatalogPanel({
         }),
       ]);
       setCatalogStatus(statusData);
-      const nextItems = Array.isArray(productData?.items) ? productData.items : [];
+      const nextPairs = Array.isArray(productData?.items) ? productData.items : [];
+      setProductPairs(nextPairs);
+      const nextItems = nextPairs
+        .map((item) => ({
+          id: item.primary_product_id,
+          engine_code: item.primary_engine_code,
+          pair_key: item.pair_key,
+        }))
+        .filter((item) => item.id);
       setProducts(nextItems);
+      setSelectedPairKey((current) => {
+        if (current && nextPairs.some((item) => (item.pair_key || `pair:${item.primary_product_id}`) === current)) {
+          return current;
+        }
+        const first = nextPairs[0];
+        return first ? (first.pair_key || `pair:${first.primary_product_id}`) : '';
+      });
       setSelectedProductId((current) => {
         if (current && nextItems.some((item) => item.id === current)) {
           return current;
         }
-        return nextItems[0]?.id ?? null;
+        return nextPairs[0]?.primary_product_id ?? null;
       });
     } catch (error) {
       setActionMessage(`结果目录状态加载失败：${error?.response?.data?.detail || error.message}`);
       setCatalogStatus(null);
       setProducts([]);
+      setProductPairs([]);
+      setSelectedPairKey('');
       setSelectedProductId(null);
     } finally {
       setLoading(false);
@@ -143,9 +192,11 @@ export default function DinsarCatalogPanel({
   const loadProductDetail = useCallback(async (productId) => {
     if (!productId) {
       setSelectedProduct(null);
+      setCleanupPlan(null);
       return;
     }
     setSelectedProduct(null);
+    setCleanupPlan(null);
     setDetailLoading(true);
     try {
       const detail = await getDinsarProductDetail(productId);
@@ -158,6 +209,21 @@ export default function DinsarCatalogPanel({
       setDetailLoading(false);
     }
   }, []);
+
+  const loadCleanupPlan = useCallback(async () => {
+    if (!selectedProductId) return;
+    setCleanupPlanLoading(true);
+    try {
+      const plan = await getDinsarProductCleanupPlan(selectedProductId);
+      setCleanupPlan(plan);
+    } catch (error) {
+      setCleanupPlan({
+        error: error?.response?.data?.detail || error.message || '中间文件清理计划加载失败',
+      });
+    } finally {
+      setCleanupPlanLoading(false);
+    }
+  }, [selectedProductId]);
 
   useEffect(() => {
     loadCatalog();
@@ -292,7 +358,7 @@ export default function DinsarCatalogPanel({
             <strong>手动发布与目录重建</strong>
             <p>
               这里用于把既有结果目录重新发布为标准结果包，并按最新规则重建目录索引。
-              如果同一对影像存在 ENVI 与 ISCE2 两套结果，它们会依赖 `engine_code` 与 `run_key` 分别登记，不会互相覆盖。
+              同一对影像的 ENVI/SARscape、LandSAR、Gamma/PyINT 结果会按任务聚合展示，底层仍依赖 `engine_code` 与 `run_key` 分别登记。
             </p>
           </div>
           <div className="dinsar-catalog-manage-form">
@@ -335,7 +401,7 @@ export default function DinsarCatalogPanel({
             <div>
               <strong>结果包列表</strong>
               <span>
-                {loading ? '加载中...' : `当前展示 ${products.length} 条`}
+                {loading ? '加载中...' : `当前展示 ${productPairs.length} 个任务`}
               </span>
             </div>
             {queryApplied && <StatusPill label={`检索: ${queryApplied}`} tone="info" />}
@@ -375,36 +441,52 @@ export default function DinsarCatalogPanel({
             </div>
           </div>
 
-          {products.length === 0 ? (
+          {productPairs.length === 0 ? (
             <div className="dinsar-catalog-empty">
               {loading ? '正在加载结果包...' : '当前筛选条件下没有结果包。'}
             </div>
           ) : (
             <div className="dinsar-catalog-list">
-              {products.map((item) => {
+              {productPairs.map((item) => {
                 const tone = STATUS_TONE_MAP[item.status] || 'neutral';
-                const engineMeta = getDinsarEngineMeta(item.engine_code);
                 const satelliteFamily = inferSatelliteFamilyFromResultLike(item);
+                const rowKey = item.pair_key || `pair:${item.primary_product_id}`;
                 return (
                   <button
-                    key={item.id}
+                    key={rowKey}
                     type="button"
-                    className={`dinsar-catalog-list-item ${selectedProductId === item.id ? 'active' : ''}`}
-                    onClick={() => setSelectedProductId(item.id)}
+                    className={`dinsar-catalog-list-item ${selectedPairKey === rowKey ? 'active' : ''}`}
+                    onClick={() => {
+                      setSelectedPairKey(rowKey);
+                      setSelectedProductId(item.primary_product_id || null);
+                    }}
                   >
                     <div className="dinsar-catalog-list-item-top">
-                      <strong>{item.display_name || item.product_id}</strong>
+                      <strong>{item.task_alias || item.task_name || item.pair_key || '未命名任务'}</strong>
                       <StatusPill label={item.status || 'UNKNOWN'} tone={tone} />
                     </div>
                     <div className="dinsar-catalog-list-item-badges">
-                      <span className={`dinsar-engine-badge tone-${engineMeta.tone}`}>{engineMeta.shortLabel}</span>
                       {satelliteFamily && (
                         <span className="dinsar-engine-badge tone-unknown">{formatSatelliteFamilyLabel(satelliteFamily)}</span>
                       )}
-                      <span>{formatDateTime(item.published_at)}</span>
+                      <span>{formatDateTime(item.latest_published_at)}</span>
+                    </div>
+                    <div className="dinsar-engine-result-row">
+                      {['sarscape', 'landsar', 'pyint'].map((engineCode) => {
+                        const result = item.engine_results?.[engineCode] || {};
+                        const engineMeta = getDinsarEngineMeta(engineCode);
+                        return (
+                          <span
+                            key={engineCode}
+                            className={`dinsar-engine-result-chip tone-${engineStatusTone(result.status)}`}
+                          >
+                            {engineMeta.shortLabel}: {result.status || 'missing'}
+                          </span>
+                        );
+                      })}
                     </div>
                     <div className="dinsar-catalog-list-item-meta">
-                      {(item.task_alias || item.task_name || '-')}{item.run_key ? ` / ${item.run_key}` : ''}
+                      已有结果 {item.available_engine_count || 0} / 3，ready {item.ready_engine_count || 0}
                     </div>
                     <div className="dinsar-catalog-list-item-meta">
                       {item.pair_key || '-'}
@@ -432,7 +514,7 @@ export default function DinsarCatalogPanel({
           </div>
 
           {!selectedProductId ? (
-            <div className="dinsar-catalog-empty">请选择一个结果包查看详情。</div>
+            <div className="dinsar-catalog-empty">请选择一个已有结果的任务查看详情。</div>
           ) : detailLoading || !selectedProduct ? (
             <div className="dinsar-catalog-empty">正在加载详情...</div>
           ) : selectedProduct?.error ? (
@@ -586,6 +668,58 @@ export default function DinsarCatalogPanel({
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="dinsar-catalog-section-card">
+                <div className="dinsar-catalog-section-title">中间文件清理计划</div>
+                <div className="dinsar-catalog-cleanup-head">
+                  <div>
+                    <MetaField label="当前能力" value="dry-run，只生成计划，不执行删除" />
+                  </div>
+                  <button type="button" onClick={loadCleanupPlan} disabled={cleanupPlanLoading}>
+                    {cleanupPlanLoading ? '计算中...' : '生成计划'}
+                  </button>
+                </div>
+                {!cleanupPlan ? (
+                  <div className="dinsar-catalog-empty inline">尚未生成清理计划。</div>
+                ) : cleanupPlan.error ? (
+                  <div className="dinsar-catalog-empty inline error">{cleanupPlan.error}</div>
+                ) : (
+                  <div className="dinsar-catalog-cleanup-plan">
+                    <div className="dinsar-catalog-detail-grid">
+                      <div className="dinsar-catalog-section-card nested">
+                        <MetaField label="可清理" value={cleanupPlan.deletable ? '是' : '否'} />
+                        <MetaField label="候选项" value={cleanupPlan.candidate_count} />
+                        <MetaField label="候选大小" value={formatBytes(cleanupPlan.total_size_bytes)} />
+                      </div>
+                      <div className="dinsar-catalog-section-card nested">
+                        <MetaField label="manifest" value={cleanupPlan.checks?.manifest_exists ? '存在' : '缺失'} />
+                        <MetaField label="必要资产" value={cleanupPlan.checks?.required_assets_ok ? '完整' : '缺失'} />
+                        <MetaField label="当前引擎" value={cleanupPlan.checks?.current_engine ? '是' : '否'} />
+                      </div>
+                    </div>
+                    {Array.isArray(cleanupPlan.blockers) && cleanupPlan.blockers.length > 0 && (
+                      <div className="dinsar-catalog-issue-list">
+                        {cleanupPlan.blockers.map((blocker) => (
+                          <div key={blocker} className="dinsar-catalog-issue-item warn">
+                            {blocker}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="dinsar-catalog-asset-list">
+                      {(cleanupPlan.candidates || []).map((candidate) => (
+                        <div key={candidate.path} className={`dinsar-catalog-asset-item ${candidate.exists ? 'ok' : 'missing'}`}>
+                          <div className="dinsar-catalog-asset-top">
+                            <strong>{candidate.reason}</strong>
+                            <span>{candidate.exists ? formatBytes(candidate.size_bytes) : '不存在'}</span>
+                          </div>
+                          <div className="break-all">{candidate.path}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

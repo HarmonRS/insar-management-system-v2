@@ -20,6 +20,7 @@ from ..services.result_catalog_service import (
     TASK_TYPE_REBUILD_DINSAR_CATALOG,
     result_catalog_service,
 )
+from ..services.dinsar_intermediate_cleanup_service import dinsar_intermediate_cleanup_service
 from ..services.task_service import task_service
 from .dependencies import (
     _add_operation_audit_log,
@@ -233,6 +234,42 @@ async def list_dinsar_products(
     )
 
 
+@router.get("/dinsar-products/pairs")
+async def list_dinsar_product_pairs(
+    limit: int = 100,
+    offset: int = 0,
+    engine_code: Optional[str] = None,
+    status: Optional[str] = None,
+    query: Optional[str] = None,
+    include_legacy: bool = False,
+    current_user: AuthUserORM = Depends(_get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = current_user
+    return await result_catalog_service.list_product_pairs(
+        db,
+        limit=limit,
+        offset=offset,
+        engine_code=engine_code,
+        status=status,
+        query=query,
+        include_legacy=include_legacy,
+    )
+
+
+@router.get("/dinsar-products/pairs/{pair_key}/cleanup-intermediates/plan")
+async def get_dinsar_pair_intermediate_cleanup_plan(
+    pair_key: str,
+    current_user: AuthUserORM = Depends(_get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = current_user
+    plan = await dinsar_intermediate_cleanup_service.build_pair_plan(db, pair_key=pair_key)
+    if int(plan.get("product_count") or 0) == 0:
+        raise HTTPException(status_code=404, detail="No D-InSAR products found for pair_key")
+    return plan
+
+
 @router.get("/dinsar-products/{product_db_id}")
 async def get_dinsar_product_detail(
     product_db_id: int,
@@ -244,6 +281,19 @@ async def get_dinsar_product_detail(
     if detail is None:
         raise HTTPException(status_code=404, detail="Result product not found")
     return detail
+
+
+@router.get("/dinsar-products/{product_db_id}/cleanup-intermediates/plan")
+async def get_dinsar_product_intermediate_cleanup_plan(
+    product_db_id: int,
+    current_user: AuthUserORM = Depends(_get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = current_user
+    plan = await dinsar_intermediate_cleanup_service.build_product_plan(db, product_db_id=product_db_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Result product not found")
+    return plan
 
 
 @router.get("/dinsar-products/{product_db_id}/preview")

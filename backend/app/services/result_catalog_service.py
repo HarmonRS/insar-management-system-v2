@@ -48,6 +48,13 @@ from .dinsar_result_layout_service import (
     is_standard_envi_disp_file,
     is_standard_isce2_disp_file,
 )
+from .dinsar_engine_matrix import (
+    CURRENT_DINSAR_ENGINE_ORDER,
+    build_engine_results,
+    infer_dinsar_data_family,
+    is_current_dinsar_engine,
+    normalize_dinsar_engine_code,
+)
 from .product_package_schema import build_canonical_descriptor, normalize_package_manifest
 from .product_packaging import build_dinsar_package_manifest
 
@@ -1457,6 +1464,130 @@ class ResultCatalogService:
             "limit": limit,
             "offset": offset,
             "has_more": offset + len(items) < total,
+        }
+
+    async def list_product_pairs(
+        self,
+        db: AsyncSession,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        engine_code: Optional[str] = None,
+        status: Optional[str] = None,
+        query: Optional[str] = None,
+        include_legacy: bool = False,
+    ) -> Dict[str, Any]:
+        limit = max(1, min(int(limit or 100), 500))
+        offset = max(0, int(offset or 0))
+        normalized_engine = normalize_dinsar_engine_code(engine_code) if engine_code else None
+
+        stmt = select(ResultProductORM).where(ResultProductORM.catalog_name == DINSAR_CATALOG_NAME)
+        if not include_legacy:
+            stmt = stmt.where(ResultProductORM.engine_code.in_(list(CURRENT_DINSAR_ENGINE_ORDER)))
+        if normalized_engine:
+            stmt = stmt.where(ResultProductORM.engine_code == normalized_engine)
+        if status:
+            stmt = stmt.where(ResultProductORM.status == status)
+        if query:
+            like_value = f"%{query.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    ResultProductORM.display_name.ilike(like_value),
+                    ResultProductORM.product_id.ilike(like_value),
+                    ResultProductORM.task_name.ilike(like_value),
+                    ResultProductORM.task_alias.ilike(like_value),
+                    ResultProductORM.pair_key.ilike(like_value),
+                    ResultProductORM.run_key.ilike(like_value),
+                )
+            )
+
+        result = await db.execute(
+            stmt.order_by(
+                ResultProductORM.published_at.desc().nullslast(),
+                ResultProductORM.id.desc(),
+            )
+        )
+        products = result.scalars().all()
+
+        groups: Dict[str, Dict[str, Any]] = {}
+        for product in products:
+            pair_key = str(product.pair_key or "").strip() or f"product:{product.id}"
+            group = groups.setdefault(
+                pair_key,
+                {
+                    "pair_key": product.pair_key,
+                    "pair_uid": product.pair_uid,
+                    "task_name": product.task_name,
+                    "task_alias": product.task_alias,
+                    "network_run_id": product.network_run_id,
+                    "network_edge_id": product.network_edge_id,
+                    "policy_version": product.policy_version,
+                    "selection_strategy": product.selection_strategy,
+                    "latest_published_at": product.published_at,
+                    "data_family": infer_dinsar_data_family(
+                        product.task_name,
+                        product.task_alias,
+                        product.profile_code,
+                        product.summary_json if isinstance(product.summary_json, dict) else None,
+                    ),
+                    "_products": [],
+                },
+            )
+            group["_products"].append(product)
+            if product.published_at and (
+                group.get("latest_published_at") is None
+                or product.published_at > group["latest_published_at"]
+            ):
+                group["latest_published_at"] = product.published_at
+            for key in ("pair_uid", "task_name", "task_alias", "network_run_id", "network_edge_id", "policy_version", "selection_strategy"):
+                if group.get(key) in (None, "") and getattr(product, key) not in (None, ""):
+                    group[key] = getattr(product, key)
+
+        items: List[Dict[str, Any]] = []
+        for group in groups.values():
+            products_for_group: List[ResultProductORM] = group.pop("_products")
+            engine_results = build_engine_results(
+                products=products_for_group,
+                data_family=group.get("data_family") or "unknown",
+                include_legacy=include_legacy,
+            )
+            available_results = [
+                result_payload
+                for result_payload in engine_results.values()
+                if result_payload.get("latest_product_id") is not None
+                and (include_legacy or is_current_dinsar_engine(result_payload.get("engine_code")))
+            ]
+            ready_count = sum(1 for item in engine_results.values() if item.get("status") == "ready")
+            primary_result = next(
+                (
+                    item
+                    for engine in CURRENT_DINSAR_ENGINE_ORDER
+                    for item in [engine_results.get(engine)]
+                    if item and item.get("latest_product_id") is not None
+                ),
+                None,
+            )
+            group.update(
+                {
+                    "engine_results": engine_results,
+                    "available_engine_count": len(available_results),
+                    "ready_engine_count": ready_count,
+                    "primary_product_id": primary_result.get("latest_product_id") if primary_result else None,
+                    "primary_engine_code": primary_result.get("engine_code") if primary_result else None,
+                    "status": "ready" if ready_count else "missing",
+                }
+            )
+            items.append(group)
+
+        items.sort(key=lambda item: item.get("latest_published_at") or datetime.min, reverse=True)
+        total = len(items)
+        paged = items[offset : offset + limit]
+        return {
+            "items": paged,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(paged) < total,
         }
 
     async def get_product_detail(

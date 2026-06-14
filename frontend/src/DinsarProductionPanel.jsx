@@ -38,18 +38,16 @@ const ENGINE_STATUS_LABEL = {
 
 const ENGINE_LABEL = {
   sarscape: 'SARscape',
-  isce2: 'ISCE2',
   pyint: 'PyINT / Gamma',
   landsar: 'LANDSAR',
 };
 
 const TASK_TYPE_LABEL = {
-  ISCE2_RUN: 'ISCE2生产',
   PYINT_RUN: 'PyINT/Gamma生产',
   LANDSAR_RUN: 'LandSAR生产',
   IDL_RUN_DINSAR: 'ENVI生产',
 };
-const DINSAR_PRODUCTION_TASK_TYPES = ['ISCE2_RUN', 'PYINT_RUN', 'LANDSAR_RUN', 'IDL_RUN_DINSAR'];
+const DINSAR_PRODUCTION_TASK_TYPES = ['PYINT_RUN', 'LANDSAR_RUN', 'IDL_RUN_DINSAR'];
 
 const STATUS_LABEL = {
   PENDING: '等待中',
@@ -112,7 +110,6 @@ function formatStatus(status) {
 }
 
 function taskTypeToEngine(taskType) {
-  if (taskType === 'ISCE2_RUN') return 'isce2';
   if (taskType === 'PYINT_RUN') return 'pyint';
   if (taskType === 'LANDSAR_RUN') return 'landsar';
   if (taskType === 'IDL_RUN_DINSAR') return 'sarscape';
@@ -602,8 +599,6 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     ? 'PyINT/Gamma 会按目标网格尺寸自动换算多视；新增 Gamma 残余重去平在解缠后执行 rascc_mask/quad_fit/quad_sub，再导出 native 和标准 GeoTIFF。'
     : selectedEngine === 'landsar'
       ? 'LandSAR 当前使用已跑通的稳定参数。GACOS 大气相位改正需要外部大气延迟文件，未配置文件前不可启用；垂直向形变为可选输出，默认关闭。'
-      : selectedEngine === 'isce2'
-      ? '这些参数现在按执行、交付、增强分组展示。结果异常时，优先尝试关闭增强项，再回看基础几何和配对质量。'
       : '这些参数影响当前引擎的生产模板。建议先使用默认值，只有在结果边界、噪声或几何表现异常时再逐项调整。';
   const pyintPreviewBlocksSubmit = selectedEngine === 'pyint' && pyintPreview && pyintPreview.allow_submit === false;
   const taskMonitor = useTaskMonitor({
@@ -617,9 +612,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
       ? {
         task_id: latestRunWithTask.task_id,
         task_type:
-          latestRunWithTask.engine === 'isce2'
-            ? 'ISCE2_RUN'
-            : latestRunWithTask.engine === 'pyint'
+          latestRunWithTask.engine === 'pyint'
               ? 'PYINT_RUN'
               : latestRunWithTask.engine === 'landsar'
                 ? 'LANDSAR_RUN'
@@ -1305,11 +1298,6 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
               disabled={readOnly}
               style={{ width: 140, padding: '5px 8px', borderRadius: 4, border: '1px solid #e2e8f0', fontSize: 13 }}
             />
-            {selectedEngine === 'isce2' && currentDefaultTimeoutSec > 0 && (
-              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
-                ISCE2 默认按单对任务使用 {currentDefaultTimeoutSec} 秒；批量目录会串行逐对套用该超时。
-              </div>
-            )}
             {selectedEngine === 'pyint' && currentDefaultTimeoutSec > 0 && (
               <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
                 PyINT 默认按单对任务使用 {currentDefaultTimeoutSec} 秒；当前会逐对串行创建工作区并运行外部 PyINT / Gamma 流程，native 会在主流程和重去平后统一写入。

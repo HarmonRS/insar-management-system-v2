@@ -28,6 +28,7 @@ from ..models import (
     TimeseriesStackPlanItemORM,
     TimeseriesStackPlanORM,
 )
+from ..services.dinsar_engine_matrix import build_engine_results_for_task_items
 from .dependencies import (
     _add_operation_audit_log,
     _refresh_dinsar_batch_summary,
@@ -361,7 +362,14 @@ async def list_dinsar_batch_items_endpoint(
         .offset(safe_offset)
         .limit(safe_limit)
     )
-    return [DinsarTaskItem.model_validate(i) for i in result.scalars().all()]
+    items = result.scalars().all()
+    engine_results_by_item_id = await build_engine_results_for_task_items(db, items)
+    payload: List[DinsarTaskItem] = []
+    for item in items:
+        row = DinsarTaskItem.model_validate(item)
+        row.engine_results = engine_results_by_item_id.get(int(item.id or 0), {})
+        payload.append(row)
+    return payload
 
 
 @router.patch("/task-batches/dinsar/{batch_id}/complete-all", response_model=DinsarTaskBatch)

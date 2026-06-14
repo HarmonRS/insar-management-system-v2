@@ -12,5 +12,14 @@ export const queueDinsarCatalogRebuild = payload =>
 export const listDinsarProducts = (params = {}) =>
   apiClient.get('/dinsar-products', { params }).then(r => r.data);
 
+export const listDinsarProductPairs = (params = {}) =>
+  apiClient.get('/dinsar-products/pairs', { params }).then(r => r.data);
+
 export const getDinsarProductDetail = productId =>
   apiClient.get(`/dinsar-products/${encodeURIComponent(productId)}`).then(r => r.data);
+
+export const getDinsarProductCleanupPlan = productId =>
+  apiClient.get(`/dinsar-products/${encodeURIComponent(productId)}/cleanup-intermediates/plan`).then(r => r.data);
+
+export const getDinsarPairCleanupPlan = pairKey =>
+  apiClient.get(`/dinsar-products/pairs/${encodeURIComponent(pairKey)}/cleanup-intermediates/plan`).then(r => r.data);

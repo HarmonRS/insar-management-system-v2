@@ -28,12 +28,6 @@ DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
     minimum=1,
     maximum=20,
 )
-ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
-    "ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS",
-    1,
-    minimum=1,
-    maximum=10,
-)
 PYINT_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
     "PYINT_PRODUCTION_JOB_MAX_ATTEMPTS",
     1,
@@ -49,7 +43,7 @@ LANDSAR_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
 
 
 class RunJobRequest(BaseModel):
-    engine_code: str = Field(..., description="Engine code: sarscape / isce2 / pyint / landsar")
+    engine_code: str = Field(..., description="Engine code: sarscape / pyint / landsar")
     profile: str = Field(..., description="Engine profile, for example custom6 / lt1_stripmap / lt1_gamma_dinsar")
     root_dir: str = Field(..., description="Windows root directory")
     num_to_process: int = Field(default=0, ge=0, description="How many tasks to process; 0 means all")
@@ -251,7 +245,6 @@ async def submit_run(
 
     from ..services.job_handlers import (
         JOB_TYPE_IDL_RUN_DINSAR,
-        JOB_TYPE_ISCE2_RUN,
         JOB_TYPE_LANDSAR_RUN,
         JOB_TYPE_PYINT_RUN,
     )
@@ -263,18 +256,14 @@ async def submit_run(
         job_type = JOB_TYPE_IDL_RUN_DINSAR
         max_attempts = DINSAR_PRODUCTION_JOB_MAX_ATTEMPTS
         create_managed_run = True
-    elif req.engine_code in {"isce2", "pyint", "landsar"}:
+    elif req.engine_code in {"pyint", "landsar"}:
         if hasattr(engine, "normalize_extra"):
             try:
                 payload["extra"] = engine.normalize_extra(payload["extra"])
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         normalized_extra = dict(payload["extra"])
-        if req.engine_code == "isce2":
-            job_type = JOB_TYPE_ISCE2_RUN
-            max_attempts = ISCE2_PRODUCTION_JOB_MAX_ATTEMPTS
-            create_managed_run = True
-        elif req.engine_code == "pyint":
+        if req.engine_code == "pyint":
             job_type = JOB_TYPE_PYINT_RUN
             max_attempts = PYINT_PRODUCTION_JOB_MAX_ATTEMPTS
             create_managed_run = True
