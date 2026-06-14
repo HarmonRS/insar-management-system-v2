@@ -111,11 +111,37 @@ ORBIT_POOL_LANDSAR=
 IDL_EXECUTABLE=C:\Program Files\Harris\ENVI56\IDL88\bin\bin.x86_64\idl.exe
 IDL_WORKBENCH_PATH=C:\Program Files\Harris\ENVI56\IDL88\bin\bin.x86_64\idlde.exe
 IDL_DINSAR_DEM_BASE_FILE=D:\SRTM30m\SRTMDEM_RSP_SARscape
-IDL_WORKER_RUNTIME_DIR=D:\Code\Insar_management_system_v2\backend\runtime\idl_worker
+IDL_WORKER_RUNTIME_DIR=D:\production_runtime\idl_worker
 ENVI_TASK_TIMEOUT_SECONDS=21600
 ```
 
-### 3.5 WSL 共享运行时
+### 3.5 GF3 SARscape 生产
+
+GF3 当前主线是“ENVI/SARscape 生产原生 `_geo` 证据层，平台标准化成 GeoTIFF 后入库和供洪涝/水体算法消费”。旧 Python/GDAL L1A 预处理链路默认关闭。
+
+```env
+GF3_ARCHIVE_SOURCE_DIRS=D:\production_inputs\gf3\archives
+GF3_LEGACY_GDAL_ENABLED=false
+GF3_SOURCE_DIRS=
+GF3_SARSCAPE_NATIVE_DIRS=D:\production_results\gf3\sarscape_native
+GF3_STORAGE_DIRS=D:\production_results\gf3\standard_l2
+GF3_SARSCAPE_RUNTIME_DIR=D:\production_runtime\gf3\sarscape_runtime
+GF3_SARSCAPE_WRAPPER_EXE=D:\Code\Insar_management_system_v2\third_party\GF3_L1A_To_L2_pipeline\dist\windows\gf3wrapper.exe
+GF3_SARSCAPE_IDLRT_PATH=C:\Program Files\Harris\ENVI56\IDL88\bin\bin.x86_64\idlrt.exe
+GF3_SARSCAPE_DEM_PATH=D:\DEM\COPDEM_GLO30_China_4326_DEM
+GF3_SARSCAPE_POLARIZATIONS=HH,HV
+GF3_SARSCAPE_AUTO_STANDARDIZE=true
+GF3_SARSCAPE_CLEAN_AFTER_SUCCESS=true
+```
+
+说明：
+
+- `GF3_SARSCAPE_NATIVE_DIRS` 长期保留 `_geo`、`.hdr`、`.sml`、快视、KML、日志和 manifest。
+- `GF3_STORAGE_DIRS` 是标准 L2 GeoTIFF 池，后续入库、预览、洪涝/水体分析优先消费这里和 `SAR_ANALYSIS_READY_ROOT`。
+- `GF3_SARSCAPE_RUNTIME_DIR` 只放 wrapper 配置和运行时临时文件，不应混入原生结果池。
+- 如确需恢复旧 L1A 解包/预处理，需要同时设置 `GF3_LEGACY_GDAL_ENABLED=true` 和 `GF3_SOURCE_DIRS`。
+
+### 3.6 WSL 共享运行时
 
 当前推荐采用“一套共享 distro + 一套共享 conda 环境”模式。
 
@@ -123,7 +149,7 @@ ENVI_TASK_TIMEOUT_SECONDS=21600
 WSL_DISTRO=Ubuntu-24.04
 WSL_SHARED_CONDA_ENV=insar_wsl_v1
 WSL_SHARED_PYTHON=/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python
-WSL_BROKER_JOB_ROOT=D:\Code\Insar_management_system_v2\backend\runtime\wsl_jobs
+WSL_BROKER_JOB_ROOT=D:\production_runtime\wsl_jobs
 
 ISCE2_RUNTIME_ID=isce2_runtime_v1
 PYINT_RUNTIME_ID=gamma_pyint_runtime_v1
@@ -138,7 +164,7 @@ PYINT_RUNTIME_ID=gamma_pyint_runtime_v1
   使用共享 python，runner 为 `deploy/wsl/runners/gamma_pyint_runner.py`
   Gamma 固定环境脚本为 `deploy/wsl/profiles/gamma_env.sh`
 
-### 3.6 ISCE2 D-InSAR 与旧时序兼容
+### 3.7 ISCE2 D-InSAR 与旧时序兼容
 
 ```env
 ISCE2_ENABLED=false
@@ -156,7 +182,7 @@ TIMESERIES_PYTHON=/home/administrator/miniconda3/envs/insar_wsl_v1/bin/python
 - 旧 ISCE2/MintPy 时序生产链默认关闭，不再作为 SBAS 生产入口。
 - 如果必须做历史链路对比，需要显式开启 `TIMESERIES_ENABLED=true` 并提供完整旧脚本路径。
 
-### 3.7 Gamma / PyINT / SBAS
+### 3.8 Gamma / PyINT / SBAS
 
 ```env
 PYINT_ENABLED=true

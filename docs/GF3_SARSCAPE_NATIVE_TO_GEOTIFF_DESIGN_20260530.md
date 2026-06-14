@@ -19,12 +19,15 @@ GF3 原始压缩包池
 
 ## 2. 目录约定
 
-推荐继续沿用现场已有目录语义，并新增一个 ENVI/SARscape 原生池。
+推荐把输入、生产结果和运行时目录分开，避免把系统工作文件混入业务结果池。
 
 ```env
-GF3_ARCHIVE_SOURCE_DIRS=D:\GF3_Image_Pool_Zip
-GF3_SARSCAPE_NATIVE_DIRS=D:\GF3_L2_ENVI_Binary_Pool
-GF3_STORAGE_DIRS=D:\GF3_L2_Image_Pool
+GF3_ARCHIVE_SOURCE_DIRS=D:\production_inputs\gf3\archives
+GF3_LEGACY_GDAL_ENABLED=false
+GF3_SOURCE_DIRS=
+GF3_SARSCAPE_NATIVE_DIRS=D:\production_results\gf3\sarscape_native
+GF3_STORAGE_DIRS=D:\production_results\gf3\standard_l2
+GF3_SARSCAPE_RUNTIME_DIR=D:\production_runtime\gf3\sarscape_runtime
 SAR_ANALYSIS_READY_ROOT=D:\production_results\sar_analysis_ready
 ```
 
@@ -33,8 +36,10 @@ SAR_ANALYSIS_READY_ROOT=D:\production_results\sar_analysis_ready
 | 目录 | 职责 | 系统是否直接分析 |
 | --- | --- | --- |
 | `GF3_ARCHIVE_SOURCE_DIRS` | 原始 GF3 L1A `.tar.gz` 池 | 否 |
+| `GF3_SOURCE_DIRS` | legacy Python/GDAL L1A 解包输入，默认关闭 | 否 |
 | `GF3_SARSCAPE_NATIVE_DIRS` | SARscape `_geo` 原生结果池 | 否 |
 | `GF3_STORAGE_DIRS` | GF3 标准 GeoTIFF 池 | 是 |
+| `GF3_SARSCAPE_RUNTIME_DIR` | wrapper 配置、IDL 运行时临时文件 | 否 |
 | `SAR_ANALYSIS_READY_ROOT` | 洪涝/水体分析级统一输入 | 是 |
 
 生产服务器可以不部署完整管理系统。只要把完成后的 `_geo` 原生结果组放入 `GF3_SARSCAPE_NATIVE_DIRS`，管理系统就可以扫描、转换和入库。
@@ -44,7 +49,7 @@ SAR_ANALYSIS_READY_ROOT=D:\production_results\sar_analysis_ready
 原生池以批次日期或人工批次号分组。单景目录名尽量保持 GF3 原始产品名。
 
 ```text
-D:\GF3_L2_ENVI_Binary_Pool
+D:\production_results\gf3\sarscape_native
   20260514
     GF3_MH1_FSII_051377_E132.3_N48.2_20260514_L1A_HHHV_L10007356478
       GF3_MH1_FSII_..._hh_geo
@@ -110,7 +115,7 @@ SLC 中间产物
 系统从原生池转换后写入 `GF3_STORAGE_DIRS`。
 
 ```text
-D:\GF3_L2_Image_Pool
+D:\production_results\gf3\standard_l2
   20260514
     GF3_MH1_FSII_051377_E132.3_N48.2_20260514_L1A_HHHV_L10007356478
       HH_L2.tif
@@ -269,8 +274,8 @@ status=DONE
 {
   "schema": "gf3_sarscape_native.v1",
   "scene_name": "GF3_MH1_FSII_...",
-  "native_dir": "D:\\GF3_L2_ENVI_Binary_Pool\\20260514\\GF3_MH1_FSII_...",
-  "source_archive": "D:\\GF3_Image_Pool_Zip\\20260514\\GF3_MH1_FSII_....tar.gz",
+  "native_dir": "D:\\production_results\\gf3\\sarscape_native\\20260514\\GF3_MH1_FSII_...",
+  "source_archive": "D:\\production_inputs\\gf3\\archives\\20260514\\GF3_MH1_FSII_....tar.gz",
   "polarizations": ["HH", "HV"],
   "status": "NATIVE_READY",
   "assets": [
@@ -295,8 +300,8 @@ status=DONE
 {
   "schema": "gf3_standard_geotiff.v1",
   "scene_name": "GF3_MH1_FSII_...",
-  "native_manifest": "D:\\GF3_L2_ENVI_Binary_Pool\\...\\gf3_native_manifest.json",
-  "standard_dir": "D:\\GF3_L2_Image_Pool\\20260514\\GF3_MH1_FSII_...",
+  "native_manifest": "D:\\production_results\\gf3\\sarscape_native\\...\\gf3_native_manifest.json",
+  "standard_dir": "D:\\production_results\\gf3\\standard_l2\\20260514\\GF3_MH1_FSII_...",
   "status": "DONE",
   "converter": {
     "name": "gf3_sarscape_geo_to_tif",
@@ -446,7 +451,7 @@ GF3_ARCHIVE_SOURCE_DIRS
 新增配置：
 
 ```env
-GF3_SARSCAPE_WRAPPER_EXE=D:\Code\Insar_management_system_v2\.codex_tmp\GF3_L1A_To_L2_pipeline\dist\windows\gf3wrapper.exe
+GF3_SARSCAPE_WRAPPER_EXE=D:\Code\Insar_management_system_v2\third_party\GF3_L1A_To_L2_pipeline\dist\windows\gf3wrapper.exe
 GF3_SARSCAPE_IDLRT_PATH=C:\Program Files\Harris\ENVI56\IDL88\bin\bin.x86_64\idlrt.exe
 GF3_SARSCAPE_DEM_PATH=D:\DEM\GMTED2010.jp2
 GF3_SARSCAPE_POLARIZATIONS=HH,HV
@@ -473,4 +478,4 @@ GF3_SARSCAPE_PRODUCE_TIMEOUT_SECONDS=0
 - 每景写 `gf3_cleanup_manifest.json`，记录删除条目和释放字节数。
 - 不删除 `GF3_ARCHIVE_SOURCE_DIRS` 中的原始压缩包，也不删除 `GF3_STORAGE_DIRS` 中的标准 GeoTIFF。
 
-这样 `D:\GF3_L2_ENVI_Binary_Pool` 只长期保存可追溯的最终 `_geo` 原生结果组，中间过程文件在标准化完成后自动释放空间。
+这样 `D:\production_results\gf3\sarscape_native` 只长期保存可追溯的最终 `_geo` 原生结果组，中间过程文件在标准化完成后自动释放空间；wrapper 配置和临时运行文件放在 `D:\production_runtime\gf3\sarscape_runtime`。

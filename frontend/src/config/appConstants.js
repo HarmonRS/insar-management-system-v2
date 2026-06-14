@@ -38,8 +38,11 @@ export const TILE_LAYER_OPTIONS = {
   maxZoom: 16,
   maxNativeZoom: 16,
   tms: false,
-  updateWhenIdle: true,
-  keepBuffer: 4,
+  updateWhenIdle: false,
+  updateWhenZooming: false,
+  keepBuffer: 2,
+  reuseTiles: true,
+  crossOrigin: 'anonymous',
 };
 
 export const TILE_LAYER_BOUNDS = [

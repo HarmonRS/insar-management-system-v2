@@ -289,6 +289,50 @@ def _read_gamma_int_param(path: Path, key: str) -> Optional[int]:
     return _safe_int(_read_gamma_key_values(path).get(key))
 
 
+def _expert_gamma_work_run_dir(run_dir: Path) -> Path:
+    run_id = run_dir.name
+    candidates = [
+        run_dir,
+        Path(settings.GAMMA_SBAS_WORK_ROOT or "") / "runs" / run_id if settings.GAMMA_SBAS_WORK_ROOT else run_dir,
+    ]
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = _normalize_path(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if (
+            (candidate / "sbas" / "disp.TS_tab").is_file()
+            and (candidate / "sbas" / "mli.ave.par").is_file()
+            and any((candidate / "dem").glob("*.lt_fine"))
+        ):
+            return candidate
+    return run_dir
+
+
+def _expert_gamma_lookup_path(work_run_dir: Path, manifest: dict[str, Any]) -> Path:
+    lt_path = work_run_dir / "dem" / f"{manifest.get('reference_date') or ''}.lt_fine"
+    if lt_path.is_file():
+        return lt_path
+    candidates = sorted((work_run_dir / "dem").glob("*.lt_fine"))
+    return candidates[0] if candidates else lt_path
+
+
+def _resolve_expert_gamma_tab_path(raw_path: str, *, work_run_dir: Path) -> Path:
+    path = Path(_wsl_path_to_windows(raw_path))
+    if path.is_file():
+        return path
+    run_id = work_run_dir.name
+    parts = list(path.parts)
+    if run_id in parts:
+        index = parts.index(run_id)
+        relative_parts = parts[index + 1 :]
+        candidate = work_run_dir.joinpath(*relative_parts)
+        if candidate.is_file():
+            return candidate
+    return path
+
+
 def _haversine_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
     radius_m = 6371008.8
     phi1 = math.radians(lat1)
@@ -762,12 +806,13 @@ def _read_geo_rate_window(
 def _query_expert_gamma_point_timeseries(run_dir: Path, *, lon: float, lat: float) -> dict[str, Any]:
     source_path = run_dir / "publish" / "geotiff" / "geo_los_def_rate.tif"
     coverage_path = run_dir / "publish" / "geotiff" / "geo_los_def_rate_rgb.tif"
-    lt_path = run_dir / "dem" / f"{_safe_read_json(run_dir / 'run_manifest.json').get('reference_date') or ''}.lt_fine"
-    if not lt_path.is_file():
-        candidates = sorted((run_dir / "dem").glob("*.lt_fine"))
-        lt_path = candidates[0] if candidates else lt_path
-    mli_par = run_dir / "sbas" / "mli.ave.par"
-    disp_tab = run_dir / "sbas" / "disp.TS_tab"
+    work_run_dir = _expert_gamma_work_run_dir(run_dir)
+    work_manifest = _safe_read_json(work_run_dir / "run_manifest.json")
+    if not work_manifest:
+        work_manifest = _safe_read_json(run_dir / "run_manifest.json")
+    lt_path = _expert_gamma_lookup_path(work_run_dir, work_manifest)
+    mli_par = work_run_dir / "sbas" / "mli.ave.par"
+    disp_tab = work_run_dir / "sbas" / "disp.TS_tab"
     if not source_path.is_file():
         raise FileNotFoundError("geo_los_def_rate.tif is missing")
     if not lt_path.is_file():
@@ -852,11 +897,13 @@ def _query_expert_gamma_point_timeseries(run_dir: Path, *, lon: float, lat: floa
     img_y = min(max(0, img_y), radar_lines - 1)
 
     raw_disp_paths = [
-        Path(_wsl_path_to_windows(line.strip()))
+        _resolve_expert_gamma_tab_path(line.strip(), work_run_dir=work_run_dir)
         for line in disp_tab.read_text(encoding="utf-8", errors="ignore").splitlines()
         if line.strip()
     ]
-    dates = _read_expert_sbas_dates(run_dir)
+    dates = _read_expert_sbas_dates(work_run_dir)
+    if not dates:
+        dates = _read_expert_sbas_dates(run_dir)
     displacements: list[dict[str, Any]] = []
     for index, disp_path in enumerate(raw_disp_paths):
         value_m = _read_radar_float32(disp_path, width=radar_width, img_x=img_x, img_y=img_y)
@@ -872,6 +919,8 @@ def _query_expert_gamma_point_timeseries(run_dir: Path, *, lon: float, lat: floa
     return {
         "schema": "insar.gamma-sbas-point-query/v1",
         "source_tool": "disp.TS_tab_radar_pixel_sample",
+        "source_run_dir": str(run_dir),
+        "work_run_dir": str(work_run_dir),
         "query": {"lon": lon, "lat": lat},
         "matched": {
             **valid_choice,
@@ -906,11 +955,11 @@ def _locate_radar_points_in_geocoded_product(run_dir: Path, points: list[dict[st
 
     source_path = run_dir / "publish" / "geotiff" / "geo_los_def_rate.tif"
     coverage_path = run_dir / "publish" / "geotiff" / "geo_los_def_rate_rgb.tif"
-    manifest = _safe_read_json(run_dir / "run_manifest.json")
-    lt_path = run_dir / "dem" / f"{manifest.get('reference_date') or ''}.lt_fine"
-    if not lt_path.is_file():
-        candidates = sorted((run_dir / "dem").glob("*.lt_fine"))
-        lt_path = candidates[0] if candidates else lt_path
+    work_run_dir = _expert_gamma_work_run_dir(run_dir)
+    manifest = _safe_read_json(work_run_dir / "run_manifest.json")
+    if not manifest:
+        manifest = _safe_read_json(run_dir / "run_manifest.json")
+    lt_path = _expert_gamma_lookup_path(work_run_dir, manifest)
     if not source_path.is_file() or not lt_path.is_file():
         return {}
 
@@ -1982,6 +2031,12 @@ def _stack_dates_from_manifest(stack_manifest: dict[str, Any], manifest: dict[st
 
 class SbasInsarCatalogService:
     def get_run_root(self) -> str:
+        root = Path(settings.GAMMA_SBAS_PRODUCT_ROOT or Path(settings.TIMESERIES_PRODUCT_DIR) / "sbas")
+        run_root = root / "runs"
+        run_root.mkdir(parents=True, exist_ok=True)
+        return _normalize_path(run_root)
+
+    def get_work_run_root(self) -> str:
         root = Path(settings.GAMMA_SBAS_WORK_ROOT or Path(settings.BACKEND_DIR) / "runtime" / "sbas_insar_production")
         run_root = root / "runs"
         run_root.mkdir(parents=True, exist_ok=True)
@@ -1989,6 +2044,9 @@ class SbasInsarCatalogService:
 
     def get_run_roots(self) -> list[str]:
         roots = [self.get_run_root()]
+        work_root = self.get_work_run_root()
+        if work_root not in roots:
+            roots.append(work_root)
         try:
             landsar_root = landsar_sbas_service.configured_run_root()
             if landsar_root not in roots:
@@ -1999,17 +2057,17 @@ class SbasInsarCatalogService:
 
     def _iter_run_manifest_paths(self, run_root: Optional[str] = None) -> list[str]:
         roots = [run_root] if run_root else self.get_run_roots()
-        manifest_paths: list[str] = []
+        manifest_paths_by_run: dict[str, str] = {}
         for raw_root in roots:
             root = Path(raw_root)
             if not root.is_dir():
                 continue
-            manifest_paths.extend(
-                _normalize_path(path)
-                for path in sorted(root.glob("*/run_manifest.json"))
-                if self._is_publish_ready(path.parent, _safe_read_json(path))
-            )
-        return sorted(dict.fromkeys(manifest_paths))
+            for path in sorted(root.glob("*/run_manifest.json")):
+                if not self._is_publish_ready(path.parent, _safe_read_json(path)):
+                    continue
+                run_id = path.parent.name
+                manifest_paths_by_run.setdefault(run_id, _normalize_path(path))
+        return list(manifest_paths_by_run.values())
 
     @staticmethod
     def _is_landsar_manifest(manifest: dict[str, Any]) -> bool:
@@ -2295,9 +2353,12 @@ class SbasInsarCatalogService:
         if self._is_landsar_manifest(manifest):
             return self._build_landsar_product(run_dir, manifest_file, manifest)
 
-        detail = sbas_insar_production_service.get_run_detail(run_dir.name)
-        coverage = detail.get("geographic_coverage") or {}
         stack_manifest = _safe_read_json(run_dir / "stack_manifest.json")
+        try:
+            detail = sbas_insar_production_service.get_run_detail(run_dir.name)
+            coverage = detail.get("geographic_coverage") or {}
+        except FileNotFoundError:
+            coverage = sbas_insar_production_service._build_run_geographic_coverage(run_dir, manifest)
         monitor_summary = _safe_read_json(run_dir / "monitor_points_summary.json")
         workflow_summary = _safe_read_json(run_dir / "workflow_summary.json")
         is_expert_gamma = self._is_expert_gamma_manifest(manifest, run_dir)

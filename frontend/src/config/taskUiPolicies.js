@@ -10,8 +10,8 @@ const TASK_UI_POLICIES = {
   SCAN_HAZARD: { label: '灾害点同步', featureScope: 'hazard' },
   UNPACK_ARCHIVES: { label: 'LT-1 解包', featureScope: 'data_monitor' },
   UNPACK_SENTINEL1: { label: 'Sentinel-1 解包', featureScope: 'data_monitor' },
-  GF3_UNPACK: { label: 'GF3 解包', featureScope: 'data_monitor' },
-  GF3_BATCH_PROCESS: { label: 'GF3 预处理', featureScope: 'data_monitor' },
+  GF3_UNPACK: { label: 'GF3 legacy 解包', featureScope: 'data_monitor' },
+  GF3_BATCH_PROCESS: { label: 'GF3 legacy 预处理', featureScope: 'data_monitor' },
   GF3_SARSCAPE_PRODUCE: { label: 'GF3 SARscape 生产', featureScope: 'data_monitor' },
   GF3_SARSCAPE_SYNC: { label: 'GF3 SARscape 入库', featureScope: 'data_monitor' },
   GF3_SARSCAPE_CLEAN: { label: 'GF3 中间清理', featureScope: 'data_monitor' },
@@ -73,4 +73,3 @@ export function isTaskGloballyBlocking(taskType) {
 export function getTaskTypeLabel(taskType) {
   return getTaskUiPolicy(taskType).label;
 }
-

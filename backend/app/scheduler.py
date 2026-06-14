@@ -21,8 +21,10 @@ MONITOR_CONFIG = {
     # GF3 链路
     "gf3_archive_source_dirs": split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS),
     "gf3_source_dirs": split_env_paths(settings.GF3_SOURCE_DIRS),
+    "gf3_legacy_gdal_enabled": bool(settings.GF3_LEGACY_GDAL_ENABLED),
     "gf3_sarscape_native_dirs": split_env_paths(settings.GF3_SARSCAPE_NATIVE_DIRS),
     "gf3_storage_dirs": split_env_paths(settings.GF3_STORAGE_DIRS),
+    "gf3_sarscape_runtime_dir": settings.GF3_SARSCAPE_RUNTIME_DIR,
     "gf3_sarscape_wrapper_exe": settings.GF3_SARSCAPE_WRAPPER_EXE,
     "gf3_sarscape_idlrt_path": settings.GF3_SARSCAPE_IDLRT_PATH,
     "gf3_sarscape_dem_path": settings.GF3_SARSCAPE_DEM_PATH or settings.GF3_GEO_DEM_PATH,

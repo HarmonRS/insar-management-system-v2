@@ -66,12 +66,13 @@ GAMMA_SBAS_DEFAULT_MB_MODE
 GAMMA_SBAS_DEFAULT_REFERENCE_WINDOW
 GAMMA_SBAS_STEP_TIMEOUT_SECONDS
 GAMMA_SBAS_WORKFLOW_TIMEOUT_SECONDS
+GAMMA_SBAS_TRIAL_ROOT
 ```
 
 默认工作根：
 
 ```text
-backend/runtime/sbas_insar_production
+D:\production_runtime\sbas_insar_work
 ```
 
 默认产品根：
@@ -79,6 +80,11 @@ backend/runtime/sbas_insar_production
 ```text
 D:\production_results\timeseries\sbas
 ```
+
+`GAMMA_SBAS_WORK_ROOT` stores heavy, restartable Gamma intermediate data.
+`GAMMA_SBAS_PRODUCT_ROOT` stores lightweight catalog/download packages under
+`runs/<run_id>`. The result catalog indexes the product root first and keeps the
+work root only as a compatibility fallback.
 
 ## 4. 生产流程
 

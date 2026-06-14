@@ -21,6 +21,7 @@ from .dependencies import _add_operation_audit_log, _get_current_user, _require_
 
 
 router = APIRouter()
+STATIC_ASSET_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
 
 
 class SbasInsarCatalogRebuildRequest(BaseModel):
@@ -189,7 +190,7 @@ async def get_sbas_insar_product_preview(
     preview_path = str(detail.get("preview_path") or "").strip()
     if not preview_path or not os.path.isfile(preview_path):
         raise HTTPException(status_code=404, detail="Preview not found")
-    return FileResponse(preview_path, media_type="image/png")
+    return FileResponse(preview_path, media_type="image/png", headers=STATIC_ASSET_CACHE_HEADERS)
 
 
 @router.get("/sbas-insar-products/{product_db_id}/assets/{asset_id}")
@@ -209,4 +210,5 @@ async def get_sbas_insar_product_asset(
         asset.absolute_path,
         media_type=asset.media_type or "application/octet-stream",
         filename=asset.asset_name or os.path.basename(asset.absolute_path),
+        headers=STATIC_ASSET_CACHE_HEADERS,
     )

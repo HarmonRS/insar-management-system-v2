@@ -142,4 +142,8 @@ async def get_psinsar_product_preview(
     preview_path = str(detail.get("preview_path") or "").strip()
     if not preview_path or not os.path.isfile(preview_path):
         raise HTTPException(status_code=404, detail="Preview not found")
-    return FileResponse(preview_path, media_type="image/png")
+    return FileResponse(
+        preview_path,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )

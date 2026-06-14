@@ -88,7 +88,7 @@ async def lifespan(app: FastAPI):
         sbas_catalog_bootstrap = await sbas_insar_catalog_service.bootstrap_catalog_on_startup_clean()
     except Exception as exc:
         sbas_catalog_bootstrap = {
-            "storage_root": settings.GAMMA_SBAS_WORK_ROOT,
+            "storage_root": settings.GAMMA_SBAS_PRODUCT_ROOT,
             "manifest_count": 0,
             "db_count": 0,
             "needs_rebuild": False,

@@ -786,8 +786,20 @@ class SbasInsarProductionService:
     }
 
     def __init__(self) -> None:
-        self.trial_root = Path(settings.BACKEND_DIR) / "runtime" / "gamma_ipta_trials"
-        self.production_root = Path(settings.GAMMA_SBAS_WORK_ROOT or (Path(settings.BACKEND_DIR) / "runtime" / "sbas_insar_production"))
+        project_drive = Path(settings.PROJECT_ROOT).drive
+        default_runtime_root = Path(f"{project_drive}\\production_runtime") if project_drive else Path(settings.PROJECT_ROOT) / "runtime"
+        self.trial_root = Path(settings.GAMMA_SBAS_TRIAL_ROOT or default_runtime_root / "gamma_ipta_trials")
+        self.production_root = Path(settings.GAMMA_SBAS_WORK_ROOT or default_runtime_root / "sbas_insar_work")
+        self.product_root = Path(settings.GAMMA_SBAS_PRODUCT_ROOT or Path(settings.TIMESERIES_PRODUCT_DIR) / "sbas")
+
+    def product_run_root(self) -> Path:
+        return self.product_root / "runs"
+
+    def product_run_dir(self, run_id: str) -> Path:
+        clean_id = str(run_id or "").strip()
+        if not clean_id or Path(clean_id).name != clean_id:
+            raise ValueError("invalid run id")
+        return self.product_run_root() / clean_id
 
     def get_capabilities(self) -> dict[str, Any]:
         return {
@@ -797,6 +809,7 @@ class SbasInsarProductionService:
             "implementation_state": "expert_manifest_script_runner_primary",
             "trial_root": str(self.trial_root),
             "production_root": str(self.production_root),
+            "product_root": str(self.product_root),
             "min_common_overlap_ratio": self._effective_min_common_overlap_ratio(None),
             "workflow_runner": {
                 "enabled": bool(settings.GAMMA_SBAS_ENABLED),
@@ -3412,6 +3425,8 @@ class SbasInsarProductionService:
         self._write_json(run_dir / "monitor_points_summary.json", summary)
         self._write_json(manifest_path, manifest)
         self._refresh_command_manifest_after_monitor_points(run_dir, manifest)
+        if manifest["status"] == "MONITOR_POINTS_READY":
+            self.sync_product_package(run_id)
         return self.get_run_detail(run_id)
 
     def list_trial_runs(self) -> dict[str, Any]:
@@ -3828,6 +3843,8 @@ class SbasInsarProductionService:
             run_manifest["next_stage"] = "fix_workflow"
         self._write_json(manifest_path, run_manifest)
         self._write_json(run_dir / "workflow_summary.json", summary)
+        if run_manifest.get("status") == "WORKFLOW_COMPLETED":
+            self.sync_product_package(run_id)
         return self.get_run_detail(run_id)
 
     @staticmethod
@@ -5204,6 +5221,7 @@ class SbasInsarProductionService:
                 errors.append(f"{label} does not point to an existing Gamma DEM + .par pair: {raw_path}")
 
         cache_roots = [
+            Path(settings.PYINT_DEM_ROOT),
             Path(settings.BACKEND_DIR) / "runtime" / "pyint_dem",
             Path(settings.BACKEND_DIR) / "runtime" / "pyint_dem_cache",
         ]
@@ -7137,6 +7155,118 @@ class SbasInsarProductionService:
         out_path = out_dir / filename
         out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         return out_path
+
+    @staticmethod
+    def _copy_file_if_newer(source: Path, target: Path) -> bool:
+        if not source.is_file():
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            source_stat = source.stat()
+            target_stat = target.stat() if target.exists() else None
+            if (
+                target_stat is not None
+                and target_stat.st_size == source_stat.st_size
+                and int(target_stat.st_mtime) >= int(source_stat.st_mtime)
+            ):
+                return False
+            shutil.copy2(source, target)
+            return True
+        except OSError:
+            shutil.copy2(source, target)
+            return True
+
+    @staticmethod
+    def _copy_tree_files(source_dir: Path, target_dir: Path) -> tuple[int, int]:
+        if not source_dir.is_dir():
+            return 0, 0
+        copied = 0
+        skipped = 0
+        for source in source_dir.rglob("*"):
+            if not source.is_file():
+                continue
+            target = target_dir / source.relative_to(source_dir)
+            if SbasInsarProductionService._copy_file_if_newer(source, target):
+                copied += 1
+            else:
+                skipped += 1
+        return copied, skipped
+
+    def sync_product_package(self, run_id: str) -> dict[str, Any]:
+        run_dir = self._resolve_run_dir(run_id)
+        product_dir = self.product_run_dir(run_dir.name)
+        product_dir.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        skipped = 0
+
+        for relative in (
+            "run_manifest.json",
+            "stack_manifest.json",
+            "pair_network.json",
+            "workflow_summary.json",
+            "monitor_points_summary.json",
+            "product_summary.json",
+            "quality_summary.json",
+            "gamma_command_manifest.json",
+            "expert_command_audit.json",
+        ):
+            if self._copy_file_if_newer(run_dir / relative, product_dir / relative):
+                copied += 1
+            else:
+                skipped += 1
+
+        for dirname in ("publish",):
+            tree_copied, tree_skipped = self._copy_tree_files(run_dir / dirname, product_dir / dirname)
+            copied += tree_copied
+            skipped += tree_skipped
+
+        for relative in (
+            "diff_dir/bprep_file.png",
+            "diff_dir/mean.cc_mask.bmp",
+            "sbas/final_unw_tab",
+        ):
+            if self._copy_file_if_newer(run_dir / relative, product_dir / relative):
+                copied += 1
+            else:
+                skipped += 1
+
+        final_tab = run_dir / "sbas" / "final_unw_tab"
+        diff_dir = run_dir / "diff_dir"
+        pair_ids: list[str] = []
+        if final_tab.is_file():
+            for line in final_tab.read_text(encoding="utf-8", errors="ignore").splitlines():
+                raw_path = line.strip().split()[0] if line.strip() else ""
+                if not raw_path:
+                    continue
+                name = Path(self._path_to_windows(raw_path) or raw_path).name
+                pair_id = name.replace(".unw.atmsub_1", "").replace(".unw", "")
+                if pair_id and pair_id not in pair_ids:
+                    pair_ids.append(pair_id)
+        qcs = [diff_dir / f"{pair_id}.adf.unw.bmp" for pair_id in pair_ids if (diff_dir / f"{pair_id}.adf.unw.bmp").is_file()]
+        if not qcs and diff_dir.is_dir():
+            qcs = sorted(diff_dir.glob("*.adf.unw.bmp"))
+        if len(qcs) > 3:
+            last_index = len(qcs) - 1
+            indexes = sorted({round(index * last_index / 2) for index in range(3)})
+            qcs = [qcs[index] for index in indexes]
+        for source in qcs:
+            target = product_dir / source.relative_to(run_dir)
+            if self._copy_file_if_newer(source, target):
+                copied += 1
+            else:
+                skipped += 1
+
+        marker = {
+            "schema": "insar.gamma-sbas-product-package/v1",
+            "run_id": run_dir.name,
+            "source_run_dir": str(run_dir),
+            "product_run_dir": str(product_dir),
+            "copied_files": copied,
+            "skipped_files": skipped,
+            "synced_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        self._write_json(product_dir / "product_package_manifest.json", marker)
+        return marker
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, Any]) -> Path:

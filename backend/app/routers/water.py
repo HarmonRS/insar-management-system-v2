@@ -902,6 +902,14 @@ async def submit_gf3_process(
     admin_user: AuthUserORM = Depends(_require_admin),
 ):
     """提交 GF3 L1A→L2 处理任务（辐射定标 + RPC 几何校正）。"""
+    if not settings.GF3_LEGACY_GDAL_ENABLED:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Legacy GF3 Python/GDAL preprocessing is disabled. "
+                "Use /monitor/gf3-sarscape-produce or /monitor/gf3-sarscape-sync."
+            ),
+        )
     if not os.path.exists(req.input_dir):
         raise HTTPException(status_code=400, detail=f"输入路径不存在: {req.input_dir}")
 

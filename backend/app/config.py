@@ -42,7 +42,7 @@ def _infer_conda_env_name_from_python(path: str | None) -> str:
 
 
 def _default_idl_runtime_dir() -> str:
-    return os.path.join(_BACKEND_DIR, "runtime", "idl_worker")
+    return os.path.join(_default_runtime_root(_PROJECT_ROOT), "idl_worker")
 
 
 def _resolve_idl_runtime_dir(value: str | None) -> str:
@@ -75,6 +75,26 @@ def _default_result_publish_root(project_root: str) -> str:
     if drive:
         return os.path.join(drive + os.sep, "production_results")
     return os.path.join(normalized_root, "production_results")
+
+
+def _default_input_root(project_root: str) -> str:
+    normalized_root = os.path.normpath(project_root)
+    drive, _tail = os.path.splitdrive(normalized_root)
+    if drive:
+        return os.path.join(drive + os.sep, "production_inputs")
+    return os.path.join(normalized_root, "production_inputs")
+
+
+def _default_runtime_root(project_root: str) -> str:
+    normalized_root = os.path.normpath(project_root)
+    drive, _tail = os.path.splitdrive(normalized_root)
+    if drive:
+        return os.path.join(drive + os.sep, "production_runtime")
+    return os.path.join(normalized_root, "runtime")
+
+
+def _default_runtime_dir(project_root: str, *parts: str) -> str:
+    return os.path.join(_default_runtime_root(project_root), *parts)
 
 
 def _read_env_pairs(env_path: str) -> dict[str, str]:
@@ -197,7 +217,6 @@ class Settings(BaseSettings):
     WATER_RESULTS_DIR: str = ""
     SAR_ANALYSIS_READY_ROOT: str = ""
     SAR_ANALYSIS_WORK_ROOT: str = ""
-    SAR_ANALYSIS_PREVIEW_ROOT: str = ""
     SAR_ANALYSIS_NODATA_VALUE: float = -9999.0
     SAR_ANALYSIS_OUTPUT_COG: bool = True
 
@@ -206,9 +225,11 @@ class Settings(BaseSettings):
     GF3_ARCHIVE_SOURCE_DIRS: str = ""
     GF3_ARCHIVE_EXTS: str = ".zip,.tar,.tar.gz,.tgz"
     GF3_UNPACK_DELETE_ARCHIVE: bool = True
+    GF3_LEGACY_GDAL_ENABLED: bool = False
     GF3_SOURCE_DIRS: str = ""
     GF3_SARSCAPE_NATIVE_DIRS: str = ""
     GF3_STORAGE_DIRS: str = ""
+    GF3_SARSCAPE_RUNTIME_DIR: str = ""
     GF3_SARSCAPE_WRAPPER_EXE: str = ""
     GF3_SARSCAPE_IDLRT_PATH: str = r"C:\Program Files\Harris\ENVI56\IDL88\bin\bin.x86_64\idlrt.exe"
     GF3_SARSCAPE_DEM_PATH: str = ""
@@ -340,6 +361,7 @@ class Settings(BaseSettings):
     GAMMA_SBAS_ENV_SCRIPT: str = ""
     GAMMA_SBAS_WORK_ROOT: str = ""
     GAMMA_SBAS_PRODUCT_ROOT: str = ""
+    GAMMA_SBAS_TRIAL_ROOT: str = ""
     GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT: str = ""
     GAMMA_SBAS_SOURCE_ROOTS: str = ""
     GAMMA_SBAS_ORBIT_ROOTS: str = ""
@@ -420,19 +442,13 @@ class Settings(BaseSettings):
             object.__setattr__(
                 self,
                 "SAR_ANALYSIS_READY_ROOT",
-                os.path.join(backend_dir, "runtime", "sar_analysis_ready"),
+                os.path.join(_default_result_publish_root(project_root), "sar_analysis_ready"),
             )
         if not self.SAR_ANALYSIS_WORK_ROOT:
             object.__setattr__(
                 self,
                 "SAR_ANALYSIS_WORK_ROOT",
-                os.path.join(backend_dir, "runtime", "sar_analysis_work"),
-            )
-        if not self.SAR_ANALYSIS_PREVIEW_ROOT:
-            object.__setattr__(
-                self,
-                "SAR_ANALYSIS_PREVIEW_ROOT",
-                os.path.join(backend_dir, "runtime", "sar_analysis_preview"),
+                _default_runtime_dir(project_root, "sar_analysis_work"),
             )
         object.__setattr__(
             self,
@@ -441,11 +457,29 @@ class Settings(BaseSettings):
         )
         if not self.SRTM_DEM_DIR:
             object.__setattr__(self, "SRTM_DEM_DIR", os.path.join(backend_dir, "dem_data"))
+        if not self.GF3_ARCHIVE_SOURCE_DIRS:
+            object.__setattr__(
+                self,
+                "GF3_ARCHIVE_SOURCE_DIRS",
+                os.path.join(_default_input_root(project_root), "gf3", "archives"),
+            )
+        if not self.GF3_SARSCAPE_NATIVE_DIRS:
+            object.__setattr__(
+                self,
+                "GF3_SARSCAPE_NATIVE_DIRS",
+                os.path.join(_default_result_publish_root(project_root), "gf3", "sarscape_native"),
+            )
         if not self.GF3_STORAGE_DIRS:
             object.__setattr__(
                 self,
                 "GF3_STORAGE_DIRS",
-                os.path.join(backend_dir, "gf3_results"),
+                os.path.join(_default_result_publish_root(project_root), "gf3", "standard_l2"),
+            )
+        if not self.GF3_SARSCAPE_RUNTIME_DIR:
+            object.__setattr__(
+                self,
+                "GF3_SARSCAPE_RUNTIME_DIR",
+                _default_runtime_dir(project_root, "gf3", "sarscape_runtime"),
             )
         if not self.ORBIT_QUARANTINE_DIR and self.MONITOR_ORBIT_DIR:
             object.__setattr__(
@@ -496,7 +530,7 @@ class Settings(BaseSettings):
             object.__setattr__(
                 self,
                 "ISCE2_WORK_ROOT",
-                os.path.join(backend_dir, "runtime", "isce2_work"),
+                _default_runtime_dir(project_root, "isce2_work"),
             )
         if not self.ISCE2_OUTPUT_ROOT:
             object.__setattr__(
@@ -582,7 +616,7 @@ class Settings(BaseSettings):
             object.__setattr__(
                 self,
                 "WSL_BROKER_JOB_ROOT",
-                os.path.join(backend_dir, "runtime", "wsl_jobs"),
+                _default_runtime_dir(project_root, "wsl_jobs"),
             )
         if not self.ISCE2_RUNTIME_ID:
             object.__setattr__(self, "ISCE2_RUNTIME_ID", "isce2_runtime_v1")
@@ -608,13 +642,13 @@ class Settings(BaseSettings):
             object.__setattr__(
                 self,
                 "PYINT_TEMPLATE_ROOT",
-                os.path.join(backend_dir, "runtime", "pyint_templates"),
+                _default_runtime_dir(project_root, "pyint_templates"),
             )
         if not self.PYINT_WORK_ROOT:
             object.__setattr__(
                 self,
                 "PYINT_WORK_ROOT",
-                os.path.join(backend_dir, "runtime", "pyint_work"),
+                _default_runtime_dir(project_root, "pyint_work"),
             )
         if not self.PYINT_OUTPUT_ROOT:
             object.__setattr__(
@@ -626,7 +660,7 @@ class Settings(BaseSettings):
             object.__setattr__(
                 self,
                 "PYINT_DEM_ROOT",
-                os.path.join(backend_dir, "runtime", "pyint_dem"),
+                os.path.join(_default_runtime_root(project_root), "pyint_dem"),
             )
         pyint_dem_mode = str(self.PYINT_DEM_MODE or "local_fabdem").strip().lower() or "local_fabdem"
         if pyint_dem_mode not in {"local_fabdem", "opentopo", "prepared_file"}:
@@ -743,13 +777,19 @@ class Settings(BaseSettings):
             object.__setattr__(
                 self,
                 "GAMMA_SBAS_WORK_ROOT",
-                os.path.join(backend_dir, "runtime", "sbas_insar_production"),
+                os.path.join(_default_runtime_root(project_root), "sbas_insar_work"),
             )
         if not self.GAMMA_SBAS_PRODUCT_ROOT:
             object.__setattr__(
                 self,
                 "GAMMA_SBAS_PRODUCT_ROOT",
                 os.path.join(self.TIMESERIES_PRODUCT_DIR, "sbas"),
+            )
+        if not self.GAMMA_SBAS_TRIAL_ROOT:
+            object.__setattr__(
+                self,
+                "GAMMA_SBAS_TRIAL_ROOT",
+                os.path.join(_default_runtime_root(project_root), "gamma_ipta_trials"),
             )
         if not self.GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT:
             object.__setattr__(
@@ -848,7 +888,7 @@ class Settings(BaseSettings):
                 object.__setattr__(
                     self,
                     "TIMESERIES_WORK_ROOT",
-                    os.path.join(backend_dir, "runtime", "timeseries_work"),
+                    _default_runtime_dir(project_root, "timeseries_work"),
                 )
             if not self.TIMESERIES_DEM_PATH:
                 object.__setattr__(self, "TIMESERIES_DEM_PATH", self.ISCE2_DEM_PATH)
@@ -947,7 +987,14 @@ class Settings(BaseSettings):
         os.makedirs(settings.RESULT_QUARANTINE_ROOT, exist_ok=True)
         os.makedirs(settings.SAR_ANALYSIS_READY_ROOT, exist_ok=True)
         os.makedirs(settings.SAR_ANALYSIS_WORK_ROOT, exist_ok=True)
-        os.makedirs(settings.SAR_ANALYSIS_PREVIEW_ROOT, exist_ok=True)
+        for path in split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS):
+            os.makedirs(path, exist_ok=True)
+        for path in split_env_paths(settings.GF3_SARSCAPE_NATIVE_DIRS):
+            os.makedirs(path, exist_ok=True)
+        for path in split_env_paths(settings.GF3_STORAGE_DIRS):
+            os.makedirs(path, exist_ok=True)
+        if settings.GF3_SARSCAPE_RUNTIME_DIR:
+            os.makedirs(settings.GF3_SARSCAPE_RUNTIME_DIR, exist_ok=True)
         os.makedirs(settings.WSL_BROKER_JOB_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_TEMPLATE_ROOT, exist_ok=True)
         os.makedirs(settings.PYINT_WORK_ROOT, exist_ok=True)
@@ -958,6 +1005,7 @@ class Settings(BaseSettings):
         if settings.GAMMA_SBAS_ENABLED:
             os.makedirs(settings.GAMMA_SBAS_WORK_ROOT, exist_ok=True)
             os.makedirs(settings.GAMMA_SBAS_PRODUCT_ROOT, exist_ok=True)
+            os.makedirs(settings.GAMMA_SBAS_TRIAL_ROOT, exist_ok=True)
             os.makedirs(settings.GAMMA_SBAS_SCRIPT_TEMPLATE_ROOT, exist_ok=True)
         if settings.LANDSAR_SBAS_ENABLED:
             os.makedirs(settings.LANDSAR_SBAS_WORK_ROOT, exist_ok=True)
@@ -1115,7 +1163,6 @@ def validate_runtime_config() -> dict[str, Any]:
     _check_path(label="WATER_RESULTS_DIR", value=settings.WATER_RESULTS_DIR, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="SAR_ANALYSIS_READY_ROOT", value=settings.SAR_ANALYSIS_READY_ROOT, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="SAR_ANALYSIS_WORK_ROOT", value=settings.SAR_ANALYSIS_WORK_ROOT, errors=errors, warnings=warnings, expect_file=False)
-    _check_path(label="SAR_ANALYSIS_PREVIEW_ROOT", value=settings.SAR_ANALYSIS_PREVIEW_ROOT, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="MONITOR_ORBIT_DIR", value=settings.MONITOR_ORBIT_DIR, errors=errors, warnings=warnings, expect_file=False)
     for label, value in (
         ("SOURCE_PRODUCT_DIRS", settings.SOURCE_PRODUCT_DIRS),
@@ -1143,10 +1190,9 @@ def validate_runtime_config() -> dict[str, Any]:
         ("INSAR_STORAGE_DIRS", settings.INSAR_STORAGE_DIRS),
         ("MONITOR_RADAR_DIRS", settings.MONITOR_RADAR_DIRS),
         ("MONITOR_DINSAR_DIRS", settings.MONITOR_DINSAR_DIRS),
-        ("GF3_ARCHIVE_SOURCE_DIRS", settings.GF3_ARCHIVE_SOURCE_DIRS),
-        ("GF3_SOURCE_DIRS", settings.GF3_SOURCE_DIRS),
         ("GF3_SARSCAPE_NATIVE_DIRS", settings.GF3_SARSCAPE_NATIVE_DIRS),
         ("GF3_STORAGE_DIRS", settings.GF3_STORAGE_DIRS),
+        ("GF3_SARSCAPE_RUNTIME_DIR", settings.GF3_SARSCAPE_RUNTIME_DIR),
     ):
         values = split_env_paths(raw_value)
         if not values:
@@ -1154,6 +1200,21 @@ def validate_runtime_config() -> dict[str, Any]:
             continue
         for item in values:
             _check_path(label=label, value=item, errors=errors, warnings=warnings, expect_file=False)
+
+    gf3_archive_dirs = split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS)
+    if not gf3_archive_dirs:
+        warnings.append("GF3_ARCHIVE_SOURCE_DIRS 未配置；无法触发 GF3 SARscape 生产，只能扫描已有原生结果。")
+    for item in gf3_archive_dirs:
+        _check_path(label="GF3_ARCHIVE_SOURCE_DIRS", value=item, errors=errors, warnings=warnings, expect_file=False)
+
+    if settings.GF3_LEGACY_GDAL_ENABLED:
+        legacy_dirs = split_env_paths(settings.GF3_SOURCE_DIRS)
+        if not legacy_dirs:
+            errors.append("GF3_LEGACY_GDAL_ENABLED=true but GF3_SOURCE_DIRS is not configured.")
+        for item in legacy_dirs:
+            _check_path(label="GF3_SOURCE_DIRS", value=item, errors=errors, warnings=warnings, expect_file=False)
+    elif split_env_paths(settings.GF3_SOURCE_DIRS):
+        warnings.append("GF3_SOURCE_DIRS is configured but GF3_LEGACY_GDAL_ENABLED=false; legacy GDAL preprocessing is disabled.")
 
     if settings.ISCE2_ENABLED:
         if not settings.ISCE2_WSL_DISTRO:
@@ -1275,6 +1336,13 @@ def validate_runtime_config() -> dict[str, Any]:
         _check_path(
             label="GAMMA_SBAS_PRODUCT_ROOT",
             value=settings.GAMMA_SBAS_PRODUCT_ROOT,
+            errors=errors,
+            warnings=warnings,
+            expect_file=False,
+        )
+        _check_path(
+            label="GAMMA_SBAS_TRIAL_ROOT",
+            value=settings.GAMMA_SBAS_TRIAL_ROOT,
             errors=errors,
             warnings=warnings,
             expect_file=False,

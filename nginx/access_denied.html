@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Access Restricted</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+        background: #f6f7fb;
+        color: #182033;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 32px;
+      }
+      main {
+        width: min(720px, 100%);
+        background: #ffffff;
+        border: 1px solid #d9dfeb;
+        border-radius: 8px;
+        box-shadow: 0 18px 48px rgba(23, 31, 50, 0.10);
+        padding: 34px;
+      }
+      .eyebrow {
+        margin: 0 0 12px;
+        color: #7f1d1d;
+        font-size: 13px;
+        font-weight: 800;
+        letter-spacing: 0;
+        text-transform: uppercase;
+      }
+      h1 {
+        margin: 0 0 14px;
+        font-size: 30px;
+        line-height: 1.18;
+      }
+      p {
+        margin: 0 0 18px;
+        color: #475569;
+        line-height: 1.7;
+        font-size: 15px;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 10px 14px;
+        margin: 24px 0;
+        padding: 18px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+      }
+      dt {
+        color: #64748b;
+        font-weight: 700;
+      }
+      dd {
+        margin: 0;
+        font-family: Consolas, "SFMono-Regular", monospace;
+        color: #0f172a;
+        overflow-wrap: anywhere;
+      }
+      .notice {
+        margin-top: 20px;
+        padding-top: 18px;
+        border-top: 1px solid #e2e8f0;
+        font-size: 14px;
+        color: #64748b;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">403 Access Restricted</p>
+      <h1>当前设备未被授权访问 InSAR 管理系统</h1>
+      <p>系统仅允许预先登记的局域网 IP 访问。请将下面的客户端 IP 提供给管理员，由管理员加入访问白名单后再重试。</p>
+      <dl>
+        <dt>客户端 IP</dt>
+        <dd>__CLIENT_IP__</dd>
+        <dt>访问主机</dt>
+        <dd>__REQUEST_HOST__</dd>
+      </dl>
+      <p class="notice">管理员配置入口：项目根目录 <strong>.env</strong> 中的 <strong>NGINX_ALLOWED_CLIENT_IPS</strong>，修改后重启或 reload Nginx。</p>
+    </main>
+  </body>
+</html>

@@ -1,6 +1,6 @@
 # 文档索引
 
-最后更新：2026-05-30
+最后更新：2026-06-14
 
 本页是当前有效文档入口。没有列在本页的历史设计、实验记录和过程文档不再作为当前系统事实依据。
 
@@ -12,6 +12,8 @@
 - [DEPLOYMENT.md](DEPLOYMENT.md)  
   Windows + PostgreSQL + WSL2 + Gamma/ISCE2/ENVI 的部署与运行说明。
 
+- [BASEMAP_TILESERVER_PROXY_AND_ACCESS_20260613.md](BASEMAP_TILESERVER_PROXY_AND_ACCESS_20260613.md)  
+  Tile-server proxy, LAN access, token configuration, and Nginx IP whitelist.
 - [DOCUMENTATION_GOVERNANCE.md](DOCUMENTATION_GOVERNANCE.md)  
   文档治理规则、事实来源优先级和清理约定。
 
@@ -24,10 +26,13 @@
 ## 生产与结果
 
 - [PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md](PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md)  
-  统一结果目录、标准产品包、catalog 与多引擎结果共存约定。
+  统一结果目录、标准产品包、catalog 与多引擎结果共存约定。D-InSAR 当前引擎集合以 2026-06-14 三引擎 Task_Pool 重构设计为准。
+
+- [DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md](DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md)  
+  D-InSAR 保留 ENVI/SARscape、LandSAR、Gamma/PyINT 三引擎，退出 ISCE2，统一 Task_Pool、结果聚合和中间文件清理的当前设计。
 
 - [DINSAR_PRODUCTION_CORES_OVERVIEW.md](DINSAR_PRODUCTION_CORES_OVERVIEW.md)  
-  ENVI/SARscape、ISCE2、Gamma/PyINT 三条 D-InSAR 生产核心说明。
+  旧版 ENVI/SARscape、ISCE2、Gamma/PyINT D-InSAR 生产核心说明。ISCE2 相关内容仅作历史背景。
 
 - [SBAS_INSAR_CURRENT_WORKFLOW.md](SBAS_INSAR_CURRENT_WORKFLOW.md)  
   当前 Gamma SBAS-InSAR 生产、AOI 选栈、结果 catalog、产物和 LOS 符号约定。
@@ -41,10 +46,10 @@
   PROJ / GDAL 配置说明。
 
 - [ISCE2_MANAGED_DINSAR_IMPLEMENTATION_20260424.md](ISCE2_MANAGED_DINSAR_IMPLEMENTATION_20260424.md)  
-  ISCE2 托管 D-InSAR 落地说明。
+  ISCE2 托管 D-InSAR 历史落地说明。新 D-InSAR 生产不再采用。
 
 - [ISCE2_PRODUCTION_RELIABILITY_HARDENING_DESIGN_20260424.md](ISCE2_PRODUCTION_RELIABILITY_HARDENING_DESIGN_20260424.md)  
-  ISCE2 生产链路稳定性约束。
+  ISCE2 生产链路历史稳定性约束。新 D-InSAR 生产不再采用。
 
 ## 数据与业务模块
 

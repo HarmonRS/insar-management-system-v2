@@ -3612,6 +3612,12 @@ async def _handle_gf3_process(job: SystemJobORM) -> None:
     """GF3 L1A→L2 处理 job handler（辐射定标 + RPC 几何校正）。"""
     from .gf3_service import run_gf3_l1a_to_l2
 
+    if not settings.GF3_LEGACY_GDAL_ENABLED:
+        raise ValueError(
+            "Legacy GF3 Python/GDAL preprocessing is disabled. "
+            "Use GF3 SARscape production or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
+        )
+
     payload = job.payload or {}
     processing_id = payload.get("processing_id")
     if not processing_id:
@@ -3685,6 +3691,12 @@ async def _handle_gf3_unpack(job: SystemJobORM) -> None:
     """GF3 archive inbox -> persistent L1A source pool."""
     from .gf3_unpack_service import run_gf3_archive_unpack
 
+    if not settings.GF3_LEGACY_GDAL_ENABLED:
+        raise ValueError(
+            "Legacy GF3 archive unpack is disabled. "
+            "Use GF3 SARscape production or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
+        )
+
     if not job.task_id:
         raise ValueError("GF3_UNPACK requires task_id for progress tracking.")
 
@@ -3745,6 +3757,12 @@ async def _handle_gf3_batch_process(job: SystemJobORM) -> None:
     """批量 GF3 L1A→L2：扫描来源目录，逐个处理并自动入库到 radar_data。"""
     from .gf3_service import run_gf3_l1a_to_l2, register_l2_to_radar_data
     from .sar_analysis_ready_service import standardize_gf3_l2_for_radar
+
+    if not settings.GF3_LEGACY_GDAL_ENABLED:
+        raise ValueError(
+            "Legacy GF3 Python/GDAL preprocessing is disabled. "
+            "Use GF3 SARscape production or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
+        )
 
     payload = job.payload or {}
     source_dirs = payload.get("source_dirs") or []

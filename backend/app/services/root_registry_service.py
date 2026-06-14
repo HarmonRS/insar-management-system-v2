@@ -273,6 +273,16 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
     )
     specs.extend(
         _iter_single_root_specs(
+            env_var="GF3_SARSCAPE_RUNTIME_DIR",
+            path=settings.GF3_SARSCAPE_RUNTIME_DIR,
+            root_role="work_root_gf3_sarscape",
+            display_name="GF3 SARscape Runtime",
+            scan_mode="workspace",
+            owner_engine="sarscape",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
             env_var="SAR_ANALYSIS_READY_ROOT",
             path=settings.SAR_ANALYSIS_READY_ROOT,
             root_role="sar_analysis_ready",
@@ -436,6 +446,46 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
             display_name="Gamma / PyINT Work Root",
             scan_mode="workspace",
             owner_engine="pyint",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
+            env_var="PYINT_DEM_ROOT",
+            path=settings.PYINT_DEM_ROOT,
+            root_role="dem_cache_root_pyint",
+            display_name="PyINT DEM Cache Root",
+            scan_mode="workspace",
+            owner_engine="pyint",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
+            env_var="GAMMA_SBAS_WORK_ROOT",
+            path=settings.GAMMA_SBAS_WORK_ROOT,
+            root_role="work_root_gamma_sbas",
+            display_name="Gamma SBAS Work Root",
+            scan_mode="workspace",
+            owner_engine="gamma",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
+            env_var="GAMMA_SBAS_PRODUCT_ROOT",
+            path=settings.GAMMA_SBAS_PRODUCT_ROOT,
+            root_role="publish_root_gamma_sbas",
+            display_name="Gamma SBAS Publish Root",
+            scan_mode="manifest_tree",
+            owner_engine="gamma",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
+            env_var="GAMMA_SBAS_TRIAL_ROOT",
+            path=settings.GAMMA_SBAS_TRIAL_ROOT,
+            root_role="trial_root_gamma_sbas",
+            display_name="Gamma SBAS Trial Root",
+            scan_mode="workspace",
+            owner_engine="gamma",
         )
     )
     return specs

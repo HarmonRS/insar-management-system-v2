@@ -115,7 +115,7 @@ def _resolve_config_path(raw: Any) -> Path | None:
 def _fallback_wrapper_exe() -> Path | None:
     candidate = (
         Path(settings.PROJECT_ROOT)
-        / ".codex_tmp"
+        / "third_party"
         / "GF3_L1A_To_L2_pipeline"
         / "dist"
         / "windows"
@@ -443,7 +443,12 @@ def run_gf3_sarscape_production(
             "results": [],
         }
 
-    runtime_dir = native_root_path / ".gf3_runtime"
+    configured_runtime_dir = _clean_text(getattr(settings, "GF3_SARSCAPE_RUNTIME_DIR", ""))
+    runtime_dir = (
+        Path(os.path.normpath(configured_runtime_dir)).resolve()
+        if configured_runtime_dir
+        else native_root_path / ".gf3_runtime"
+    )
     runtime_dir.mkdir(parents=True, exist_ok=True)
     config_path = runtime_dir / "gf3wrapper.json"
     env = os.environ.copy()

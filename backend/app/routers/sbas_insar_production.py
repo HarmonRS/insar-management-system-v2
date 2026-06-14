@@ -479,6 +479,7 @@ async def get_landsar_sbas_run_artifact(run_id: str, relative_path: str):
         artifact_path,
         media_type=media_type,
         filename=artifact_path.name,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
 
 
@@ -1022,6 +1023,7 @@ async def get_sbas_insar_run_artifact(run_id: str, relative_path: str):
         artifact_path,
         media_type=media_type,
         filename=artifact_path.name,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
 
 
@@ -1054,4 +1056,5 @@ async def get_sbas_insar_artifact(trial_id: str, relative_path: str):
         artifact_path,
         media_type=media_type,
         filename=artifact_path.name,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )

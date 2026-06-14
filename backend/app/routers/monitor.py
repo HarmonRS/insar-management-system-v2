@@ -43,8 +43,10 @@ class MonitorConfig(BaseModel):
     dinsar_dirs: List[str] = []
     gf3_archive_source_dirs: List[str] = []
     gf3_source_dirs: List[str] = []
+    gf3_legacy_gdal_enabled: bool = False
     gf3_sarscape_native_dirs: List[str] = []
     gf3_storage_dirs: List[str] = []
+    gf3_sarscape_runtime_dir: Optional[str] = None
     gf3_sarscape_wrapper_exe: Optional[str] = None
     gf3_sarscape_idlrt_path: Optional[str] = None
     gf3_sarscape_dem_path: Optional[str] = None
@@ -159,6 +161,14 @@ async def run_gf3_batch_process(admin_user: AuthUserORM = Depends(_require_admin
     """
     批量 GF3 L1A→L2 处理：扫描 GF3_SOURCE_DIRS，过滤已处理的，逐个处理并自动入库。
     """
+    if not settings.GF3_LEGACY_GDAL_ENABLED:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Legacy GF3 Python/GDAL preprocessing is disabled. "
+                "Use GF3 SARscape production or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
+            ),
+        )
     gf3_source_dirs = MONITOR_CONFIG.get("gf3_source_dirs") or []
     if not gf3_source_dirs:
         raise HTTPException(status_code=400, detail="GF3_SOURCE_DIRS is not configured.")
@@ -331,6 +341,14 @@ async def run_gf3_unpack(
     """
     将 GF3 压缩包池解包到 GF3_SOURCE_DIRS，作为后续 L1A→L2 预处理输入。
     """
+    if not settings.GF3_LEGACY_GDAL_ENABLED:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Legacy GF3 archive unpack is disabled. "
+                "Use GF3 SARscape production or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
+            ),
+        )
     gf3_archive_source_dirs = MONITOR_CONFIG.get("gf3_archive_source_dirs") or []
     gf3_source_dirs = MONITOR_CONFIG.get("gf3_source_dirs") or []
     if not gf3_archive_source_dirs:

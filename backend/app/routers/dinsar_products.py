@@ -260,4 +260,8 @@ async def get_dinsar_product_preview(
     if not preview_path or not os.path.isfile(preview_path):
         raise HTTPException(status_code=404, detail="Preview not found")
     media_type = mimetypes.guess_type(preview_path)[0] or "application/octet-stream"
-    return FileResponse(preview_path, media_type=media_type)
+    return FileResponse(
+        preview_path,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )

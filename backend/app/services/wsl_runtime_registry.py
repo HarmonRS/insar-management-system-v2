@@ -24,6 +24,14 @@ def _project_file_windows(*relative_parts: str) -> str:
     return os.path.normpath(str(Path(settings.PROJECT_ROOT, *relative_parts)))
 
 
+def _default_runtime_root_windows() -> str:
+    root = os.path.normpath(str(settings.PROJECT_ROOT))
+    drive, _tail = os.path.splitdrive(root)
+    if drive:
+        return os.path.join(drive + os.sep, "production_runtime")
+    return os.path.join(root, "runtime")
+
+
 @dataclass(frozen=True)
 class WslRuntimeDefinition:
     runtime_id: str
@@ -106,7 +114,7 @@ def build_wsl_runtime_registry() -> WslRuntimeRegistry:
     ).strip()
     broker_job_root_windows = os.path.normpath(
         settings.WSL_BROKER_JOB_ROOT
-        or os.path.join(settings.BACKEND_DIR, "runtime", "wsl_jobs")
+        or os.path.join(_default_runtime_root_windows(), "wsl_jobs")
     )
     broker_job_root_wsl = _windows_path_to_wsl_mount(broker_job_root_windows)
 

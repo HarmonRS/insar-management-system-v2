@@ -2,6 +2,8 @@
 
 更新日期：2026-04-24
 
+> 2026-06-14 状态说明：本文保留结果包、catalog、manifest、current 指针等通用目录约定；D-InSAR 当前引擎集合已调整为 ENVI/SARscape、LandSAR、Gamma/PyINT 三类，ISCE2 退出正式生产链路。D-InSAR 引擎、Task_Pool、结果聚合和中间文件清理以 `DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md` 为准。
+
 ## 1. 目标
 
 本设计解决三个长期问题：

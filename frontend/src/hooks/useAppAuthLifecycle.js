@@ -3,6 +3,39 @@ import apiClient from '../api/client';
 import { getHealth } from '../api/health';
 
 const HEALTH_POLL_INTERVAL_MS = 30000;
+const STARTUP_RETRY_DELAYS_MS = [750, 1500, 3000];
+
+const sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
+
+const getErrorStatus = (error) => Number(error?.response?.status || 0);
+
+const isTransientApiError = (error) => {
+  const status = getErrorStatus(error);
+  return !status || status === 408 || status === 429 || status >= 500;
+};
+
+const requestWithTransientRetry = async (
+  requestFn,
+  {
+    delays = STARTUP_RETRY_DELAYS_MS,
+    shouldRetry = isTransientApiError,
+  } = {},
+) => {
+  let lastError = null;
+  const retryDelays = Array.isArray(delays) ? delays : [];
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+    try {
+      return await requestFn();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retryDelays.length || !shouldRetry(error)) {
+        throw error;
+      }
+      await sleep(retryDelays[attempt]);
+    }
+  }
+  throw lastError;
+};
 
 export default function useAppAuthLifecycle({
   ensureCanOperate,
@@ -33,15 +66,21 @@ export default function useAppAuthLifecycle({
     const { clearOnFailure = true } = options;
     const requestGeneration = authGenerationRef.current;
     try {
-      const response = await apiClient.get('/auth/me', {
-        skipAuthReset: !clearOnFailure,
-        authGeneration: requestGeneration,
-      });
+      const response = await requestWithTransientRetry(() => (
+        apiClient.get('/auth/me', {
+          skipAuthReset: !clearOnFailure,
+          authGeneration: requestGeneration,
+        })
+      ));
       if (requestGeneration === authGenerationRef.current) {
         setCurrentUser(response.data || null);
       }
-    } catch {
-      if (clearOnFailure && requestGeneration === authGenerationRef.current) {
+    } catch (error) {
+      if (
+        clearOnFailure
+        && getErrorStatus(error) === 401
+        && requestGeneration === authGenerationRef.current
+      ) {
         setCurrentUser(null);
       }
     } finally {
@@ -88,7 +127,7 @@ export default function useAppAuthLifecycle({
   const fetchLicenseStatus = useCallback(async () => {
     try {
       setLicenseLoading(true);
-      const response = await apiClient.get('/license/status');
+      const response = await requestWithTransientRetry(() => apiClient.get('/license/status'));
       const data = response.data || {};
       if (!data.ok && !data.reason) {
         data.reason = '未授权';
@@ -111,7 +150,10 @@ export default function useAppAuthLifecycle({
         setHealthLoading(true);
       }
       setHealthError('');
-      const data = await getHealth(refresh ? { refresh: true } : {});
+      const data = await requestWithTransientRetry(
+        () => getHealth(refresh ? { refresh: true } : {}),
+        { delays: silent ? [] : STARTUP_RETRY_DELAYS_MS.slice(0, 2) },
+      );
       setHealthStatus(data || null);
     } catch (error) {
       setHealthError(error.response?.data?.detail || '运维自检失败');

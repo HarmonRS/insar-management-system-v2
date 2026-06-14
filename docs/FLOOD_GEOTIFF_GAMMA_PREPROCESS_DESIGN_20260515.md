@@ -503,7 +503,7 @@ Git 可以提供平台代码、Python 算法、任务编排、数据库迁移和
 
 The first code pass now implements LT1 and GF3 as analysis-ready scene preprocessors:
 
-- New config roots: `SAR_ANALYSIS_READY_ROOT`, `SAR_ANALYSIS_WORK_ROOT`, `SAR_ANALYSIS_PREVIEW_ROOT`.
+- Current config roots: `SAR_ANALYSIS_READY_ROOT` and `SAR_ANALYSIS_WORK_ROOT`. `SAR_ANALYSIS_PREVIEW_ROOT` was removed; previews live beside each analysis-ready scene.
 - `sar_scene_geo` now stores `analysis_tif_path`, `analysis_dir`, preview path, engine/profile, backscatter unit, nodata, metadata and quality JSON.
 - `/flood/preprocess` routes GF3 scenes to `gf3_gdal` standardization and LT1 scenes to `lt_gamma` single-scene preprocessing.
 - GF3 uses the existing GDAL/RPC L1A->L2 result, then registers the selected L2 GeoTIFF under `SAR_ANALYSIS_READY_ROOT`.

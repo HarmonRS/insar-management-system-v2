@@ -969,7 +969,11 @@ async def _check_source_roots() -> Dict[str, Any]:
 
     for path in split_env_paths(settings.GF3_SOURCE_DIRS):
         status = _probe_directory_status(path)
-        status["role"] = "gf3_l1a_source"
+        status["role"] = (
+            "gf3_l1a_source"
+            if settings.GF3_LEGACY_GDAL_ENABLED
+            else "gf3_legacy_l1a_source_disabled"
+        )
         items.append(status)
 
     for path in split_env_paths(settings.GF3_SARSCAPE_NATIVE_DIRS):
@@ -980,6 +984,12 @@ async def _check_source_roots() -> Dict[str, Any]:
     for path in split_env_paths(settings.GF3_STORAGE_DIRS):
         status = _probe_directory_status(path)
         status["role"] = "gf3_l2_storage"
+        items.append(status)
+
+    runtime_dir = str(getattr(settings, "GF3_SARSCAPE_RUNTIME_DIR", "") or "").strip()
+    if runtime_dir:
+        status = _probe_directory_status(runtime_dir)
+        status["role"] = "gf3_sarscape_runtime"
         items.append(status)
 
     wrapper_exe = str(settings.GF3_SARSCAPE_WRAPPER_EXE or "").strip()
@@ -1017,7 +1027,6 @@ async def _check_sar_analysis_ready() -> Dict[str, Any]:
     roots = {
         "ready": _probe_directory_status(settings.SAR_ANALYSIS_READY_ROOT),
         "work": _probe_directory_status(settings.SAR_ANALYSIS_WORK_ROOT),
-        "preview": _probe_directory_status(settings.SAR_ANALYSIS_PREVIEW_ROOT),
     }
     for role, payload in roots.items():
         payload["role"] = role

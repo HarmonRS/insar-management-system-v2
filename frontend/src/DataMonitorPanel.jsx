@@ -9,8 +9,10 @@ const DEFAULT_MONITOR_CONFIG = {
   dinsar_dirs: [],
   gf3_archive_source_dirs: [],
   gf3_source_dirs: [],
+  gf3_legacy_gdal_enabled: false,
   gf3_sarscape_native_dirs: [],
   gf3_storage_dirs: [],
+  gf3_sarscape_runtime_dir: '',
   gf3_sarscape_wrapper_exe: '',
   gf3_sarscape_idlrt_path: '',
   gf3_sarscape_dem_path: '',
@@ -302,6 +304,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const hasGf3SourceDirs = config.gf3_source_dirs.length > 0;
   const hasGf3SarscapeNativeDirs = config.gf3_sarscape_native_dirs.length > 0;
   const hasGf3StorageDirs = config.gf3_storage_dirs.length > 0;
+  const gf3LegacyGdalEnabled = Boolean(config.gf3_legacy_gdal_enabled);
   const hasGf3SarscapeWrapper = typeof config.gf3_sarscape_wrapper_exe === 'string' && config.gf3_sarscape_wrapper_exe.trim() !== '';
   const hasGf3SarscapeDem = typeof config.gf3_sarscape_dem_path === 'string' && config.gf3_sarscape_dem_path.trim() !== '';
 
@@ -311,8 +314,8 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const canRunS1Scan = !readOnly && configLoaded && hasS1SourceDirs;
   const canRunS1OrbitScan = !readOnly && configLoaded && hasS1OrbitDirs;
   const canRunGf3Scan = !readOnly && configLoaded && hasGf3StorageDirs;
-  const canRunGf3Unpack = !readOnly && configLoaded && hasGf3ArchiveSourceDirs && hasGf3SourceDirs;
-  const canRunGf3Process = !readOnly && configLoaded && hasGf3SourceDirs;
+  const canRunGf3Unpack = !readOnly && configLoaded && gf3LegacyGdalEnabled && hasGf3ArchiveSourceDirs && hasGf3SourceDirs;
+  const canRunGf3Process = !readOnly && configLoaded && gf3LegacyGdalEnabled && hasGf3SourceDirs;
   const canRunGf3SarscapeProduce = !readOnly && configLoaded && hasGf3ArchiveSourceDirs && hasGf3SarscapeNativeDirs && hasGf3StorageDirs && hasGf3SarscapeWrapper && hasGf3SarscapeDem;
   const canRunGf3SarscapeSync = !readOnly && configLoaded && hasGf3SarscapeNativeDirs && hasGf3StorageDirs;
   const canRunGf3SarscapeClean = !readOnly && configLoaded && hasGf3SarscapeNativeDirs && hasGf3StorageDirs;
@@ -797,9 +800,10 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
             <div style={rowStyle}><span style={labelStyle}>S1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_storage_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>S1 精轨</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_orbit_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>GF3 压缩包</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_archive_source_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>GF3 来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_source_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>GF3 legacy L1A</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>GF3 原生</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_sarscape_native_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>GF3 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>GF3 runtime</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_runtime_dir || '未配置'}</span></div>
             <div style={rowStyle}><span style={labelStyle}>D-InSAR 结果</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.dinsar_dirs)}</span></div>
           </div>
         </div>
@@ -888,31 +892,36 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
         </div>
 
         <div style={sectionStyle}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>GF3 归档预处理</div>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>GF3 SARscape 生产</div>
           <div style={{ ...gridStyle, marginBottom: '8px' }}>
             <div style={rowStyle}><span style={labelStyle}>压缩包来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_archive_source_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>L1A 来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_source_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>SARscape 原生</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_sarscape_native_dirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>L2 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>Runtime</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_runtime_dir || '未配置'}</span></div>
             <div style={rowStyle}><span style={labelStyle}>Wrapper</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_wrapper_exe || '未配置'}</span></div>
             <div style={rowStyle}><span style={labelStyle}>SARscape DEM</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_dem_path || '未配置'}</span></div>
             <div style={rowStyle}><span style={labelStyle}>极化</span><span>{config.gf3_sarscape_polarizations || 'HH,HV'}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>Legacy GDAL</span><span>{gf3LegacyGdalEnabled ? '启用' : '关闭'}</span></div>
           </div>
           <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-            <button
-              onClick={handleGf3Unpack}
-              disabled={gf3UnpackLoading || readOnly || !canRunGf3Unpack}
-              style={actionBtnStyle(gf3UnpackLoading, readOnly || !canRunGf3Unpack)}
-            >
-              {gf3UnpackLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 解包')}
-            </button>
-            <button
-              onClick={handleGf3BatchProcess}
-              disabled={gf3ProcessLoading || readOnly || !canRunGf3Process}
-              style={actionBtnStyle(gf3ProcessLoading, readOnly || !canRunGf3Process)}
-            >
-              {gf3ProcessLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 预处理')}
-            </button>
+            {gf3LegacyGdalEnabled && (
+              <>
+                <button
+                  onClick={handleGf3Unpack}
+                  disabled={gf3UnpackLoading || readOnly || !canRunGf3Unpack}
+                  style={actionBtnStyle(gf3UnpackLoading, readOnly || !canRunGf3Unpack)}
+                >
+                  {gf3UnpackLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 legacy 解包')}
+                </button>
+                <button
+                  onClick={handleGf3BatchProcess}
+                  disabled={gf3ProcessLoading || readOnly || !canRunGf3Process}
+                  style={actionBtnStyle(gf3ProcessLoading, readOnly || !canRunGf3Process)}
+                >
+                  {gf3ProcessLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 legacy 预处理')}
+                </button>
+              </>
+            )}
             <button
               onClick={handleGf3SarscapeProduce}
               disabled={gf3SarscapeProduceLoading || readOnly || !canRunGf3SarscapeProduce}

@@ -65,6 +65,7 @@ tmp_dir_coreg_*/
 
 # Local third-party runtime bundles
 third_party/LandSAR/
+third_party/GF3_L1A_To_L2_pipeline/
 
 # Large local datasets / installers
 Data/
