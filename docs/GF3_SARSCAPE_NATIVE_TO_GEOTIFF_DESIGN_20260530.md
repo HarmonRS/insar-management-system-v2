@@ -490,3 +490,12 @@ Skip production when either condition is true:
 - Standardized L2 output already exists in `GF3_STORAGE_DIRS/<imaging_date>/<scene_name>` with `gf3_standard_manifest.json` status `DONE`/`PARTIAL` and every requested polarization has a valid `*_L2.tif`.
 
 This prevents reprocessing when native intermediates were cleaned but registered/standardized results still exist. The standardized L2 and registered assets are the durable result layer; source archives on UNC should not be reprocessed unless the operator explicitly removes or invalidates the existing result.
+
+## 2026-06-15 Date-Scoped Production
+
+GF3 SARscape production now supports an optional scene-date filter.
+
+- `GET /api/monitor/gf3-sarscape-dates` scans `GF3_ARCHIVE_SOURCE_DIRS`, groups wrapper-supported raw archives by the `YYYYMMDD` date embedded in the GF3 scene name, and returns scene counts per date.
+- `POST /api/monitor/gf3-sarscape-produce` accepts `selected_dates: ["YYYYMMDD"]`. When omitted or empty, production keeps the previous all-date behavior.
+- The frontend monitor panel exposes a date selector in the GF3 SARscape production section. Operators can select one image date before starting production, or leave it as all dates.
+- The existing duplicate-result preflight still runs after date filtering. A selected date will not reprocess scenes whose standardized L2 result or complete native `_geo` outputs already exist.

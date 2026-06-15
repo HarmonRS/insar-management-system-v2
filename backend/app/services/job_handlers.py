@@ -4051,6 +4051,7 @@ async def _handle_gf3_sarscape_produce(job: SystemJobORM) -> None:
                 polarizations=payload.get("polarizations"),
                 archive_exts=payload.get("archive_exts") or [],
                 max_archives_per_run=payload.get("max_archives_per_run"),
+                selected_dates=payload.get("selected_dates") or [],
                 timeout_seconds=payload.get("timeout_seconds"),
                 keep_extracted=payload.get("keep_extracted"),
                 log_callback=_log_cb,

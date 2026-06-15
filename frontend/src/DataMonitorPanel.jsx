@@ -37,6 +37,14 @@ const DEFAULT_UNPACK_CONFIG = {
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
+const formatGf3Date = (value) => {
+  const text = String(value || '').replace(/\D/g, '');
+  if (text.length !== 8) {
+    return value || '';
+  }
+  return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
+};
+
 const createUnpackRunOptions = (config = DEFAULT_UNPACK_CONFIG) => ({
   max_files_per_run: String(config?.max_files_per_run ?? 0),
   max_runtime_minutes: String(config?.max_runtime_minutes ?? 0),
@@ -81,6 +89,9 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const [gf3SarscapeSyncLoading, setGf3SarscapeSyncLoading] = useState(false);
   const [gf3SarscapeCleanLoading, setGf3SarscapeCleanLoading] = useState(false);
   const [gf3ScanLoading, setGf3ScanLoading] = useState(false);
+  const [gf3DateLoading, setGf3DateLoading] = useState(false);
+  const [gf3SarscapeDates, setGf3SarscapeDates] = useState([]);
+  const [gf3SelectedDate, setGf3SelectedDate] = useState('');
   const [gf3Message, setGf3Message] = useState('');
   const logEndRef = useRef(null);
 
@@ -321,6 +332,49 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const canRunGf3SarscapeClean = !readOnly && configLoaded && hasGf3SarscapeNativeDirs && hasGf3StorageDirs;
   const canOpenUnpackDialog = !readOnly && unpackConfig.source_dirs.length > 0;
 
+  useEffect(() => {
+    if (!enabled || !configLoaded || !hasGf3ArchiveSourceDirs) {
+      setGf3SarscapeDates([]);
+      setGf3SelectedDate('');
+      return;
+    }
+
+    let canceled = false;
+    const fetchGf3Dates = async () => {
+      setGf3DateLoading(true);
+      try {
+        const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-dates`, { credentials: 'include' });
+        const data = await parseJsonSafe(res, {});
+        if (canceled) {
+          return;
+        }
+        if (!res.ok) {
+          throw new Error(data?.detail || `HTTP ${res.status}`);
+        }
+        const nextDates = toArray(data?.dates);
+        setGf3SarscapeDates(nextDates);
+        setGf3SelectedDate((prev) => (
+          prev && nextDates.some((item) => String(item?.date || '') === prev) ? prev : ''
+        ));
+      } catch (err) {
+        if (!canceled) {
+          console.error('Failed to fetch GF3 SARscape dates:', err);
+          setGf3SarscapeDates([]);
+        }
+      } finally {
+        if (!canceled) {
+          setGf3DateLoading(false);
+        }
+      }
+    };
+
+    fetchGf3Dates();
+
+    return () => {
+      canceled = true;
+    };
+  }, [apiEndpoint, enabled, configLoaded, hasGf3ArchiveSourceDirs]);
+
   const handleS1Run = async () => {
     if (readOnly) {
       setS1Message('当前账户为只读模式，无法触发 Sentinel-1 任务。');
@@ -480,13 +534,14 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
     setGf3SarscapeProduceLoading(true);
     setGf3Message('GF3 SARscape 生产链路启动中...');
     try {
+      const payload = gf3SelectedDate ? { selected_dates: [gf3SelectedDate] } : {};
       const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-produce`, {
         method: 'POST',
         credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({}),
+        body: JSON.stringify(payload),
       });
       const data = await parseJsonSafe(res, {});
       if (res.ok) {
@@ -504,6 +559,32 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
       setGf3Message(`失败：${err.message || '未知错误'}`);
     } finally {
       setGf3SarscapeProduceLoading(false);
+    }
+  };
+
+  const handleRefreshGf3Dates = async () => {
+    if (!hasGf3ArchiveSourceDirs) {
+      setGf3Message('GF3_ARCHIVE_SOURCE_DIRS 未配置。');
+      return;
+    }
+    setGf3DateLoading(true);
+    setGf3Message('正在刷新 GF3 影像日期...');
+    try {
+      const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-dates`, { credentials: 'include' });
+      const data = await parseJsonSafe(res, {});
+      if (!res.ok) {
+        throw new Error(data?.detail || `HTTP ${res.status}`);
+      }
+      const nextDates = toArray(data?.dates);
+      setGf3SarscapeDates(nextDates);
+      setGf3SelectedDate((prev) => (
+        prev && nextDates.some((item) => String(item?.date || '') === prev) ? prev : ''
+      ));
+      setGf3Message(`GF3 影像日期已刷新：${nextDates.length} 个日期。`);
+    } catch (err) {
+      setGf3Message(`失败：${err.message || '未知错误'}`);
+    } finally {
+      setGf3DateLoading(false);
     }
   };
 
@@ -902,6 +983,32 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
             <div style={rowStyle}><span style={labelStyle}>SARscape DEM</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_dem_path || '未配置'}</span></div>
             <div style={rowStyle}><span style={labelStyle}>极化</span><span>{config.gf3_sarscape_polarizations || 'HH,HV'}</span></div>
             <div style={rowStyle}><span style={labelStyle}>Legacy GDAL</span><span>{gf3LegacyGdalEnabled ? '启用' : '关闭'}</span></div>
+            <div style={rowStyle}>
+              <span style={labelStyle}>影像日期</span>
+              <span style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <select
+                  value={gf3SelectedDate}
+                  onChange={(event) => setGf3SelectedDate(event.target.value)}
+                  disabled={gf3DateLoading || gf3SarscapeProduceLoading || readOnly || !canRunGf3SarscapeProduce}
+                  style={{ minWidth: '180px', padding: '4px 6px' }}
+                >
+                  <option value="">全部可用日期</option>
+                  {gf3SarscapeDates.map((item) => (
+                    <option key={item.date} value={item.date}>
+                      {formatGf3Date(item.date)} ({item.scene_count || 0})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={handleRefreshGf3Dates}
+                  disabled={gf3DateLoading || readOnly || !hasGf3ArchiveSourceDirs}
+                  style={actionBtnStyle(gf3DateLoading, readOnly || !hasGf3ArchiveSourceDirs)}
+                >
+                  {gf3DateLoading ? '加载中...' : '刷新日期'}
+                </button>
+              </span>
+            </div>
           </div>
           <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
             {gf3LegacyGdalEnabled && (

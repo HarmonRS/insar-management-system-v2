@@ -90,6 +90,25 @@ def _date_from_scene_name(scene_name: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _normalize_scene_date(value: Any) -> str | None:
+    text = _clean_text(value)
+    if not text:
+        return None
+    match = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})", text)
+    if not match:
+        return None
+    return "".join(match.groups())
+
+
+def _normalize_scene_dates(values: list[str] | tuple[str, ...] | None) -> set[str]:
+    dates: set[str] = set()
+    for value in values or []:
+        normalized = _normalize_scene_date(value)
+        if normalized:
+            dates.add(normalized)
+    return dates
+
+
 def _resolve_existing_dirs(values: list[str] | tuple[str, ...] | None) -> tuple[list[Path], list[str]]:
     roots: list[Path] = []
     missing: list[str] = []
@@ -228,6 +247,7 @@ def discover_gf3_sarscape_inputs(
                 {
                     "path": str(resolved),
                     "scene_name": _scene_name_from_input(path),
+                    "scene_date": _date_from_scene_name(_scene_name_from_input(path)),
                     "ext": ext,
                     "source_root": str(root),
                 }
@@ -431,6 +451,7 @@ def run_gf3_sarscape_production(
     polarizations: str | None = None,
     archive_exts: list[str] | None = None,
     max_archives_per_run: int | None = None,
+    selected_dates: list[str] | None = None,
     timeout_seconds: int | None = None,
     keep_extracted: bool | None = None,
     log_callback: LogCallback | None = None,
@@ -455,6 +476,13 @@ def run_gf3_sarscape_production(
     ext_config = archive_exts if archive_exts is not None else split_env_paths(settings.GF3_ARCHIVE_EXTS)
     discovery = discover_gf3_sarscape_inputs(source_dirs, archive_exts=ext_config)
     inputs = discovery.get("inputs") or []
+    selected_date_set = _normalize_scene_dates(selected_dates)
+    if selected_date_set:
+        inputs = [
+            item
+            for item in inputs
+            if _normalize_scene_date(item.get("scene_date") or item.get("scene_name")) in selected_date_set
+        ]
     max_to_process = int(max_archives_per_run or 0)
     timeout = int(timeout_seconds or 0)
     keep = bool(settings.GF3_SARSCAPE_KEEP_EXTRACTED if keep_extracted is None else keep_extracted)
@@ -466,6 +494,8 @@ def run_gf3_sarscape_production(
     _emit_log(log_callback, "INFO", f"GF3 SARscape wrapper: {wrapper_path}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape DEM: {dem}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape polarizations: {pol_text}")
+    if selected_date_set:
+        _emit_log(log_callback, "INFO", f"GF3 SARscape selected dates: {', '.join(sorted(selected_date_set))}")
 
     if not inputs:
         _emit_progress(progress_callback, 100, "GF3 SARscape production found no supported inputs.")
@@ -477,6 +507,7 @@ def run_gf3_sarscape_production(
             "failed_count": 0,
             "deferred_count": 0,
             "missing_roots": discovery.get("missing_roots") or [],
+            "selected_dates": sorted(selected_date_set),
             "results": [],
         }
 
@@ -642,6 +673,7 @@ def run_gf3_sarscape_production(
         "deferred_count": deferred,
         "native_root": str(native_root_path),
         "missing_roots": discovery.get("missing_roots") or [],
+        "selected_dates": sorted(selected_date_set),
         "results": results,
     }
 

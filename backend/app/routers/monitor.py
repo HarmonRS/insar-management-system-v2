@@ -74,6 +74,7 @@ class GF3SarscapeSyncRequest(BaseModel):
 
 class GF3SarscapeProduceRequest(BaseModel):
     max_archives_per_run: Optional[int] = Field(default=None, ge=0)
+    selected_dates: List[str] = []
     auto_standardize: Optional[bool] = None
     clean_after_success: Optional[bool] = None
     force_standardize: bool = False
@@ -250,6 +251,16 @@ async def run_gf3_sarscape_produce(
         raise HTTPException(status_code=400, detail="GF3_SARSCAPE_DEM_PATH or GF3_GEO_DEM_PATH is not configured.")
 
     options = request_data or GF3SarscapeProduceRequest()
+    selected_dates = []
+    for raw_date in options.selected_dates or []:
+        text = str(raw_date or "").strip()
+        if not text:
+            continue
+        normalized = text.replace("-", "").replace("_", "")
+        if len(normalized) != 8 or not normalized.isdigit():
+            raise HTTPException(status_code=400, detail=f"Invalid GF3 scene date: {raw_date}")
+        if normalized not in selected_dates:
+            selected_dates.append(normalized)
     task_type = "GF3_SARSCAPE_PRODUCE"
     task_name = "GF3 SARscape production"
     auto_standardize = settings.GF3_SARSCAPE_AUTO_STANDARDIZE if options.auto_standardize is None else bool(options.auto_standardize)
@@ -265,6 +276,7 @@ async def run_gf3_sarscape_produce(
         "polarizations": settings.GF3_SARSCAPE_POLARIZATIONS,
         "archive_exts": split_env_paths(settings.GF3_ARCHIVE_EXTS),
         "max_archives_per_run": int(options.max_archives_per_run or 0),
+        "selected_dates": selected_dates,
         "timeout_seconds": int(settings.GF3_SARSCAPE_PRODUCE_TIMEOUT_SECONDS or 0),
         "keep_extracted": bool(settings.GF3_SARSCAPE_KEEP_EXTRACTED),
         "auto_standardize": bool(auto_standardize),
@@ -279,11 +291,53 @@ async def run_gf3_sarscape_produce(
         task_id = await task_service.create_task(task_type, task_name, params=payload)
         await job_queue_service.create_job(task_type, payload=payload, task_id=task_id)
         return {
-            "message": "GF3 SARscape production task submitted",
+            "message": (
+                f"GF3 SARscape production task submitted for {', '.join(selected_dates)}"
+                if selected_dates
+                else "GF3 SARscape production task submitted"
+            ),
             "task_id": task_id,
         }
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.get("/monitor/gf3-sarscape-dates")
+async def list_gf3_sarscape_dates(admin_user: AuthUserORM = Depends(_require_admin)):
+    """
+    List available GF3 SARscape source dates from configured raw archive roots.
+    """
+    from ..services.gf3_sarscape_production_service import discover_gf3_sarscape_inputs
+
+    gf3_archive_source_dirs = MONITOR_CONFIG.get("gf3_archive_source_dirs") or []
+    if not gf3_archive_source_dirs:
+        raise HTTPException(status_code=400, detail="GF3_ARCHIVE_SOURCE_DIRS is not configured.")
+
+    discovery = discover_gf3_sarscape_inputs(
+        gf3_archive_source_dirs,
+        archive_exts=split_env_paths(settings.GF3_ARCHIVE_EXTS),
+    )
+    by_date: dict[str, dict[str, object]] = {}
+    undated = 0
+    for item in discovery.get("inputs") or []:
+        scene_name = str(item.get("scene_name") or "")
+        date_text = str(item.get("scene_date") or "")
+        if not date_text:
+            undated += 1
+            continue
+        bucket = by_date.setdefault(date_text, {"date": date_text, "scene_count": 0, "scenes": []})
+        bucket["scene_count"] = int(bucket.get("scene_count") or 0) + 1
+        scenes = bucket.get("scenes")
+        if isinstance(scenes, list) and len(scenes) < 20:
+            scenes.append(scene_name)
+
+    dates = sorted(by_date.values(), key=lambda item: str(item.get("date") or ""), reverse=True)
+    return {
+        "dates": dates,
+        "input_count": discovery.get("input_count") or 0,
+        "undated_count": undated,
+        "missing_roots": discovery.get("missing_roots") or [],
+    }
 
 
 @router.post("/monitor/gf3-sarscape-clean", status_code=202)
