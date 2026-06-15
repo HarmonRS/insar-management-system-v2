@@ -479,3 +479,14 @@ GF3_SARSCAPE_PRODUCE_TIMEOUT_SECONDS=0
 - 不删除 `GF3_ARCHIVE_SOURCE_DIRS` 中的原始压缩包，也不删除 `GF3_STORAGE_DIRS` 中的标准 GeoTIFF。
 
 这样 `D:\production_results\gf3\sarscape_native` 只长期保存可追溯的最终 `_geo` 原生结果组，中间过程文件在标准化完成后自动释放空间；wrapper 配置和临时运行文件放在 `D:\production_runtime\gf3\sarscape_runtime`。
+
+## 2026-06-15 Production Preflight Rule
+
+GF3 SARscape production must check existing results before invoking the external wrapper.
+
+Skip production when either condition is true:
+
+- SARscape native output is already complete in `GF3_SARSCAPE_NATIVE_DIRS` for every requested polarization.
+- Standardized L2 output already exists in `GF3_STORAGE_DIRS/<imaging_date>/<scene_name>` with `gf3_standard_manifest.json` status `DONE`/`PARTIAL` and every requested polarization has a valid `*_L2.tif`.
+
+This prevents reprocessing when native intermediates were cleaned but registered/standardized results still exist. The standardized L2 and registered assets are the durable result layer; source archives on UNC should not be reprocessed unless the operator explicitly removes or invalidates the existing result.

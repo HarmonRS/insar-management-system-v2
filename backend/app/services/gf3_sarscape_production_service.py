@@ -85,6 +85,11 @@ def _safe_slug(value: Any, *, default: str = "unknown") -> str:
     return safe or default
 
 
+def _date_from_scene_name(scene_name: str) -> str | None:
+    match = re.search(r"(20\d{6})", str(scene_name or ""))
+    return match.group(1) if match else None
+
+
 def _resolve_existing_dirs(values: list[str] | tuple[str, ...] | None) -> tuple[list[Path], list[str]]:
     roots: list[Path] = []
     missing: list[str] = []
@@ -268,6 +273,36 @@ def _scene_complete(scene_dir: Path, polarizations: list[str]) -> bool:
     return all(_completed_geo_product(scene_dir, pol) is not None for pol in polarizations)
 
 
+def _standardized_scene_complete(storage_root: Path | None, scene_name: str, polarizations: list[str]) -> tuple[bool, Path | None, str]:
+    if storage_root is None:
+        return False, None, "storage_root_not_configured"
+    date_text = _date_from_scene_name(scene_name)
+    candidate_dirs = []
+    if date_text:
+        candidate_dirs.append(storage_root / _safe_slug(date_text) / _safe_slug(scene_name))
+    candidate_dirs.append(storage_root / "unknown_batch" / _safe_slug(scene_name))
+
+    for scene_dir in candidate_dirs:
+        manifest_path = scene_dir / STANDARD_MANIFEST_NAME
+        manifest = _read_json(manifest_path)
+        if manifest and str(manifest.get("status") or "").upper() in {"DONE", "PARTIAL"}:
+            assets = manifest.get("assets") or []
+            complete_pols = {
+                str(asset.get("polarization") or "").upper()
+                for asset in assets
+                if str(asset.get("status") or "").lower() in {"converted", "skipped"}
+                and _is_nonempty_file(Path(str(asset.get("path") or "")))
+            }
+            if all(str(pol or "").upper() in complete_pols for pol in polarizations):
+                return True, scene_dir, "standard_manifest_complete"
+
+        if scene_dir.is_dir():
+            if all(_is_nonempty_file(scene_dir / f"{str(pol).upper()}_L2.tif") for pol in polarizations):
+                return True, scene_dir, "standard_tifs_complete"
+
+    return False, None, "standardized_result_missing"
+
+
 def _missing_geo_polarizations(scene_dir: Path, polarizations: list[str]) -> list[str]:
     if not scene_dir.is_dir():
         return list(polarizations)
@@ -423,9 +458,11 @@ def run_gf3_sarscape_production(
     max_to_process = int(max_archives_per_run or 0)
     timeout = int(timeout_seconds or 0)
     keep = bool(settings.GF3_SARSCAPE_KEEP_EXTRACTED if keep_extracted is None else keep_extracted)
+    storage_root = Path(os.path.normpath(settings.GF3_STORAGE_DIRS)).resolve() if settings.GF3_STORAGE_DIRS else None
 
     _emit_log(log_callback, "INFO", f"GF3 SARscape source roots: {source_dirs}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape native root: {native_root_path}")
+    _emit_log(log_callback, "INFO", f"GF3 SARscape standardized root: {storage_root or '(not configured)'}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape wrapper: {wrapper_path}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape DEM: {dem}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape polarizations: {pol_text}")
@@ -468,6 +505,26 @@ def run_gf3_sarscape_production(
         scene_dir = native_root_path / scene_name
         progress = 5 + int((idx / max(total, 1)) * 60)
         _emit_progress(progress_callback, progress, f"GF3 SARscape checking {idx + 1}/{total}: {scene_name}")
+
+        standardized_complete, standardized_dir, standardized_reason = _standardized_scene_complete(storage_root, scene_name, pols)
+        if standardized_complete:
+            skipped += 1
+            _emit_log(
+                log_callback,
+                "INFO",
+                f"GF3 SARscape skipping {scene_name}: standardized result already exists ({standardized_reason})",
+            )
+            results.append(
+                {
+                    "scene_name": scene_name,
+                    "input_path": str(input_path),
+                    "scene_dir": str(scene_dir),
+                    "standardized_dir": str(standardized_dir) if standardized_dir else None,
+                    "status": "skipped_standardized_complete",
+                    "skip_reason": standardized_reason,
+                }
+            )
+            continue
 
         if _scene_complete(scene_dir, pols):
             skipped += 1
