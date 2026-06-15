@@ -134,9 +134,14 @@ def run_gf3_hh_hv_water_extraction(
 
     hh = _existing_path(hh_path, label="HH input")
     hv = _existing_path(hv_path, label="HV input")
-    dltb_cache_dir = _optional_existing_path(
-        params.get("dltb_cache_dir") or settings.GF3_WATER_DLTB_CACHE_DIR,
-        label="GF3_WATER_DLTB_CACHE_DIR",
+    use_dltb = _as_bool(params.get("use_dltb"), bool(settings.GF3_WATER_USE_DLTB))
+    dltb_cache_dir = (
+        _optional_existing_path(
+            params.get("dltb_cache_dir") or settings.GF3_WATER_DLTB_CACHE_DIR,
+            label="GF3_WATER_DLTB_CACHE_DIR",
+        )
+        if use_dltb
+        else None
     )
     dem = _optional_existing_path(
         params.get("dem") or params.get("dem_path") or settings.GF3_WATER_DEM_PATH,
@@ -224,6 +229,7 @@ def run_gf3_hh_hv_water_extraction(
             "dltb_cache_dir": str(dltb_cache_dir) if dltb_cache_dir else None,
         },
         "runtime": {
+            "dltb_enabled": use_dltb and dltb_cache_dir is not None,
             "vector_requested": out_vector,
             "vector_runtime_available": vector_runtime_available,
             "vector_output_enabled": vector_output_enabled,

@@ -86,12 +86,14 @@ System integration should be written around existing services:
 
 Do not store runtime data in Git.
 
-Required/valuable runtime assets:
+Current integration does not use DLTB priors. The GF-3 HH/HV processor runs from SAR backscatter, morphology and optional vector/DEM inputs only.
+
+Optional future runtime assets:
 
 - `D:\Code\Water\data\priors\dltb_cache\heilongjiang`
   - Current size observed: 25 files, about 8.5 GB.
-  - Transfer to a managed runtime asset path, for example `D:\production_assets\gf3_water\priors\dltb_cache\heilongjiang`.
-  - Configure by `GF3_WATER_DLTB_CACHE_DIR`.
+  - Do not transfer for the current workflow.
+  - If DLTB is re-enabled later, transfer to a managed runtime asset path, for example `D:\production_assets\gf3_water\priors\dltb_cache\heilongjiang`, then set `GF3_WATER_USE_DLTB=true` and `GF3_WATER_DLTB_CACHE_DIR`.
 
 Optional runtime assets:
 
@@ -116,6 +118,7 @@ These are large model artifacts and should stay outside the application until a 
 
 Add configuration keys:
 
+- `GF3_WATER_USE_DLTB=false`
 - `GF3_WATER_DLTB_CACHE_DIR`
 - `GF3_WATER_DEM_PATH`
 - `GF3_WATER_DEFAULT_CARTOGRAPHIC=true`
@@ -153,5 +156,5 @@ flowchart TD
 ## Open Decisions
 
 - Whether runtime execution should be in-process Python API first or always subprocess CLI. Initial integration should use in-process API because it fits the existing worker model and keeps job accounting simple.
-- Whether to transfer the 8.5 GB DLTB cache automatically. This should be a deployment operation, not a Git operation.
+- DLTB priors are disabled for the current workflow. Re-enabling them later should be a deployment decision because the cache is about 8.5 GB.
 - Whether legacy AI4G U-Net should be supported later. It should not block the current HH/HV production chain.
