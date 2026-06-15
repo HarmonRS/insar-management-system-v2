@@ -215,8 +215,6 @@ class Settings(BaseSettings):
     RADAR_PREVIEW_BUILD_ON_DEMAND: bool = True
 
     WATER_RESULTS_DIR: str = ""
-    GF3_WATER_USE_DLTB: bool = False
-    GF3_WATER_DLTB_CACHE_DIR: str = ""
     GF3_WATER_DEM_PATH: str = ""
     GF3_WATER_DEFAULT_CARTOGRAPHIC: bool = True
     GF3_WATER_DEFAULT_OUT_VECTOR: bool = True

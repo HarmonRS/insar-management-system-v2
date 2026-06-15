@@ -15,11 +15,17 @@ The goal is integration, not bulk import. Code that is reusable should be copied
 - `gf3_water/`: active Python package for GF-3 HH/HV water extraction.
 - `scripts/`: thin CLI/data-preparation wrappers.
 - `docs/`: algorithm and integration notes.
-- `data/`: local scenes and prior data.
+- `data/`: local scenes and prior data from the experiment workspace.
 - `outputs/`: generated products.
 - `gf3-water-ai4g-unet/`: legacy deep-learning experiment/checkpoints.
 
 The active production-facing implementation is the non-DL `gf3_water` package. It consumes SARscape ENVI HH/HV geocoded assets, for example `_hh_geo` and `_hv_geo`, and writes raster, preview, vector and `metadata.json` outputs.
+
+Production policy:
+
+- Do not use DLTB, hydro, water-vector or paddy-vector priors.
+- Do not use deep-learning checkpoints or U-Net inference.
+- Use the current HH/HV machine-learning-style threshold, candidate and morphology workflow.
 
 ## Current System Entry Points
 
@@ -88,16 +94,15 @@ Do not store runtime data in Git.
 
 Current integration does not use DLTB priors. The GF-3 HH/HV processor runs from SAR backscatter, morphology and optional vector/DEM inputs only.
 
-Optional future runtime assets:
+Not transferred:
 
 - `D:\Code\Water\data\priors\dltb_cache\heilongjiang`
   - Current size observed: 25 files, about 8.5 GB.
-  - Do not transfer for the current workflow.
-  - If DLTB is re-enabled later, transfer to a managed runtime asset path, for example `D:\production_assets\gf3_water\priors\dltb_cache\heilongjiang`, then set `GF3_WATER_USE_DLTB=true` and `GF3_WATER_DLTB_CACHE_DIR`.
-
-Optional runtime assets:
-
 - Hydro prior vectors under `data/priors/hydro`.
+- Water/paddy vector priors.
+
+Optional runtime asset:
+
 - DEM path if slope filtering should be enabled.
 
 Build-only assets:
@@ -118,8 +123,6 @@ These are large model artifacts and should stay outside the application until a 
 
 Add configuration keys:
 
-- `GF3_WATER_USE_DLTB=false`
-- `GF3_WATER_DLTB_CACHE_DIR`
 - `GF3_WATER_DEM_PATH`
 - `GF3_WATER_DEFAULT_CARTOGRAPHIC=true`
 - `GF3_WATER_DEFAULT_OUT_VECTOR=true`
@@ -156,5 +159,5 @@ flowchart TD
 ## Open Decisions
 
 - Whether runtime execution should be in-process Python API first or always subprocess CLI. Initial integration should use in-process API because it fits the existing worker model and keeps job accounting simple.
-- DLTB priors are disabled for the current workflow. Re-enabling them later should be a deployment decision because the cache is about 8.5 GB.
-- Whether legacy AI4G U-Net should be supported later. It should not block the current HH/HV production chain.
+- DLTB, hydro, water-vector and paddy-vector priors are not part of the current workflow.
+- Legacy AI4G U-Net/deep-learning checkpoints are not part of the current workflow.

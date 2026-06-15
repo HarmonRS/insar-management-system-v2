@@ -134,15 +134,8 @@ def run_gf3_hh_hv_water_extraction(
 
     hh = _existing_path(hh_path, label="HH input")
     hv = _existing_path(hv_path, label="HV input")
-    use_dltb = _as_bool(params.get("use_dltb"), bool(settings.GF3_WATER_USE_DLTB))
-    dltb_cache_dir = (
-        _optional_existing_path(
-            params.get("dltb_cache_dir") or settings.GF3_WATER_DLTB_CACHE_DIR,
-            label="GF3_WATER_DLTB_CACHE_DIR",
-        )
-        if use_dltb
-        else None
-    )
+    use_dltb = False
+    dltb_cache_dir = None
     dem = _optional_existing_path(
         params.get("dem") or params.get("dem_path") or settings.GF3_WATER_DEM_PATH,
         label="GF3_WATER_DEM_PATH",
@@ -162,9 +155,9 @@ def run_gf3_hh_hv_water_extraction(
         out_dir=out_dir,
         dem=dem,
         dltb_cache_dir=dltb_cache_dir,
-        dltb_mode=str(params.get("dltb_mode") or "soft"),
-        water_vector=_path_param_list(params, "water_vector"),
-        paddy_vector=_path_param_list(params, "paddy_vector"),
+        dltb_mode="off",
+        water_vector=[],
+        paddy_vector=[],
         threshold_method=str(params.get("threshold_method") or "percentile"),
         score_percentile=_numeric_param(params, "score_percentile", 95.0, float),
         hv_percentile=_numeric_param(params, "hv_percentile", 20.0, float),
@@ -227,9 +220,13 @@ def run_gf3_hh_hv_water_extraction(
             "hv": str(hv),
             "dem": str(dem) if dem else None,
             "dltb_cache_dir": str(dltb_cache_dir) if dltb_cache_dir else None,
+            "water_vector": [],
+            "paddy_vector": [],
         },
         "runtime": {
-            "dltb_enabled": use_dltb and dltb_cache_dir is not None,
+            "prior_inputs_enabled": False,
+            "dltb_enabled": False,
+            "deep_learning_enabled": False,
             "vector_requested": out_vector,
             "vector_runtime_available": vector_runtime_available,
             "vector_output_enabled": vector_output_enabled,
