@@ -24,6 +24,10 @@ class FloodPreprocessRequest(BaseModel):
 class FloodWaterExtractionRequest(BaseModel):
     scene_id: Optional[int] = Field(default=None, description="SARSceneGeoORM primary key")
     input_path: Optional[str] = Field(default=None, description="Direct GeoTIFF/ENVI input path")
+    processor: Optional[str] = Field(default=None, description="Water extraction processor code")
+    hh_path: Optional[str] = Field(default=None, description="GF-3 HH geocoded ENVI path")
+    hv_path: Optional[str] = Field(default=None, description="GF-3 HV geocoded ENVI path")
+    processor_params: Optional[dict[str, Any]] = Field(default=None, description="Processor-specific parameters")
 
 
 class FloodPairSearchRequest(BaseModel):

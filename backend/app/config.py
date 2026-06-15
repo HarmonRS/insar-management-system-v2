@@ -215,6 +215,10 @@ class Settings(BaseSettings):
     RADAR_PREVIEW_BUILD_ON_DEMAND: bool = True
 
     WATER_RESULTS_DIR: str = ""
+    GF3_WATER_DLTB_CACHE_DIR: str = ""
+    GF3_WATER_DEM_PATH: str = ""
+    GF3_WATER_DEFAULT_CARTOGRAPHIC: bool = True
+    GF3_WATER_DEFAULT_OUT_VECTOR: bool = True
     SAR_ANALYSIS_READY_ROOT: str = ""
     SAR_ANALYSIS_WORK_ROOT: str = ""
     SAR_ANALYSIS_NODATA_VALUE: float = -9999.0

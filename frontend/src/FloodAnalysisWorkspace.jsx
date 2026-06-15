@@ -316,6 +316,7 @@ function SceneRow({ scene, readOnly, onShowMap, onExtractWater, onReset }) {
 }
 
 function WaterResultRow({ item, onShowMap }) {
+  const thresholdValue = item.threshold_value ?? item.otsu_threshold_db;
   return (
     <div style={rowStyle}>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'center' }}>
@@ -324,6 +325,7 @@ function WaterResultRow({ item, onShowMap }) {
             <strong>水体提取 #{item.id}</strong>
             <StatusBadge status={item.status} />
             {item.scene_id && <span style={{ color: palette.muted }}>场景 #{item.scene_id}</span>}
+            {item.processor && <StatusBadge tone="info">{item.processor}</StatusBadge>}
             {item.satellite && <span style={{ color: palette.muted }}>{item.satellite}</span>}
             {item.imaging_date && <span style={{ color: palette.muted }}>{formatYmd(item.imaging_date, 'zh')}</span>}
             {item.polarization && <span style={{ color: palette.subtle }}>{item.polarization}</span>}
@@ -331,8 +333,13 @@ function WaterResultRow({ item, onShowMap }) {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, marginTop: 8 }}>
             <KeyValue label="面积" value={formatArea(item.water_area_km2)} strong />
             <KeyValue label="像素" value={item.water_pixel_count?.toLocaleString?.() || '-'} />
-            <KeyValue label="阈值" value={item.otsu_threshold_db != null ? Number(item.otsu_threshold_db).toFixed(2) : '-'} />
+            <KeyValue label="阈值" value={thresholdValue != null ? Number(thresholdValue).toFixed(2) : '-'} />
           </div>
+          {(item.preview_path || item.vector_path) && (
+            <div style={{ color: palette.subtle, fontSize: 11, marginTop: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {[item.preview_path ? `preview: ${item.preview_path}` : null, item.vector_path ? `vector: ${item.vector_path}` : null].filter(Boolean).join(' | ')}
+            </div>
+          )}
           {item.error_msg && <div style={{ color: palette.red, fontSize: 11, marginTop: 6 }}>{item.error_msg}</div>}
         </div>
         <button type="button" style={buttonStyle('secondary', asStatus(item.status) !== 'DONE')} disabled={asStatus(item.status) !== 'DONE'} onClick={() => onShowMap(item)}>显示图层</button>
@@ -451,6 +458,7 @@ export default function FloodAnalysisWorkspace({
   const [waterTotal, setWaterTotal] = useState(0);
   const [waterPage, setWaterPage] = useState(0);
   const [waterLoading, setWaterLoading] = useState(false);
+  const [waterProcessor, setWaterProcessor] = useState('otsu');
 
   const [sourceAoiMode, setSourceAoiMode] = useState('none');
   const [sourceRegionOptions, setSourceRegionOptions] = useState({ provinces: [], cities: [] });
@@ -774,7 +782,7 @@ export default function FloodAnalysisWorkspace({
     showMessage('info', `正在提交场景 #${scene.id} 的水体提取任务...`);
     onTaskStart?.(null, '正在提交水体提取任务...');
     try {
-      const res = await submitFloodWaterExtraction({ scene_id: scene.id });
+      const res = await submitFloodWaterExtraction({ scene_id: scene.id, processor: waterProcessor });
       if (res.data?.task_id) onTaskStart?.(res.data.task_id, '水体提取任务已启动');
       await loadWaterResults(0);
       showMessage('success', `场景 #${scene.id} 的水体提取任务已提交。`);
@@ -1181,6 +1189,13 @@ export default function FloodAnalysisWorkspace({
 
           <section style={sectionStyle}>
             <SectionHeader title={`分析就绪场景 (${scenesTotal})`} actions={<button type="button" style={buttonStyle('quiet', scenesLoading)} disabled={scenesLoading} onClick={() => loadScenes(scenesPage)}>刷新场景</button>} />
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <span style={{ color: palette.muted, fontSize: 12 }}>水体提取处理器</span>
+              <select value={waterProcessor} onChange={event => setWaterProcessor(event.target.value)} style={{ ...inputStyle, width: 180 }}>
+                <option value="otsu">Otsu GeoTIFF</option>
+                <option value="gf3_hh_hv">GF3 HH/HV</option>
+              </select>
+            </div>
             <div style={{ display: 'grid', gap: 8 }}>
               {scenesLoading && <EmptyState>场景加载中...</EmptyState>}
               {!scenesLoading && scenes.length === 0 && <EmptyState>暂无分析就绪场景。</EmptyState>}

@@ -134,6 +134,72 @@ def _scene_analysis_path(scene: SARSceneGeoORM | None) -> str | None:
     return scene.analysis_tif_path
 
 
+def _normalize_processor(value: Any) -> str:
+    processor = str(value or "").strip().lower()
+    if processor in {"gf3_water", "gf3_water_hh_hv", "gf3_hh_hv", "hh_hv"}:
+        return "gf3_hh_hv"
+    return processor or "otsu"
+
+
+def _metadata_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _find_standard_asset_by_pol(metadata: dict[str, Any], polarization: str) -> str | None:
+    target = str(polarization or "").upper()
+    candidates = []
+    candidates.extend(metadata.get("standard_assets") or [])
+    nested = metadata.get("metadata")
+    if isinstance(nested, dict):
+        candidates.extend(nested.get("standard_assets") or [])
+    for asset in candidates:
+        if not isinstance(asset, dict):
+            continue
+        if str(asset.get("polarization") or "").upper() != target:
+            continue
+        for key in ("source_native", "path"):
+            path = str(asset.get(key) or "").strip()
+            if path:
+                return path
+    return None
+
+
+def _resolve_gf3_hh_hv_inputs(
+    *,
+    req: Any,
+    scene: SARSceneGeoORM | None,
+    radar: RadarDataORM | None,
+) -> tuple[str | None, str | None, dict[str, Any]]:
+    hh_path = str(getattr(req, "hh_path", "") or "").strip() or None
+    hv_path = str(getattr(req, "hv_path", "") or "").strip() or None
+    resolution: dict[str, Any] = {"source": "request" if hh_path or hv_path else "metadata"}
+    if hh_path and hv_path:
+        return hh_path, hv_path, resolution
+
+    scene_meta = _metadata_dict(scene.analysis_metadata_json if scene else None)
+    radar_meta = _metadata_dict(radar.metadata_json if radar else None)
+    for metadata in (scene_meta, radar_meta):
+        hh_path = hh_path or _find_standard_asset_by_pol(metadata, "HH")
+        hv_path = hv_path or _find_standard_asset_by_pol(metadata, "HV")
+    resolution.update(
+        {
+            "scene_metadata_used": bool(scene_meta),
+            "radar_metadata_used": bool(radar_meta),
+            "hh_auto_resolved": bool(hh_path),
+            "hv_auto_resolved": bool(hv_path),
+        }
+    )
+    return hh_path, hv_path, resolution
+
+
 def _resolve_aoi_wkt_from_request(req: Any) -> tuple[str, dict[str, Any], dict[str, Any]]:
     """Resolve region/GeoJSON AOI using the same parser as the management search page."""
     aoi_geojson = getattr(req, "aoi_geojson", None)
@@ -393,22 +459,44 @@ async def list_scenes(limit: int, offset: int, db: AsyncSession) -> dict[str, An
 async def submit_water_extraction(req: Any, db: AsyncSession) -> dict[str, Any]:
     input_path = req.input_path
     scene_id = req.scene_id
+    processor = _normalize_processor(getattr(req, "processor", None))
+    processor_params = dict(getattr(req, "processor_params", None) or {})
+    scene: SARSceneGeoORM | None = None
+    radar: RadarDataORM | None = None
 
     if scene_id:
         scene = await db.get(SARSceneGeoORM, scene_id)
         if not scene:
             raise HTTPException(status_code=404, detail=f"SARSceneGeoORM id={scene_id} not found")
-        input_path = _scene_analysis_path(scene)
-        if not input_path:
+        if scene.radar_data_id:
+            radar = await db.get(RadarDataORM, scene.radar_data_id)
+        if processor == "gf3_hh_hv":
+            input_path = input_path or _scene_analysis_path(scene)
+        else:
+            input_path = _scene_analysis_path(scene)
+        if processor != "gf3_hh_hv" and not input_path:
             raise HTTPException(status_code=400, detail="Scene has no analysis-ready GeoTIFF")
 
-    if not input_path:
+    hh_path = None
+    hv_path = None
+    input_resolution: dict[str, Any] = {}
+    if processor == "gf3_hh_hv":
+        hh_path, hv_path, input_resolution = _resolve_gf3_hh_hv_inputs(req=req, scene=scene, radar=radar)
+        if not hh_path or not hv_path:
+            raise HTTPException(status_code=400, detail="GF3 HH/HV water extraction requires hh_path and hv_path")
+        input_path = input_path or hh_path
+    elif not input_path:
         raise HTTPException(status_code=400, detail="scene_id or input_path is required")
 
     extraction = WaterExtractionORM(
         scene_id=scene_id,
-        processor=getattr(req, "processor", None) or "otsu",
+        processor=processor,
         input_path=input_path,
+        metadata_json={
+            "processor_params": processor_params,
+            "input_assets": {"hh": hh_path, "hv": hv_path} if processor == "gf3_hh_hv" else {},
+            "input_resolution": input_resolution,
+        },
         status="PENDING",
     )
     db.add(extraction)
@@ -421,7 +509,13 @@ async def submit_water_extraction(req: Any, db: AsyncSession) -> dict[str, Any]:
             job_type=JOB_TYPE_WATER_DETECT,
             task_type=f"FLOOD_WATER_EXTRACTION_{extraction_id}",
             task_name=f"Flood water extraction id={extraction_id}",
-            payload={"extraction_id": extraction_id, "processor": extraction.processor},
+            payload={
+                "extraction_id": extraction_id,
+                "processor": extraction.processor,
+                "hh_path": hh_path,
+                "hv_path": hv_path,
+                "processor_params": processor_params,
+            },
         )
         async with db.begin():
             queued_extraction = await db.get(WaterExtractionORM, extraction_id)

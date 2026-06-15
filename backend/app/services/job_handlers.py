@@ -3490,6 +3490,7 @@ async def _handle_flood_detection(job: SystemJobORM) -> None:
 
 async def _handle_water_detect(job: SystemJobORM) -> None:
     """水体检测 job handler（Otsu + DEM + 形态学 + 连通分量）。"""
+    from .gf3_water_extraction_service import GF3_HH_HV_PROCESSOR, run_gf3_hh_hv_water_extraction
     from .water_extraction_service import run_otsu_water_extraction
 
     payload = job.payload or {}
@@ -3508,6 +3509,15 @@ async def _handle_water_detect(job: SystemJobORM) -> None:
             model_name = "WaterExtractionORM" if use_extraction_table else "WaterDetectionORM"
             raise ValueError(f"{model_name} id={record_id} 不存在")
         input_path = det.input_path
+        metadata = det.metadata_json if use_extraction_table and isinstance(det.metadata_json, dict) else {}
+        processor = str(payload.get("processor") or getattr(det, "processor", None) or "otsu").strip().lower()
+        if processor in {"gf3_water", "gf3_water_hh_hv", "hh_hv"}:
+            processor = GF3_HH_HV_PROCESSOR
+        input_assets = metadata.get("input_assets") if isinstance(metadata.get("input_assets"), dict) else {}
+        processor_params = dict(metadata.get("processor_params") or {})
+        processor_params.update(dict(payload.get("processor_params") or {}))
+        hh_path = payload.get("hh_path") or input_assets.get("hh")
+        hv_path = payload.get("hv_path") or input_assets.get("hv")
         det.status = "RUNNING"
         if use_extraction_table and hasattr(det, "task_id"):
             det.task_id = job.task_id
@@ -3518,17 +3528,28 @@ async def _handle_water_detect(job: SystemJobORM) -> None:
                 mirror.task_id = job.task_id
         await db.commit()
 
-    if not input_path:
+    if processor == GF3_HH_HV_PROCESSOR:
+        if not hh_path or not hv_path:
+            raise ValueError("GF3 HH/HV water extraction requires hh_path and hv_path")
+    elif not input_path:
         raise ValueError("水体检测缺少输入路径 input_path")
 
     output_name = f"water_extraction_{record_id}" if use_extraction_table else f"water_detect_{record_id}"
     output_root = settings.WATER_RESULTS_DIR or os.path.join(settings.BACKEND_DIR, "water_results")
-    output_dir = os.path.join(output_root, output_name)
+    output_dir = os.path.join(output_root, processor, output_name) if use_extraction_table else os.path.join(output_root, output_name)
     os.makedirs(output_dir, exist_ok=True)
 
     await task_service.update_task(job.task_id, progress=10, message="启动水体检测算法...")
 
     def _run() -> Dict[str, Any]:
+        if processor == GF3_HH_HV_PROCESSOR:
+            return run_gf3_hh_hv_water_extraction(
+                hh_path=hh_path,
+                hv_path=hv_path,
+                output_dir=output_dir,
+                job_id=job.job_id,
+                params=processor_params,
+            )
         return run_otsu_water_extraction(
             input_path=input_path,
             output_dir=output_dir,
@@ -3557,16 +3578,24 @@ async def _handle_water_detect(job: SystemJobORM) -> None:
         if det:
             if result.get("ok"):
                 det.output_path = result.get("output_path")
+                if hasattr(det, "preview_path"):
+                    det.preview_path = result.get("preview_path")
+                if hasattr(det, "vector_path"):
+                    det.vector_path = result.get("vector_path")
                 det.water_area_km2 = result.get("water_area_km2")
                 det.water_pixel_count = result.get("water_pixel_count")
                 if use_extraction_table:
                     det.processor = result.get("processor") or det.processor or "otsu"
                     det.threshold_value = result.get("threshold_value")
-                    det.metadata_json = {
-                        "legacy_otsu_threshold_db": result.get("otsu_threshold_db"),
-                        "value_transform": result.get("value_transform"),
-                        "job_id": job.job_id,
-                    }
+                    result_metadata = result.get("metadata_json")
+                    if isinstance(result_metadata, dict):
+                        det.metadata_json = result_metadata
+                    else:
+                        det.metadata_json = {
+                            "legacy_otsu_threshold_db": result.get("otsu_threshold_db"),
+                            "value_transform": result.get("value_transform"),
+                            "job_id": job.job_id,
+                        }
                 else:
                     det.otsu_threshold_db = result.get("otsu_threshold_db")
                 det.status = "DONE"
@@ -3578,6 +3607,8 @@ async def _handle_water_detect(job: SystemJobORM) -> None:
                 mirror = await db.get(WaterExtractionORM, int(record_id))
                 if mirror:
                     mirror.output_path = det.output_path
+                    mirror.preview_path = result.get("preview_path")
+                    mirror.vector_path = result.get("vector_path")
                     mirror.water_area_km2 = det.water_area_km2
                     mirror.water_pixel_count = det.water_pixel_count
                     mirror.threshold_value = result.get("threshold_value") or result.get("otsu_threshold_db")
