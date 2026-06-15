@@ -460,6 +460,35 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
     )
     specs.extend(
         _iter_single_root_specs(
+            env_var="TASK_POOL_ROOT",
+            path=settings.TASK_POOL_ROOT,
+            root_role="task_pool_root",
+            display_name="Task Pool Root",
+            scan_mode="workspace",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
+            env_var="DINSAR_TASK_POOL_ROOT",
+            path=settings.DINSAR_TASK_POOL_ROOT,
+            root_role="task_pool_dinsar",
+            display_name="D-InSAR Task Pool",
+            scan_mode="workspace",
+            owner_engine="dinsar",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
+            env_var="SBAS_TASK_POOL_ROOT",
+            path=settings.SBAS_TASK_POOL_ROOT,
+            root_role="task_pool_sbas",
+            display_name="SBAS Task Pool",
+            scan_mode="workspace",
+            owner_engine="sbas",
+        )
+    )
+    specs.extend(
+        _iter_single_root_specs(
             env_var="GAMMA_SBAS_WORK_ROOT",
             path=settings.GAMMA_SBAS_WORK_ROOT,
             root_role="work_root_gamma_sbas",

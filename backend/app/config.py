@@ -93,6 +93,14 @@ def _default_runtime_root(project_root: str) -> str:
     return os.path.join(normalized_root, "runtime")
 
 
+def _default_task_pool_root(project_root: str) -> str:
+    normalized_root = os.path.normpath(project_root)
+    drive, _tail = os.path.splitdrive(normalized_root)
+    if drive:
+        return os.path.join(drive + os.sep, "Task_Pool")
+    return os.path.join(normalized_root, "Task_Pool")
+
+
 def _default_runtime_dir(project_root: str, *parts: str) -> str:
     return os.path.join(_default_runtime_root(project_root), *parts)
 
@@ -187,6 +195,9 @@ class Settings(BaseSettings):
     DB_SCHEMA_RESET_CONFIRM: bool = False
 
     UNPACK_SOURCE_DIRS: str = ""
+    TASK_POOL_ROOT: str = ""
+    DINSAR_TASK_POOL_ROOT: str = ""
+    SBAS_TASK_POOL_ROOT: str = ""
     SOURCE_PRODUCT_DIRS: str = ""
     SENTINEL1_STORAGE_DIRS: str = ""
     ORBIT_SOURCE_DIRS: str = ""
@@ -441,6 +452,12 @@ class Settings(BaseSettings):
                 "WATER_RESULTS_DIR",
                 os.path.join(backend_dir, "water_results"),
             )
+        if not self.TASK_POOL_ROOT:
+            object.__setattr__(self, "TASK_POOL_ROOT", _default_task_pool_root(project_root))
+        if not self.DINSAR_TASK_POOL_ROOT:
+            object.__setattr__(self, "DINSAR_TASK_POOL_ROOT", os.path.join(self.TASK_POOL_ROOT, "DInSAR"))
+        if not self.SBAS_TASK_POOL_ROOT:
+            object.__setattr__(self, "SBAS_TASK_POOL_ROOT", os.path.join(self.TASK_POOL_ROOT, "SBAS"))
         if not self.SAR_ANALYSIS_READY_ROOT:
             object.__setattr__(
                 self,
@@ -780,7 +797,7 @@ class Settings(BaseSettings):
             object.__setattr__(
                 self,
                 "GAMMA_SBAS_WORK_ROOT",
-                os.path.join(_default_runtime_root(project_root), "sbas_insar_work"),
+                self.SBAS_TASK_POOL_ROOT,
             )
         if not self.GAMMA_SBAS_PRODUCT_ROOT:
             object.__setattr__(
@@ -990,6 +1007,9 @@ class Settings(BaseSettings):
         os.makedirs(settings.RESULT_QUARANTINE_ROOT, exist_ok=True)
         os.makedirs(settings.SAR_ANALYSIS_READY_ROOT, exist_ok=True)
         os.makedirs(settings.SAR_ANALYSIS_WORK_ROOT, exist_ok=True)
+        os.makedirs(settings.TASK_POOL_ROOT, exist_ok=True)
+        os.makedirs(settings.DINSAR_TASK_POOL_ROOT, exist_ok=True)
+        os.makedirs(settings.SBAS_TASK_POOL_ROOT, exist_ok=True)
         for path in split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS):
             os.makedirs(path, exist_ok=True)
         for path in split_env_paths(settings.GF3_SARSCAPE_NATIVE_DIRS):

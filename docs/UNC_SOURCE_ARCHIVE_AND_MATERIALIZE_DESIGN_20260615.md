@@ -23,13 +23,15 @@ This keeps the 20 TB storage useful for long-term source management while protec
   - `LT1_ARCHIVE` and `GF3_ARCHIVE` extract to a local materialized directory.
   - Directory assets return `DIRECTORY_READY`.
 
-Default local materialize root is:
+Default source materialization is task-scoped. D-InSAR and SBAS callers should pass a Task_Pool target directory:
 
 ```text
-<PYINT_WORK_ROOT>\source_materialized\<source_format>
+D:\Task_Pool\DInSAR\<task>\master
+D:\Task_Pool\DInSAR\<task>\slave
+D:\Task_Pool\SBAS\<stack>\sources\<YYYYMMDD>
 ```
 
-Callers may pass `target_root` to force a D-InSAR Task_Pool or SBAS run-specific input directory.
+The generic materialize endpoint still accepts `target_root` for ad hoc checks. Production callers must provide a Task_Pool destination.
 
 ## Production Boundary
 
@@ -104,6 +106,29 @@ Recommended source archive layout:
         └─ S1*.EOF
 ```
 
+Recommended local Task_Pool layout:
+
+```text
+D:\Task_Pool
+  ├─ DInSAR
+  │  └─ <pair_task>
+  │     ├─ task_manifest.json
+  │     ├─ .dinsar_pair.json
+  │     ├─ master
+  │     ├─ slave
+  │     ├─ orbit
+  │     ├─ work
+  │     └─ publish
+  └─ SBAS
+     └─ <stack_task>
+        ├─ task_manifest.json
+        ├─ sbas_stack_manifest.json
+        ├─ sources
+        ├─ orbits
+        ├─ work
+        └─ publish
+```
+
 Date folders are optional for the scanner because source and orbit inventory recurse through configured roots. They are recommended for operator readability and migration checks.
 
 ## Current Local Configuration Example
@@ -114,6 +139,10 @@ The local `.env` should keep legacy local roots and UNC roots side by side durin
 SOURCE_PRODUCT_DIRS=D:\LuTan1_Image_Pool;D:\Sentinel1_Image_Pool_ZIP;\\DESKTOP-N16HJ84\InSAR_Storage_2\LuTan-1\Archive;\\DESKTOP-N16HJ84\InSAR_Storage_2\Sentinel-1\Archive
 ORBIT_SOURCE_DIRS=D:\LT1_data_lsarorbit;D:\Sentinel1_EOF_Pool;\\DESKTOP-N16HJ84\InSAR_Storage_2\Orbit\LuTan-1;\\DESKTOP-N16HJ84\InSAR_Storage_2\Orbit\Sentinel-1
 GF3_ARCHIVE_SOURCE_DIRS=\\DESKTOP-N16HJ84\InSAR_Storage_1\GaoFen-3
+TASK_POOL_ROOT=D:\Task_Pool
+DINSAR_TASK_POOL_ROOT=D:\Task_Pool\DInSAR
+SBAS_TASK_POOL_ROOT=D:\Task_Pool\SBAS
+GAMMA_SBAS_WORK_ROOT=D:\Task_Pool\SBAS
 ```
 
 Do not store SMB credentials in `.env`. Credentials should be stored in Windows Credential Manager for the account that runs the backend/worker service.
@@ -167,7 +196,7 @@ Keep `ORBIT_POOL_ENVI` and `PYINT_ORBIT_POOL_TXT` local. Add a later sync/materi
 After inventory scan verifies UNC assets:
 
 1. D-InSAR Task_Pool stores source asset IDs and archive paths.
-2. Task preparation materializes master/slave scenes and orbit files locally.
+2. Task preparation materializes master/slave scenes and orbit files under `D:\Task_Pool\DInSAR\<task>`.
 3. Engines run only against local Task_Pool paths.
 4. Results register normally.
 5. Local materialized inputs and intermediate products are eligible for cleanup after result registration.

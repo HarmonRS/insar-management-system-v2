@@ -252,3 +252,28 @@ GET  /api/sbas-insar-products/{product_id}/assets/{asset_id}
 - 选中候选可生成 Stack Manifest；
 - 结果发布支持 GeoTIFF、预览图、监测点曲线和点矢量下载；
 - 前端生产页和结果页构建通过。
+
+## 2026-06-15 SBAS Task_Pool Update
+
+Recommended SBAS work root:
+
+```text
+SBAS_TASK_POOL_ROOT=D:\Task_Pool\SBAS
+GAMMA_SBAS_WORK_ROOT=D:\Task_Pool\SBAS
+```
+
+SBAS has its own Task_Pool sub-root and must not reuse `D:\Task_Pool\DInSAR`.
+
+Recommended run layout:
+
+```text
+D:\Task_Pool\SBAS\<stack_task>
+  ├─ task_manifest.json
+  ├─ sbas_stack_manifest.json
+  ├─ sources
+  ├─ orbits
+  ├─ work
+  └─ publish
+```
+
+Source archives remain on UNC. Selected scenes and orbit files are materialized under the SBAS task directory before Gamma/LandSAR execution. Cleanup may remove `sources`, `orbits`, and `work` after result registration, but must preserve manifests, `publish`, previews, and catalog assets.

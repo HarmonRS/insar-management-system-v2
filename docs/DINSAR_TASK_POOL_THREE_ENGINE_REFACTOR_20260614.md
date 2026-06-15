@@ -210,3 +210,22 @@ Task_20250101_20250201
 - Task_Pool 根路径需要明确配置项，建议新增 `DINSAR_TASK_POOL_ROOT`，默认 `D:\Task_Pool\DInSAR`。
 - 中间文件清理需要先确认每个引擎的“可删目录”和“必须保留资产”清单，不能用一套规则覆盖全部。
 - 前端 grouped 结果视图需要兼容旧 flat API 一段时间，避免已有页面一次性断裂。
+
+## 2026-06-15 Task_Pool Materialize Update
+
+Current direction:
+
+- `TASK_POOL_ROOT` defaults to `D:\Task_Pool`.
+- `DINSAR_TASK_POOL_ROOT` defaults to `D:\Task_Pool\DInSAR`.
+- `SBAS_TASK_POOL_ROOT` defaults to `D:\Task_Pool\SBAS`.
+- D-InSAR distribution materializes source inputs inside the task folder:
+  - directory sources are copied into `master/` and `slave/`;
+  - `S1_ZIP`, `LT1_ARCHIVE`, and other supported archives are extracted into `master/` and `slave/`;
+  - staged orbit files go into `orbit/`.
+- Engines must consume local Task_Pool paths, not UNC source archive paths.
+- `.dinsar_pair.json` records `source_materialization` so cleanup can distinguish copied directories, extracted archives, and staged files.
+
+Cleanup implication:
+
+- `master/`, `slave/`, `orbit/`, and engine `work/` folders are local materialized inputs/workspace and may be cleaned after all required results are registered.
+- `publish/`, manifests, result assets, previews, and catalog metadata are preserved.

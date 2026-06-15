@@ -2,6 +2,7 @@
 import shutil
 import asyncio
 import tempfile
+import tarfile
 import zipfile
 import json
 import hashlib
@@ -41,6 +42,100 @@ def find_dinsar_source_to_copy(path: str) -> str:
     D-InSAR pairing/distribution works on the raw source product directory.
     """
     return path
+
+
+_DINSAR_ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".zip", ".tar")
+
+
+def _is_supported_archive(path: str) -> bool:
+    lower = str(path or "").lower()
+    return any(lower.endswith(suffix) for suffix in _DINSAR_ARCHIVE_SUFFIXES)
+
+
+def _safe_archive_member_name(member_name: str, archive_path: str) -> str:
+    name = str(member_name or "").replace("\\", "/").strip("/")
+    if not name or name.startswith("../") or "/../" in f"/{name}/":
+        raise ValueError(f"Unsafe archive member path in {archive_path}: {member_name}")
+    if os.path.isabs(name) or os.path.splitdrive(name)[0]:
+        raise ValueError(f"Unsafe archive member path in {archive_path}: {member_name}")
+    return name
+
+
+def _extract_archive_to_dir(archive_path: str, dest_dir: str) -> int:
+    if zipfile.is_zipfile(archive_path):
+        extracted = 0
+        with zipfile.ZipFile(archive_path) as zip_obj:
+            for info in zip_obj.infolist():
+                rel_name = _safe_archive_member_name(info.filename, archive_path)
+                dest_path = os.path.abspath(os.path.join(dest_dir, rel_name))
+                if not dest_path.startswith(os.path.abspath(dest_dir) + os.sep):
+                    raise ValueError(f"Unsafe ZIP member path: {info.filename}")
+                if info.is_dir():
+                    os.makedirs(dest_path, exist_ok=True)
+                    continue
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                with zip_obj.open(info, "r") as source, open(dest_path, "wb") as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+                extracted += 1
+        return extracted
+
+    if tarfile.is_tarfile(archive_path):
+        extracted = 0
+        with tarfile.open(archive_path, "r:*") as tar_obj:
+            for member in tar_obj:
+                rel_name = _safe_archive_member_name(member.name, archive_path)
+                dest_path = os.path.abspath(os.path.join(dest_dir, rel_name))
+                if not dest_path.startswith(os.path.abspath(dest_dir) + os.sep):
+                    raise ValueError(f"Unsafe TAR member path: {member.name}")
+                if member.isdir():
+                    os.makedirs(dest_path, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    continue
+                source = tar_obj.extractfile(member)
+                if source is None:
+                    continue
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                with source, open(dest_path, "wb") as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+                extracted += 1
+        return extracted
+
+    raise ValueError(f"Unsupported archive format: {archive_path}")
+
+
+def _materialize_dinsar_source(source_path: str, dest_dir: str) -> Dict[str, Any]:
+    normalized = os.path.normpath(os.path.abspath(str(source_path or "")))
+    if not os.path.exists(normalized):
+        raise FileNotFoundError(normalized)
+
+    if os.path.isdir(normalized):
+        shutil.copytree(normalized, dest_dir, dirs_exist_ok=True)
+        return {"mode": "copy_directory", "source_path": normalized}
+
+    if os.path.isfile(normalized) and _is_supported_archive(normalized):
+        os.makedirs(dest_dir, exist_ok=True)
+        extracted = _extract_archive_to_dir(normalized, dest_dir)
+        if extracted <= 0:
+            raise OSError(f"Archive extraction produced no files: {normalized}")
+        return {
+            "mode": "extract_archive",
+            "source_path": normalized,
+            "archive_path": normalized,
+            "extracted_files": extracted,
+        }
+
+    if os.path.isfile(normalized):
+        os.makedirs(dest_dir, exist_ok=True)
+        target = os.path.join(dest_dir, os.path.basename(normalized))
+        shutil.copy2(normalized, target)
+        return {
+            "mode": "copy_file",
+            "source_path": normalized,
+            "relative_path": os.path.basename(target),
+        }
+
+    raise FileNotFoundError(normalized)
 
 
 def _resolve_orbit_dest_path(
@@ -191,6 +286,7 @@ def _build_dinsar_pair_metadata(
     package_format: str,
     include_orbit_files: bool,
     orbit_entries: List[Dict[str, Any]],
+    source_materialization: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
         "pair_key": item.get("pair_key"),
@@ -214,6 +310,7 @@ def _build_dinsar_pair_metadata(
         "master_orbit_file_path": item.get("master_orbit_file_path"),
         "slave_orbit_file_path": item.get("slave_orbit_file_path"),
         "orbit_files": orbit_entries,
+        "source_materialization": source_materialization or {},
         "scene_pair_uid": item.get("scene_pair_uid") or item.get("pair_uid"),
         "pair_uid": item.get("pair_uid") or item.get("scene_pair_uid"),
         "network_run_id": item.get("network_run_id"),
@@ -1094,8 +1191,26 @@ async def run_dinsar_copy_items(
                     failed_count += 1
                     continue
 
-                await asyncio.to_thread(shutil.copytree, master_src_path, master_dir, dirs_exist_ok=True)
-                await asyncio.to_thread(shutil.copytree, slave_src_path, slave_dir, dirs_exist_ok=True)
+                master_materialization = await asyncio.to_thread(
+                    _materialize_dinsar_source,
+                    master_src_path,
+                    master_dir,
+                )
+                slave_materialization = await asyncio.to_thread(
+                    _materialize_dinsar_source,
+                    slave_src_path,
+                    slave_dir,
+                )
+                source_materialization = {
+                    "master": {
+                        **master_materialization,
+                        "target_relative_path": "master",
+                    },
+                    "slave": {
+                        **slave_materialization,
+                        "target_relative_path": "slave",
+                    },
+                }
                 orbit_entries = await _copy_dinsar_orbit_files(
                     task_id,
                     item,
@@ -1112,6 +1227,7 @@ async def run_dinsar_copy_items(
                         "zip" if export_zip else "folder",
                         include_orbit_files,
                         orbit_entries,
+                        source_materialization,
                     ),
                 )
                 if export_zip and zip_path:
