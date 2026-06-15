@@ -796,23 +796,28 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
       return;
     }
     setGf3ScanLoading(true);
-    setGf3Message('GF3 扫描启动中...');
+    setGf3Message('GF3 资产扫描启动中...');
     try {
-      const res = await fetch(`${apiEndpoint}/monitor/run-now?target=gf3`, {
-        method: 'POST',
-        credentials: 'include',
+      const inventoryStatus = await getAssetInventoryStatus();
+      const gf3SourcePathSet = new Set(config.gf3_archive_source_dirs.map(normalizeComparePath));
+      const rootIds = (inventoryStatus?.states || [])
+        .filter((item) => item?.inventory_type === 'source_product' && gf3SourcePathSet.has(normalizeComparePath(item?.root_path)))
+        .map((item) => item.root_ref_id)
+        .filter((value, index, array) => value && array.indexOf(value) === index);
+      const data = await scanAssetInventory({
+        inventory_types: ['source_product'],
+        root_ids: rootIds,
+        bind_orbits: false,
       });
-      const data = await parseJsonSafe(res, {});
-      if (res.ok) {
-        setGf3Message(data.message || 'GF3 扫描任务已启动');
-        if (onTaskStart) {
-          onTaskStart(data.task_id, '已触发 GF3 手动扫描...');
-        }
-      } else {
-        setGf3Message(`失败：${data.detail || '未知错误'}`);
+      setGf3Message(data.message || 'GF3 资产扫描任务已启动');
+      if (onTaskStart) {
+        onTaskStart(data.task_id, '已触发 GF3 资产扫描...', {
+          nonBlocking: true,
+          taskType: 'SCAN_ASSET_INVENTORY',
+        });
       }
     } catch (err) {
-      setGf3Message(`失败：${err.message || '未知错误'}`);
+      setGf3Message(`失败：${err?.response?.data?.detail || err.message || '未知错误'}`);
     } finally {
       setGf3ScanLoading(false);
     }

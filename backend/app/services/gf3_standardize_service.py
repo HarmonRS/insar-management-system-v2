@@ -46,6 +46,19 @@ def _db_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
 
 
+def _date_to_naive_utc(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) != 8:
+        return None
+    try:
+        return datetime.strptime(digits, "%Y%m%d")
+    except ValueError:
+        return None
+
+
 def _path_kind(path: str) -> str:
     text = str(path or "").strip()
     if text.startswith("\\\\"):
@@ -534,6 +547,8 @@ async def _upsert_source_product_asset(
         return None
     standard_dir = Path(standard_dir_text)
     metadata = scene_manifest.get("metadata") or {}
+    imaging_date = str(metadata.get("imaging_date") or "").strip() or None
+    acquisition_start = _date_to_naive_utc(imaging_date)
     scene_name = scene_manifest.get("scene_name") or standard_dir.name
     now = _db_now()
     root = await _find_managed_root_for_path(db, standard_dir_text)
@@ -565,9 +580,9 @@ async def _upsert_source_product_asset(
         "absolute_orbit": metadata.get("absolute_orbit") or metadata.get("orbit_circle"),
         "relative_orbit": metadata.get("relative_orbit"),
         "orbit_direction": metadata.get("orbit_direction"),
-        "acquisition_start_time_utc": None,
+        "acquisition_start_time_utc": acquisition_start,
         "acquisition_stop_time_utc": None,
-        "imaging_date": metadata.get("imaging_date"),
+        "imaging_date": imaging_date,
         "root_ref_id": root.id if root else None,
         "root_path": root.path if root else str(standard_dir.parent),
         "file_path": standard_dir_text,
@@ -625,6 +640,8 @@ async def _upsert_radar_data(
     center_lon, center_lat = _scene_center_from_polygon(polygon)
     geom = _geom_from_polygon(polygon)
     metadata = scene_manifest.get("metadata") or {}
+    imaging_date = str(metadata.get("imaging_date") or "").strip() or None
+    acquisition_start = _date_to_naive_utc(imaging_date)
     radar_metadata = _metadata_for_radar(scene_manifest, standard_manifest)
     scene_name = scene_manifest.get("scene_name") or Path(str(scene_manifest.get("native_dir") or "")).name
     unique_id = f"gf3_sarscape:{scene_name}"
@@ -634,7 +651,7 @@ async def _upsert_radar_data(
         "unique_id": unique_id,
         "satellite": "GF3",
         "satellite_family": "GF3",
-        "imaging_date": metadata.get("imaging_date"),
+        "imaging_date": imaging_date,
         "imaging_mode": metadata.get("imaging_mode"),
         "polarization": ",".join(
             pol
@@ -644,8 +661,14 @@ async def _upsert_radar_data(
         or metadata.get("polarization"),
         "scene_center_lon": metadata.get("scene_center_lon") if metadata.get("scene_center_lon") is not None else center_lon,
         "scene_center_lat": metadata.get("scene_center_lat") if metadata.get("scene_center_lat") is not None else center_lat,
+        "acquisition_time_utc": acquisition_start.isoformat() if acquisition_start else None,
         "product_level": "L2",
-        "product_unique_id": metadata.get("product_unique_id"),
+        "product_unique_id": metadata.get("product_unique_id") or scene_name,
+        "source_product_token": scene_name,
+        "acquisition_start_time_utc": acquisition_start,
+        "acquisition_stop_time_utc": None,
+        "absolute_orbit": metadata.get("absolute_orbit") or metadata.get("orbit_circle"),
+        "relative_orbit": metadata.get("relative_orbit"),
         "source_format": SOURCE_ASSET_FORMAT,
         "source_product_ref_id": source_product_ref_id,
         "image_data_format": "GEOTIFF",
