@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -37,6 +38,11 @@ class S1BatchUnpackRequest(BaseModel):
     min_disk_space_gb: Optional[float] = Field(default=None, ge=0)
     delete_archive: Optional[bool] = None
     scan_before_unpack: bool = True
+
+
+class SourceMaterializeRequest(BaseModel):
+    target_root: Optional[str] = None
+    overwrite: bool = False
 
 
 @router.get("/inventory/status")
@@ -197,6 +203,35 @@ async def unpack_sentinel1_source_asset(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await db.commit()
     return {"message": "Sentinel-1 unpack task queued", "task_id": task_id, "job_id": job_id}
+
+
+@router.post("/sources/{asset_id}/materialize")
+async def materialize_source_asset(
+    asset_id: int,
+    request: Optional[SourceMaterializeRequest] = None,
+    admin_user: AuthUserORM = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = admin_user
+    asset = await db.get(SourceProductAssetORM, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Source product asset not found.")
+    request_data = request or SourceMaterializeRequest()
+    try:
+        result = asset_inventory_service.materialize_source_asset(
+            asset,
+            target_root=request_data.target_root,
+            overwrite=bool(request_data.overwrite),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    metadata = dict(asset.metadata_json or {})
+    metadata["last_materialized_dir"] = result.get("safe_dir") or result.get("target_dir")
+    metadata["last_materialized_at"] = datetime.utcnow().isoformat()
+    metadata["last_materialized_status"] = result.get("status")
+    asset.metadata_json = metadata
+    await db.commit()
+    return {"message": "Source asset materialized", "result": result}
 
 
 @router.post("/inventory/unpack-sentinel1", status_code=202)

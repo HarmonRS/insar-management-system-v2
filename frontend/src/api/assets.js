@@ -18,5 +18,8 @@ export const listAssetIssues = (params = {}) =>
 export const unpackSentinel1Source = (assetId, payload = {}) =>
   apiClient.post(`/assets/sources/${assetId}/unpack-sentinel1`, payload).then(r => r.data);
 
+export const materializeSourceAsset = (assetId, payload = {}) =>
+  apiClient.post(`/assets/sources/${assetId}/materialize`, payload).then(r => r.data);
+
 export const unpackSentinel1Batch = (payload = {}) =>
   apiClient.post('/assets/inventory/unpack-sentinel1', payload).then(r => r.data);

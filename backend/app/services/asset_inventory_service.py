@@ -5,8 +5,10 @@ import hashlib
 import os
 import re
 import shutil
+import tarfile
 import zipfile
 from datetime import datetime, timedelta
+from pathlib import PurePosixPath
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from geoalchemy2.shape import from_shape
@@ -30,6 +32,7 @@ from ..models import (
 from ..utils import (
     find_xml_file,
     normalize_satellite_family,
+    parse_gf3_l2_dirname,
     parse_lt1_radar_filename,
     parse_xml_metadata,
 )
@@ -68,6 +71,8 @@ _LT1_ORBIT_RE = re.compile(
     r"^(?P<satellite>LT1[A-Z]?)_GpsData_GAS_C_(?P<date>\d{8})\.txt$",
     re.IGNORECASE,
 )
+_LT1_ARCHIVE_EXTS = (".tar.gz", ".tgz", ".zip", ".tar")
+_GF3_ARCHIVE_EXTS = (".tar.gz", ".tgz", ".zip", ".tar")
 
 
 def _parse_bool(value: Any, default: bool = False) -> bool:
@@ -190,11 +195,165 @@ def _asset_uid(prefix: str, path: str) -> str:
 
 def _strip_known_suffix(name: str) -> str:
     lower = name.lower()
+    for suffix in (".tar.gz", ".tgz"):
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
     if lower.endswith(".zip"):
+        return name[:-4]
+    if lower.endswith(".tar"):
         return name[:-4]
     if lower.endswith(".safe"):
         return name[:-5]
     return name
+
+
+def _has_archive_suffix(name: str, suffixes: Sequence[str]) -> bool:
+    lower = str(name or "").lower()
+    return any(lower.endswith(suffix) for suffix in suffixes)
+
+
+def _archive_member_base_name(member_name: str) -> str:
+    text = str(member_name or "").replace("\\", "/").strip("/")
+    return PurePosixPath(text).name
+
+
+def _archive_member_scene_name(member_name: str, fallback: str) -> str:
+    parts = [part for part in str(member_name or "").replace("\\", "/").split("/") if part]
+    for part in parts:
+        stem = _strip_known_suffix(part)
+        if parse_lt1_radar_filename(stem) or parse_gf3_l2_dirname(stem):
+            return stem
+    return fallback
+
+
+def _archive_read_first_matching(path: str, predicate: Callable[[str], bool]) -> Tuple[Optional[str], Optional[bytes], List[str]]:
+    members: List[str] = []
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                name = info.filename
+                if info.is_dir():
+                    continue
+                members.append(name)
+                if predicate(name):
+                    return name, archive.read(info), members
+        return None, None, members
+
+    if tarfile.is_tarfile(path):
+        with tarfile.open(path, "r:*") as archive:
+            for member in archive:
+                name = member.name
+                if not member.isfile():
+                    continue
+                members.append(name)
+                if predicate(name):
+                    source = archive.extractfile(member)
+                    if source is None:
+                        continue
+                    with source:
+                        return name, source.read(), members
+        return None, None, members
+
+    return None, None, members
+
+
+def _archive_list_matching(path: str, predicate: Callable[[str], bool], *, limit: int = 20) -> List[str]:
+    matches: List[str] = []
+
+    def _visit(name: str) -> None:
+        if predicate(name):
+            matches.append(name)
+
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                _visit(info.filename)
+                if len(matches) >= limit:
+                    break
+        return matches
+
+    if tarfile.is_tarfile(path):
+        with tarfile.open(path, "r:*") as archive:
+            for member in archive:
+                if not member.isfile():
+                    continue
+                _visit(member.name)
+                if len(matches) >= limit:
+                    break
+    return matches
+
+
+def _safe_archive_member_name(member_name: str, archive_path: str) -> str:
+    name = str(member_name or "").replace("\\", "/").strip("/")
+    if not name or name.startswith("../") or "/../" in f"/{name}/":
+        raise ValueError(f"Unsafe archive member path in {archive_path}: {member_name}")
+    if os.path.isabs(name) or os.path.splitdrive(name)[0]:
+        raise ValueError(f"Unsafe archive member path in {archive_path}: {member_name}")
+    return name
+
+
+def _extract_archive_to_dir(archive_path: str, target_dir: str, *, overwrite: bool = False) -> Dict[str, Any]:
+    archive = _normalize_path(archive_path)
+    target = _normalize_path(target_dir)
+    if not os.path.isfile(archive):
+        raise FileNotFoundError(f"Archive does not exist: {archive}")
+    if os.path.exists(target):
+        if not overwrite:
+            return {"status": "EXISTS", "archive_path": archive, "target_dir": target, "extracted": False, "member_count": None}
+        shutil.rmtree(target)
+
+    tmp_dir = target + ".materialize_tmp"
+    if os.path.exists(tmp_dir):
+        shutil.rmtree(tmp_dir)
+    os.makedirs(tmp_dir, exist_ok=True)
+    extracted = 0
+    try:
+        if zipfile.is_zipfile(archive):
+            with zipfile.ZipFile(archive) as zip_obj:
+                for info in zip_obj.infolist():
+                    rel_name = _safe_archive_member_name(info.filename, archive)
+                    destination = os.path.abspath(os.path.join(tmp_dir, rel_name))
+                    if not destination.startswith(os.path.abspath(tmp_dir) + os.sep):
+                        raise ValueError(f"Unsafe ZIP member path: {info.filename}")
+                    if info.is_dir():
+                        os.makedirs(destination, exist_ok=True)
+                        continue
+                    os.makedirs(os.path.dirname(destination), exist_ok=True)
+                    with zip_obj.open(info, "r") as source, open(destination, "wb") as target_stream:
+                        shutil.copyfileobj(source, target_stream, length=1024 * 1024)
+                    extracted += 1
+        elif tarfile.is_tarfile(archive):
+            with tarfile.open(archive, "r:*") as tar_obj:
+                for member in tar_obj:
+                    rel_name = _safe_archive_member_name(member.name, archive)
+                    destination = os.path.abspath(os.path.join(tmp_dir, rel_name))
+                    if not destination.startswith(os.path.abspath(tmp_dir) + os.sep):
+                        raise ValueError(f"Unsafe TAR member path: {member.name}")
+                    if member.isdir():
+                        os.makedirs(destination, exist_ok=True)
+                        continue
+                    if not member.isfile():
+                        continue
+                    source = tar_obj.extractfile(member)
+                    if source is None:
+                        continue
+                    os.makedirs(os.path.dirname(destination), exist_ok=True)
+                    with source, open(destination, "wb") as target_stream:
+                        shutil.copyfileobj(source, target_stream, length=1024 * 1024)
+                    extracted += 1
+        else:
+            raise ValueError(f"Unsupported archive format: {archive}")
+
+        if extracted <= 0:
+            raise OSError(f"Archive extraction produced no files: {archive}")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        os.replace(tmp_dir, target)
+        return {"status": "EXTRACTED", "archive_path": archive, "target_dir": target, "extracted": True, "member_count": extracted}
+    finally:
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _parse_datetime_token(value: Optional[str]) -> Optional[datetime]:
@@ -214,6 +373,105 @@ def _parse_datetime_token(value: Optional[str]) -> Optional[datetime]:
         return datetime.strptime(text, "%Y%m%dT%H%M%S")
     except ValueError:
         return None
+
+
+def _xml_text_by_local_names(root: etree._Element, names: Sequence[str]) -> Optional[str]:
+    name_set = {str(item).lower() for item in names}
+    for element in root.iter():
+        local_name = etree.QName(element).localname.lower()
+        if local_name not in name_set:
+            continue
+        text = str(element.text or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _xml_text_under_local_path(root: etree._Element, parent_name: str, child_name: str) -> Optional[str]:
+    parent_key = parent_name.lower()
+    child_key = child_name.lower()
+    for parent in root.iter():
+        if etree.QName(parent).localname.lower() != parent_key:
+            continue
+        for child in parent.iter():
+            if child is parent:
+                continue
+            if etree.QName(child).localname.lower() == child_key:
+                text = str(child.text or "").strip()
+                if text:
+                    return text
+    return None
+
+
+def _xml_float(value: Optional[str]) -> Optional[float]:
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_radar_xml_metadata_bytes(data: bytes) -> Tuple[Optional[List[Tuple[float, float]]], Dict[str, Any]]:
+    parser = _xml_parser()
+    root = etree.fromstring(data, parser=parser)
+
+    corners: List[Tuple[float, float]] = []
+    for element in root.iter():
+        if etree.QName(element).localname.lower() != "scenecornercoord":
+            continue
+        lon = _xml_float(_xml_text_under_local_path(element, "sceneCornerCoord", "lon") or _xml_text_by_local_names(element, ["lon"]))
+        lat = _xml_float(_xml_text_under_local_path(element, "sceneCornerCoord", "lat") or _xml_text_by_local_names(element, ["lat"]))
+        if lon is not None and lat is not None:
+            corners.append((lon, lat))
+
+    coverage_polygon: Optional[List[Tuple[float, float]]] = None
+    if len(corners) >= 4:
+        coverage_polygon = corners[:4]
+        if coverage_polygon[0] != coverage_polygon[-1]:
+            coverage_polygon.append(coverage_polygon[0])
+
+    start_time = (
+        _xml_text_under_local_path(root, "start", "timeUTC")
+        or _xml_text_by_local_names(root, ["startTime", "start_time", "beginPosition"])
+    )
+    stop_time = (
+        _xml_text_under_local_path(root, "stop", "timeUTC")
+        or _xml_text_by_local_names(root, ["stopTime", "stop_time", "endPosition"])
+    )
+    center_lon = _xml_float(_xml_text_under_local_path(root, "sceneCenterCoord", "lon"))
+    center_lat = _xml_float(_xml_text_under_local_path(root, "sceneCenterCoord", "lat"))
+    metadata = {
+        "orbit_direction": (_xml_text_by_local_names(root, ["pass", "orbitDirection"]) or "").upper() or None,
+        "imaging_mode": _xml_text_under_local_path(root, "acquisitionInfo", "imagingMode")
+        or _xml_text_under_local_path(root, "orderInfo", "imagingMode")
+        or _xml_text_by_local_names(root, ["imagingMode"]),
+        "polarization": _xml_text_under_local_path(root, "acquisitionInfo", "polarisationMode")
+        or _xml_text_under_local_path(root, "polarisationList", "polLayer")
+        or _xml_text_under_local_path(root, "polList", "polLayer")
+        or _xml_text_by_local_names(root, ["polarisationMode", "polarization", "polarisation", "polLayer"]),
+        "receiving_station": _xml_text_under_local_path(root, "generationInfo", "receivingStation")
+        or _xml_text_by_local_names(root, ["receivingStation"]),
+        "satellite_mode": _xml_text_by_local_names(root, ["satelliteMode"]),
+        "orbit_circle": _xml_text_under_local_path(root, "missionInfo", "absOrbit")
+        or _xml_text_by_local_names(root, ["absOrbit", "absoluteOrbit"]),
+        "relative_orbit": _xml_text_under_local_path(root, "missionInfo", "relOrbit")
+        or _xml_text_by_local_names(root, ["relOrbit", "relativeOrbit"]),
+        "scene_center_lon": center_lon,
+        "scene_center_lat": center_lat,
+        "acquisition_time_utc": start_time,
+        "acquisition_stop_time_utc": stop_time,
+        "product_type": _xml_text_under_local_path(root, "imageDataInfo", "imageDataType")
+        or _xml_text_under_local_path(root, "orderInfo", "productVariant")
+        or _xml_text_by_local_names(root, ["productType", "imageDataType", "productVariant"]),
+        "image_data_format": _xml_text_under_local_path(root, "imageDataInfo", "imageDataFormat")
+        or _xml_text_by_local_names(root, ["imageDataFormat"]),
+        "product_level": _xml_text_by_local_names(root, ["productLevel", "itemName"]),
+        "product_unique_id": _xml_text_by_local_names(root, ["logicalProductID", "sceneID", "productID"]),
+        "look_direction": (_xml_text_under_local_path(root, "acquisitionInfo", "lookDirection") or "").upper() or None,
+        "coverage_polygon": coverage_polygon,
+    }
+    return coverage_polygon, {key: value for key, value in metadata.items() if value not in (None, "", [])}
 
 
 def _date_start_stop(date_yyyymmdd: str) -> Tuple[Optional[datetime], Optional[datetime]]:
@@ -416,6 +674,62 @@ def _parse_s1_safe_manifest(path: str) -> Dict[str, Any]:
         }
 
 
+def _parse_lt1_archive_metadata(path: str) -> Dict[str, Any]:
+    archive_stem = _strip_known_suffix(os.path.basename(path))
+    xml_member, xml_data, members = _archive_read_first_matching(
+        path,
+        lambda name: _archive_member_base_name(name).lower().endswith(".meta.xml"),
+    )
+    tiff_members = _archive_list_matching(
+        path,
+        lambda name: _archive_member_base_name(name).lower().endswith((".tiff", ".tif")),
+        limit=8,
+    )
+    if not xml_member or not xml_data:
+        return {
+            "archive_parse_status": "MISSING_XML",
+            "archive_member_count_scanned": len(members),
+            "contained_tiff_members": tiff_members,
+        }
+    coverage_polygon, xml_meta = _parse_radar_xml_metadata_bytes(xml_data)
+    return {
+        "archive_parse_status": "OK",
+        "archive_xml_member": xml_member,
+        "archive_scene_name": _archive_member_scene_name(xml_member, archive_stem),
+        "contained_tiff_members": tiff_members,
+        "coverage_polygon": coverage_polygon,
+        **xml_meta,
+    }
+
+
+def _parse_gf3_archive_metadata(path: str) -> Dict[str, Any]:
+    archive_stem = _strip_known_suffix(os.path.basename(path))
+    xml_member, xml_data, members = _archive_read_first_matching(
+        path,
+        lambda name: _archive_member_base_name(name).lower().endswith(".xml"),
+    )
+    quicklooks = _archive_list_matching(
+        path,
+        lambda name: _archive_member_base_name(name).lower().endswith((".jpg", ".jpeg", ".png", ".bmp", "_ql.tif", "_ql.tiff")),
+        limit=8,
+    )
+    if not xml_member or not xml_data:
+        return {
+            "archive_parse_status": "MISSING_XML",
+            "archive_member_count_scanned": len(members),
+            "quicklook_members": quicklooks,
+        }
+    coverage_polygon, xml_meta = _parse_radar_xml_metadata_bytes(xml_data)
+    return {
+        "archive_parse_status": "OK",
+        "archive_xml_member": xml_member,
+        "archive_scene_name": _archive_member_scene_name(xml_member, archive_stem),
+        "quicklook_members": quicklooks,
+        "coverage_polygon": coverage_polygon,
+        **xml_meta,
+    }
+
+
 def _parse_s1_eof_header(path: str) -> Dict[str, Any]:
     try:
         root = etree.parse(path, parser=_xml_parser()).getroot()
@@ -443,6 +757,7 @@ def _parse_source_entry(path: str, root: ManagedRootORM) -> Optional[Dict[str, A
     lower_name = name.lower()
     stat = _stat_path(path)
     now = _utcnow()
+    name_stem = _strip_known_suffix(name)
 
     if lower_name.endswith(".zip") and name.upper().startswith("S1"):
         name_meta = _parse_s1_source_name(name)
@@ -458,6 +773,55 @@ def _parse_source_entry(path: str, root: ManagedRootORM) -> Optional[Dict[str, A
             parse_error = str(exc)
             manifest_meta = {"manifest_parse_status": "FAILED", "manifest_parse_error": str(exc)}
         return _build_s1_source_asset(path, root, name_meta, manifest_meta, stat, parse_status, parse_error, now)
+
+    if _has_archive_suffix(name, _LT1_ARCHIVE_EXTS) and name_stem.upper().startswith("LT1"):
+        parsed = parse_lt1_radar_filename(name_stem)
+        if not parsed:
+            return None
+        parse_status = "OK"
+        parse_error = None
+        archive_meta: Dict[str, Any] = {}
+        try:
+            archive_meta = _parse_lt1_archive_metadata(path)
+            if archive_meta.get("archive_parse_status") != "OK":
+                parse_status = "PARTIAL"
+                parse_error = str(archive_meta.get("archive_parse_status") or "archive metadata incomplete")
+        except Exception as exc:
+            parse_status = "PARTIAL"
+            parse_error = str(exc)
+            archive_meta = {"archive_parse_status": "FAILED", "archive_parse_error": str(exc)}
+        return _build_lt1_source_asset(
+            path,
+            root,
+            parsed,
+            archive_meta,
+            archive_meta.get("coverage_polygon"),
+            stat,
+            now,
+            source_format="LT1_ARCHIVE",
+            archive_path=path,
+            parser_name="lt1_archive_metadata",
+            parse_status=parse_status,
+            parse_error=parse_error,
+        )
+
+    if _has_archive_suffix(name, _GF3_ARCHIVE_EXTS) and name_stem.upper().startswith("GF3"):
+        parsed = parse_gf3_l2_dirname(name_stem)
+        if not parsed:
+            return None
+        parse_status = "OK"
+        parse_error = None
+        archive_meta = {}
+        try:
+            archive_meta = _parse_gf3_archive_metadata(path)
+            if archive_meta.get("archive_parse_status") != "OK":
+                parse_status = "PARTIAL"
+                parse_error = str(archive_meta.get("archive_parse_status") or "archive metadata incomplete")
+        except Exception as exc:
+            parse_status = "PARTIAL"
+            parse_error = str(exc)
+            archive_meta = {"archive_parse_status": "FAILED", "archive_parse_error": str(exc)}
+        return _build_gf3_archive_asset(path, root, parsed, archive_meta, stat, parse_status, parse_error, now)
 
     if lower_name.endswith(".safe") and os.path.isdir(path) and name.upper().startswith("S1"):
         name_meta = _parse_s1_source_name(name)
@@ -569,6 +933,12 @@ def _build_lt1_source_asset(
     coverage_polygon: Optional[List[Tuple[float, float]]],
     stat: Dict[str, Optional[float]],
     now: datetime,
+    *,
+    source_format: str = "LT1_DIR",
+    archive_path: Optional[str] = None,
+    parser_name: str = "lt1_source_directory",
+    parse_status: str = "OK",
+    parse_error: Optional[str] = None,
 ) -> Dict[str, Any]:
     metadata = dict(parsed)
     metadata.update({key: value for key, value in xml_meta.items() if value not in (None, "")})
@@ -582,35 +952,99 @@ def _build_lt1_source_asset(
 
     return {
         "asset_uid": _asset_uid("source", path),
-        "logical_product_uid": os.path.basename(path),
+        "logical_product_uid": _strip_known_suffix(os.path.basename(path)),
         "satellite_family": normalize_satellite_family(satellite),
         "satellite": satellite,
-        "source_format": "LT1_DIR",
-        "product_type": parsed.get("product_type"),
-        "product_level": parsed.get("product_level"),
-        "imaging_mode": parsed.get("imaging_mode"),
-        "polarization": parsed.get("polarization"),
-        "absolute_orbit": parsed.get("orbit_circle"),
-        "relative_orbit": None,
+        "source_format": source_format,
+        "product_type": xml_meta.get("product_type") or parsed.get("product_type"),
+        "product_level": xml_meta.get("product_level") or parsed.get("product_level"),
+        "imaging_mode": xml_meta.get("imaging_mode") or parsed.get("imaging_mode"),
+        "polarization": xml_meta.get("polarization") or parsed.get("polarization"),
+        "absolute_orbit": xml_meta.get("orbit_circle") or parsed.get("orbit_circle"),
+        "relative_orbit": xml_meta.get("relative_orbit"),
         "orbit_direction": xml_meta.get("orbit_direction") or parsed.get("orbit_direction"),
-        "acquisition_start_time_utc": None,
-        "acquisition_stop_time_utc": None,
+        "acquisition_start_time_utc": _parse_datetime_token(xml_meta.get("acquisition_time_utc")),
+        "acquisition_stop_time_utc": _parse_datetime_token(xml_meta.get("acquisition_stop_time_utc")),
         "imaging_date": imaging_date,
         "root_ref_id": root.id,
         "root_path": root.path,
         "file_path": path,
-        "archive_path": None,
+        "archive_path": archive_path,
         "path_kind": _path_kind(path),
         "file_name": os.path.basename(path),
-        "file_stem": os.path.basename(path),
-        "file_ext": "",
+        "file_stem": _strip_known_suffix(os.path.basename(path)),
+        "file_ext": os.path.splitext(path)[1].lower(),
         "size_bytes": stat.get("size_bytes"),
         "mtime_epoch": stat.get("mtime_epoch"),
         "checksum_status": "NOT_COMPUTED",
-        "parser_name": "lt1_source_directory",
+        "parser_name": parser_name,
         "parser_version": PARSER_VERSION,
-        "parse_status": "OK",
-        "parse_error": None,
+        "parse_status": parse_status,
+        "parse_error": parse_error,
+        "parsed_at": now,
+        "metadata_json": _json_safe(metadata),
+        "is_active": True,
+        "missing_since": None,
+        "updated_at": now,
+    }
+
+
+def _build_gf3_archive_asset(
+    path: str,
+    root: ManagedRootORM,
+    parsed: Dict[str, Any],
+    archive_meta: Dict[str, Any],
+    stat: Dict[str, Optional[float]],
+    parse_status: str,
+    parse_error: Optional[str],
+    now: datetime,
+) -> Dict[str, Any]:
+    coverage_polygon = archive_meta.get("coverage_polygon")
+    metadata = dict(parsed)
+    metadata.update({key: value for key, value in archive_meta.items() if value not in (None, "")})
+    metadata["coverage_polygon"] = coverage_polygon
+    metadata["coverage_bbox"] = _bbox_from_polygon(coverage_polygon)
+    centroid_lon, centroid_lat = _centroid_from_polygon(coverage_polygon)
+    metadata["scene_center_lon"] = parsed.get("scene_center_lon") if parsed.get("scene_center_lon") is not None else centroid_lon
+    metadata["scene_center_lat"] = parsed.get("scene_center_lat") if parsed.get("scene_center_lat") is not None else centroid_lat
+    start_time = _parse_datetime_token(archive_meta.get("acquisition_time_utc"))
+    stop_time = _parse_datetime_token(archive_meta.get("acquisition_stop_time_utc"))
+    imaging_date = parsed.get("imaging_date")
+    if not imaging_date and start_time:
+        imaging_date = start_time.strftime("%Y%m%d")
+    stem = _strip_known_suffix(os.path.basename(path))
+
+    return {
+        "asset_uid": _asset_uid("source", path),
+        "logical_product_uid": archive_meta.get("product_unique_id") or stem,
+        "satellite_family": "GF3",
+        "satellite": "GF3",
+        "source_format": "GF3_ARCHIVE",
+        "product_type": archive_meta.get("product_type") or parsed.get("product_type") or "L1A",
+        "product_level": archive_meta.get("product_level") or parsed.get("product_level") or "L1A",
+        "imaging_mode": archive_meta.get("imaging_mode") or parsed.get("imaging_mode"),
+        "polarization": archive_meta.get("polarization") or parsed.get("polarization"),
+        "absolute_orbit": archive_meta.get("orbit_circle") or parsed.get("orbit_circle"),
+        "relative_orbit": archive_meta.get("relative_orbit"),
+        "orbit_direction": archive_meta.get("orbit_direction") or parsed.get("orbit_direction"),
+        "acquisition_start_time_utc": start_time,
+        "acquisition_stop_time_utc": stop_time,
+        "imaging_date": imaging_date,
+        "root_ref_id": root.id,
+        "root_path": root.path,
+        "file_path": path,
+        "archive_path": path,
+        "path_kind": _path_kind(path),
+        "file_name": os.path.basename(path),
+        "file_stem": stem,
+        "file_ext": os.path.splitext(path)[1].lower(),
+        "size_bytes": stat.get("size_bytes"),
+        "mtime_epoch": stat.get("mtime_epoch"),
+        "checksum_status": "NOT_COMPUTED",
+        "parser_name": "gf3_archive_metadata",
+        "parser_version": PARSER_VERSION,
+        "parse_status": parse_status,
+        "parse_error": parse_error,
         "parsed_at": now,
         "metadata_json": _json_safe(metadata),
         "is_active": True,
@@ -732,6 +1166,9 @@ def _iter_source_candidates(root_path: str) -> Iterable[str]:
                                 yield _normalize_path(entry.path)
                                 continue
                             stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            if entry.name.upper().startswith("S1") and entry.name.lower().endswith(".zip"):
+                                yield _normalize_path(entry.path)
                     except OSError:
                         continue
         except OSError:
@@ -749,8 +1186,17 @@ def _iter_s1_zip_candidates(root_path: str) -> Iterable[str]:
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
-                            if entry.name.upper().startswith("S1") and entry.name.lower().endswith(".zip"):
+                            name_upper = entry.name.upper()
+                            stem_upper = _strip_known_suffix(entry.name).upper()
+                            if name_upper.startswith("S1") and entry.name.lower().endswith(".zip"):
                                 yield _normalize_path(entry.path)
+                                continue
+                            if stem_upper.startswith("LT1") and _has_archive_suffix(entry.name, _LT1_ARCHIVE_EXTS):
+                                yield _normalize_path(entry.path)
+                                continue
+                            if stem_upper.startswith("GF3") and _has_archive_suffix(entry.name, _GF3_ARCHIVE_EXTS):
+                                yield _normalize_path(entry.path)
+                                continue
                     except OSError:
                         continue
         except OSError:
@@ -860,6 +1306,13 @@ def _insar_source_ready(row: Dict[str, Any], coverage_polygon: Optional[List[Tup
     return True, None
 
 
+def _image_data_format_for_source(row: Dict[str, Any]) -> str:
+    source_format = str(row.get("source_format") or "").upper()
+    if source_format in {"S1_ZIP", "LT1_ARCHIVE", "GF3_ARCHIVE"}:
+        return "ARCHIVE"
+    return "DIRECTORY"
+
+
 class AssetInventoryService:
     async def _progress(self, task_id: Optional[str], message: str, progress: int) -> None:
         if not task_id:
@@ -876,7 +1329,12 @@ class AssetInventoryService:
         type_set = {str(item or "").strip().lower() for item in (inventory_types or []) if str(item or "").strip()}
         roles: List[str] = []
         if not type_set or "source_product" in type_set or "source" in type_set:
-            roles.append("source_product_pool")
+            roles.extend(
+                [
+                    "source_product_pool",
+                    "source_pool_gf3_archive",
+                ]
+            )
         if not type_set or "orbit_asset" in type_set or "orbit" in type_set:
             roles.append("orbit_asset_pool")
         stmt = (
@@ -921,7 +1379,7 @@ class AssetInventoryService:
             for index, root in enumerate(roots, start=1):
                 progress = 5 + int((index - 1) / max(1, total_roots) * 75)
                 await self._progress(task_id, f"Scanning {root.display_name}: {root.path}", progress)
-                if root.root_role == "source_product_pool":
+                if root.root_role in {"source_product_pool", "source_pool_gf3_archive"}:
                     result = await self.scan_source_root(db, root)
                     totals["source_roots"] += 1
                     totals["source_assets"] += int(result.get("asset_count") or 0)
@@ -1453,6 +1911,39 @@ class AssetInventoryService:
             "member_count": len(names),
         }
 
+    def materialize_source_asset(
+        self,
+        asset: SourceProductAssetORM,
+        *,
+        target_root: Optional[str] = None,
+        overwrite: bool = False,
+    ) -> Dict[str, Any]:
+        source_format = str(asset.source_format or "").upper()
+        source_path = _normalize_path(str(asset.archive_path or asset.file_path or ""))
+        if not source_path:
+            raise ValueError("Source asset path is empty.")
+        if source_format == "S1_ZIP":
+            return self.unpack_sentinel1_archive(source_path, target_root=target_root, overwrite=overwrite)
+        if source_format not in {"LT1_ARCHIVE", "GF3_ARCHIVE"}:
+            if os.path.isdir(source_path):
+                return {
+                    "status": "DIRECTORY_READY",
+                    "source_path": source_path,
+                    "target_dir": source_path,
+                    "extracted": False,
+                    "source_format": source_format,
+                }
+            raise ValueError(f"Source format is not materializable from archive: {source_format}")
+
+        requested_root = _normalize_path(target_root or "")
+        if not requested_root:
+            requested_root = _normalize_path(os.path.join(settings.PYINT_WORK_ROOT, "source_materialized", source_format.lower()))
+        scene_name = _strip_known_suffix(os.path.basename(source_path))
+        target_dir = os.path.join(requested_root, scene_name)
+        result = _extract_archive_to_dir(source_path, target_dir, overwrite=overwrite)
+        result["source_format"] = source_format
+        return result
+
     async def run_sentinel1_unpack_task(self, task_id: str, payload: Optional[Dict[str, Any]] = None) -> None:
         payload = payload if isinstance(payload, dict) else {}
         asset_id = payload.get("asset_id")
@@ -1831,7 +2322,7 @@ class AssetInventoryService:
                 "product_type": row.get("product_type"),
                 "source_product_token": metadata.get("filename_class_token") or metadata.get("source_product_token"),
                 "image_data_type": "COMPLEX",
-                "image_data_format": "ZIP" if row.get("source_format") == "S1_ZIP" else "DIRECTORY",
+                "image_data_format": _image_data_format_for_source(row),
                 "product_variant": metadata.get("product_variant"),
                 "product_level": row.get("product_level"),
                 "product_unique_id": row.get("logical_product_uid"),
@@ -2149,7 +2640,6 @@ class AssetInventoryService:
                 await db.execute(
                     select(func.count(SourceProductAssetORM.id)).where(
                         SourceProductAssetORM.is_active == True,  # noqa: E712
-                        SourceProductAssetORM.source_format != "S1_ZIP",
                     )
                 )
             ).scalar_one()
@@ -2202,7 +2692,6 @@ class AssetInventoryService:
         filters = []
         if not include_inactive:
             filters.append(SourceProductAssetORM.is_active == True)  # noqa: E712
-        filters.append(SourceProductAssetORM.source_format != "S1_ZIP")
         if satellite_family:
             filters.append(SourceProductAssetORM.satellite_family == satellite_family.upper())
         if satellite:
