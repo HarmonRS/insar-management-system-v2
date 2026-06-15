@@ -277,6 +277,7 @@ async def run_gf3_sarscape_produce(
         "archive_exts": split_env_paths(settings.GF3_ARCHIVE_EXTS),
         "max_archives_per_run": int(options.max_archives_per_run or 0),
         "selected_dates": selected_dates,
+        "local_staging_root": settings.GF3_TASK_POOL_ROOT,
         "timeout_seconds": int(settings.GF3_SARSCAPE_PRODUCE_TIMEOUT_SECONDS or 0),
         "keep_extracted": bool(settings.GF3_SARSCAPE_KEEP_EXTRACTED),
         "auto_standardize": bool(auto_standardize),

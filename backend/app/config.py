@@ -198,6 +198,7 @@ class Settings(BaseSettings):
     TASK_POOL_ROOT: str = ""
     DINSAR_TASK_POOL_ROOT: str = ""
     SBAS_TASK_POOL_ROOT: str = ""
+    GF3_TASK_POOL_ROOT: str = ""
     SOURCE_PRODUCT_DIRS: str = ""
     SENTINEL1_STORAGE_DIRS: str = ""
     ORBIT_SOURCE_DIRS: str = ""
@@ -458,6 +459,8 @@ class Settings(BaseSettings):
             object.__setattr__(self, "DINSAR_TASK_POOL_ROOT", os.path.join(self.TASK_POOL_ROOT, "DInSAR"))
         if not self.SBAS_TASK_POOL_ROOT:
             object.__setattr__(self, "SBAS_TASK_POOL_ROOT", os.path.join(self.TASK_POOL_ROOT, "SBAS"))
+        if not self.GF3_TASK_POOL_ROOT:
+            object.__setattr__(self, "GF3_TASK_POOL_ROOT", os.path.join(self.TASK_POOL_ROOT, "GF3"))
         if not self.SAR_ANALYSIS_READY_ROOT:
             object.__setattr__(
                 self,
@@ -1010,6 +1013,7 @@ class Settings(BaseSettings):
         os.makedirs(settings.TASK_POOL_ROOT, exist_ok=True)
         os.makedirs(settings.DINSAR_TASK_POOL_ROOT, exist_ok=True)
         os.makedirs(settings.SBAS_TASK_POOL_ROOT, exist_ok=True)
+        os.makedirs(settings.GF3_TASK_POOL_ROOT, exist_ok=True)
         for path in split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS):
             os.makedirs(path, exist_ok=True)
         for path in split_env_paths(settings.GF3_SARSCAPE_NATIVE_DIRS):

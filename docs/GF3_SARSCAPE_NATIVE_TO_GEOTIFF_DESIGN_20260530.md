@@ -499,3 +499,13 @@ GF3 SARscape production now supports an optional scene-date filter.
 - `POST /api/monitor/gf3-sarscape-produce` accepts `selected_dates: ["YYYYMMDD"]`. When omitted or empty, production keeps the previous all-date behavior.
 - The frontend monitor panel exposes a date selector in the GF3 SARscape production section. Operators can select one image date before starting production, or leave it as all dates.
 - The existing duplicate-result preflight still runs after date filtering. A selected date will not reprocess scenes whose standardized L2 result or complete native `_geo` outputs already exist.
+
+## 2026-06-15 Local Task_Pool Staging
+
+GF3 SARscape production no longer passes UNC archives directly to `gf3wrapper.exe`.
+
+- Source archives may remain on UNC storage for source management.
+- Before each wrapper run, the selected archive is copied to `GF3_TASK_POOL_ROOT\SARscape\<task_id>\<scene>\source\`.
+- The wrapper receives the local staged archive path as `-input`.
+- Native SARscape output still goes to `GF3_SARSCAPE_NATIVE_DIRS`, then standardization writes durable L2 GeoTIFFs to `GF3_STORAGE_DIRS`.
+- This avoids network extraction stalls and makes source staging part of the local Task_Pool cleanup domain.

@@ -220,6 +220,39 @@ def _scene_name_from_input(path: Path) -> str:
     return path.stem
 
 
+def _same_file_snapshot(src: Path, dst: Path) -> bool:
+    try:
+        src_stat = src.stat()
+        dst_stat = dst.stat()
+    except OSError:
+        return False
+    return int(src_stat.st_size) == int(dst_stat.st_size) and int(src_stat.st_mtime) == int(dst_stat.st_mtime)
+
+
+def _copy_source_to_local_stage(
+    source_path: Path,
+    *,
+    staging_root: Path,
+    scene_name: str,
+    log_callback: LogCallback | None = None,
+) -> Path:
+    source_path = source_path.resolve()
+    scene_stage = staging_root / _safe_slug(scene_name) / "source"
+    scene_stage.mkdir(parents=True, exist_ok=True)
+    target_path = scene_stage / source_path.name
+    if _same_file_snapshot(source_path, target_path):
+        _emit_log(log_callback, "INFO", f"GF3 SARscape using existing local staged archive: {target_path}")
+        return target_path
+
+    tmp_path = target_path.with_name(f".{target_path.name}.copying")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    _emit_log(log_callback, "INFO", f"GF3 SARscape staging source archive locally: {source_path} -> {target_path}")
+    shutil.copy2(source_path, tmp_path)
+    os.replace(tmp_path, target_path)
+    return target_path
+
+
 def discover_gf3_sarscape_inputs(
     source_dirs: list[str] | tuple[str, ...] | None,
     *,
@@ -452,6 +485,8 @@ def run_gf3_sarscape_production(
     archive_exts: list[str] | None = None,
     max_archives_per_run: int | None = None,
     selected_dates: list[str] | None = None,
+    task_id: str | None = None,
+    local_staging_root: str | None = None,
     timeout_seconds: int | None = None,
     keep_extracted: bool | None = None,
     log_callback: LogCallback | None = None,
@@ -487,10 +522,17 @@ def run_gf3_sarscape_production(
     timeout = int(timeout_seconds or 0)
     keep = bool(settings.GF3_SARSCAPE_KEEP_EXTRACTED if keep_extracted is None else keep_extracted)
     storage_root = Path(os.path.normpath(settings.GF3_STORAGE_DIRS)).resolve() if settings.GF3_STORAGE_DIRS else None
+    staging_root_text = _clean_text(local_staging_root or getattr(settings, "GF3_TASK_POOL_ROOT", ""))
+    if not staging_root_text:
+        staging_root_text = os.path.join(settings.TASK_POOL_ROOT, "GF3")
+    run_stage_name = _safe_slug(task_id or datetime.now().strftime("%Y%m%dT%H%M%S"), default="manual")
+    staging_root = Path(os.path.normpath(staging_root_text)).resolve() / "SARscape" / run_stage_name
+    staging_root.mkdir(parents=True, exist_ok=True)
 
     _emit_log(log_callback, "INFO", f"GF3 SARscape source roots: {source_dirs}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape native root: {native_root_path}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape standardized root: {storage_root or '(not configured)'}")
+    _emit_log(log_callback, "INFO", f"GF3 SARscape local staging root: {staging_root}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape wrapper: {wrapper_path}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape DEM: {dem}")
     _emit_log(log_callback, "INFO", f"GF3 SARscape polarizations: {pol_text}")
@@ -581,12 +623,19 @@ def run_gf3_sarscape_production(
             )
             continue
 
+        local_input_path = _copy_source_to_local_stage(
+            input_path,
+            staging_root=staging_root,
+            scene_name=scene_name,
+            log_callback=log_callback,
+        )
+
         cmd = [
             str(wrapper_path),
             "-config",
             str(config_path),
             "-input",
-            str(input_path),
+            str(local_input_path),
             "-output",
             str(native_root_path),
             "-dem",
@@ -598,7 +647,7 @@ def run_gf3_sarscape_production(
         if idlrt is not None:
             cmd.extend(["-idlrt", str(idlrt)])
 
-        _emit_log(log_callback, "INFO", f"GF3 SARscape processing {scene_name}: {input_path}")
+        _emit_log(log_callback, "INFO", f"GF3 SARscape processing {scene_name}: {local_input_path} (source {input_path})")
         started = time.monotonic()
         try:
             completed = _run_wrapper_command(
@@ -629,6 +678,7 @@ def run_gf3_sarscape_production(
                 {
                     "scene_name": scene_name,
                     "input_path": str(input_path),
+                    "local_input_path": str(local_input_path),
                     "scene_dir": str(scene_dir),
                     "status": status,
                     "returncode": int(completed.returncode),
@@ -645,6 +695,7 @@ def run_gf3_sarscape_production(
                 {
                     "scene_name": scene_name,
                     "input_path": str(input_path),
+                    "local_input_path": str(local_input_path) if "local_input_path" in locals() else None,
                     "scene_dir": str(scene_dir),
                     "status": "failed",
                     "error": f"timeout after {timeout}s",
@@ -657,6 +708,7 @@ def run_gf3_sarscape_production(
                 {
                     "scene_name": scene_name,
                     "input_path": str(input_path),
+                    "local_input_path": str(local_input_path) if "local_input_path" in locals() else None,
                     "scene_dir": str(scene_dir),
                     "status": "failed",
                     "error": str(exc),

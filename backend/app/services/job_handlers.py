@@ -4052,6 +4052,8 @@ async def _handle_gf3_sarscape_produce(job: SystemJobORM) -> None:
                 archive_exts=payload.get("archive_exts") or [],
                 max_archives_per_run=payload.get("max_archives_per_run"),
                 selected_dates=payload.get("selected_dates") or [],
+                task_id=job.task_id,
+                local_staging_root=payload.get("local_staging_root") or settings.GF3_TASK_POOL_ROOT,
                 timeout_seconds=payload.get("timeout_seconds"),
                 keep_extracted=payload.get("keep_extracted"),
                 log_callback=_log_cb,
