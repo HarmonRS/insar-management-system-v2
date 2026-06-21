@@ -22,21 +22,29 @@ router = APIRouter(prefix="/assets", tags=["assets"])
 class AssetScanRequest(BaseModel):
     inventory_types: List[str] = Field(default_factory=list)
     root_ids: List[int] = Field(default_factory=list)
+    families: List[str] = Field(default_factory=list)
     bind_orbits: bool = True
+    build_previews: bool = True
+
+
+class ArchiveIntegrityAuditRequest(BaseModel):
+    families: List[str] = Field(default_factory=list)
+    source_formats: List[str] = Field(default_factory=list)
+    asset_ids: List[int] = Field(default_factory=list)
+    force: bool = False
+    limit: Optional[int] = Field(default=None, ge=0)
 
 
 class S1UnpackRequest(BaseModel):
     target_root: Optional[str] = None
     overwrite: bool = False
     min_disk_space_gb: Optional[float] = Field(default=None, ge=0)
-    delete_archive: Optional[bool] = None
 
 
 class S1BatchUnpackRequest(BaseModel):
     target_root: Optional[str] = None
     overwrite: bool = False
     min_disk_space_gb: Optional[float] = Field(default=None, ge=0)
-    delete_archive: Optional[bool] = None
     scan_before_unpack: bool = True
 
 
@@ -89,7 +97,50 @@ async def run_asset_inventory_scan_now(
         db,
         inventory_types=payload.get("inventory_types") or None,
         root_ids=payload.get("root_ids") or None,
+        families=payload.get("families") or None,
         bind_orbits=bool(payload.get("bind_orbits", True)),
+        build_previews=bool(payload.get("build_previews", True)),
+    )
+
+
+@router.post("/inventory/archive-integrity-audit", status_code=202)
+async def run_archive_integrity_audit(
+    request: Optional[ArchiveIntegrityAuditRequest] = None,
+    admin_user: AuthUserORM = Depends(_require_admin),
+):
+    _ = admin_user
+    payload = (request or ArchiveIntegrityAuditRequest()).model_dump()
+    try:
+        task_id = await task_service.create_task(
+            "AUDIT_SOURCE_ARCHIVE_INTEGRITY",
+            "Source archive integrity audit",
+            params=payload,
+        )
+        job_id = await job_queue_service.create_job(
+            "AUDIT_SOURCE_ARCHIVE_INTEGRITY",
+            payload=payload,
+            task_id=task_id,
+        )
+        return {"message": "Source archive integrity audit queued", "task_id": task_id, "job_id": job_id}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/inventory/archive-integrity-audit-now")
+async def run_archive_integrity_audit_now(
+    request: Optional[ArchiveIntegrityAuditRequest] = None,
+    admin_user: AuthUserORM = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = admin_user
+    payload = (request or ArchiveIntegrityAuditRequest()).model_dump()
+    return await asset_inventory_service.audit_source_archive_integrity(
+        db,
+        families=payload.get("families") or None,
+        source_formats=payload.get("source_formats") or None,
+        asset_ids=payload.get("asset_ids") or None,
+        force=bool(payload.get("force", False)),
+        limit=payload.get("limit"),
     )
 
 
@@ -186,8 +237,6 @@ async def unpack_sentinel1_source_asset(
     }
     if request_data.min_disk_space_gb is not None:
         payload["min_disk_space_gb"] = request_data.min_disk_space_gb
-    if request_data.delete_archive is not None:
-        payload["delete_archive"] = request_data.delete_archive
     try:
         task_id = await task_service.create_task(
             "UNPACK_SENTINEL1",

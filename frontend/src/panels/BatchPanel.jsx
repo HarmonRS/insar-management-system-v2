@@ -16,12 +16,12 @@ function engineResultTone(status) {
 export default function BatchPanel() {
     const { language } = useI18n();
     const {
-        batchTab, setBatchTab,
+        setBatchTab,
         selectedBatchId, setSelectedBatchId,
         batchLoading,
         batchError,
         batchItems, setBatchItems,
-        dinsarBatches, psBatches,
+        dinsarBatches,
     } = useBatchStore();
     const { addLog } = useUiStore();
     const { currentUser } = useAuthStore();
@@ -37,7 +37,7 @@ export default function BatchPanel() {
     };
 
     const {
-        refreshBatchList,
+        fetchDinsarBatches,
         fetchBatchItems,
         updateBatchItemLocal,
         saveBatchItem,
@@ -45,49 +45,30 @@ export default function BatchPanel() {
     } = useBatchOperations({
         addLog,
         ensureCanOperate,
-        batchTab,
+        batchTab: 'dinsar',
         selectedBatchId,
         setDinsarBatches: useBatchStore.getState().setDinsarBatches,
         setPsBatches: useBatchStore.getState().setPsBatches,
         setBatchItems,
         setBatchLoading: useBatchStore.getState().setBatchLoading,
         setBatchError: useBatchStore.getState().setBatchError,
+        includePsBatches: false,
     });
 
     useEffect(() => {
-        refreshBatchList();
-    }, [refreshBatchList]);
+        setBatchTab('dinsar');
+        fetchDinsarBatches();
+    }, [fetchDinsarBatches, setBatchTab]);
 
-    const currentBatches = batchTab === 'ps' ? psBatches : dinsarBatches;
+    const currentBatches = dinsarBatches;
     const en = language === 'en';
 
     return (
         <div className="panel-content">
             <div className="list-toolbar column-layout">
                 <div className="toolbar-row">
-                    <button
-                        className={batchTab === 'dinsar' ? 'active-tool' : ''}
-                        onClick={() => {
-                            setBatchTab('dinsar');
-                            setSelectedBatchId('');
-                            setBatchItems([]);
-                            refreshBatchList();
-                        }}
-                    >
-                        D-InSAR
-                    </button>
-                    <button
-                        className={batchTab === 'ps' ? 'active-tool' : ''}
-                        onClick={() => {
-                            setBatchTab('ps');
-                            setSelectedBatchId('');
-                            setBatchItems([]);
-                            refreshBatchList();
-                        }}
-                    >
-                        PS
-                    </button>
-                    <button onClick={refreshBatchList} disabled={batchLoading}>
+                    <strong style={{ alignSelf: 'center', color: '#0f172a' }}>D-InSAR 批次</strong>
+                    <button onClick={fetchDinsarBatches} disabled={batchLoading}>
                         {batchLoading ? (en ? 'Refreshing...' : '刷新中...') : (en ? 'Refresh Batches' : '刷新批次')}
                     </button>
                 </div>
@@ -97,7 +78,7 @@ export default function BatchPanel() {
                         onChange={(e) => {
                             const nextId = e.target.value;
                             setSelectedBatchId(nextId);
-                            fetchBatchItems(batchTab, nextId);
+                            fetchBatchItems('dinsar', nextId);
                         }}
                         style={{ flex: 1, padding: '6px 8px' }}
                     >
@@ -125,33 +106,26 @@ export default function BatchPanel() {
                     {batchItems.map(item => (
                         <li key={item.id} className="batch-item">
                             <div className="batch-item-main">
-                                <strong>{batchTab === 'ps'
-                                    ? (item.file_path || '').split(/[\\/]/).pop()
-                                    : (item.task_name || `${item.master_imaging_date || ''}_${item.slave_imaging_date || ''}`)
-                                }</strong>
-                                {batchTab === 'dinsar' && (
-                                    <div className="batch-item-meta">
-                                        M: {item.master_imaging_date || '-'} / S: {item.slave_imaging_date || '-'}
-                                    </div>
-                                )}
-                                {batchTab === 'dinsar' && (
-                                    <div className="batch-engine-results">
-                                        {['sarscape', 'landsar', 'pyint'].map((engineCode) => {
-                                            const engineMeta = getDinsarEngineMeta(engineCode);
-                                            const result = item.engine_results?.[engineCode] || {};
-                                            const status = result.status || 'missing';
-                                            return (
-                                                <span
-                                                    key={engineCode}
-                                                    className={`batch-engine-chip tone-${engineResultTone(status)}`}
-                                                    title={result.skip_reason || result.run_key || ''}
-                                                >
-                                                    {engineMeta.shortLabel}: {status}
-                                                </span>
-                                            );
-                                        })}
-                                    </div>
-                                )}
+                                <strong>{item.task_name || `${item.master_imaging_date || ''}_${item.slave_imaging_date || ''}`}</strong>
+                                <div className="batch-item-meta">
+                                    M: {item.master_imaging_date || '-'} / S: {item.slave_imaging_date || '-'}
+                                </div>
+                                <div className="batch-engine-results">
+                                    {['sarscape', 'landsar', 'pyint'].map((engineCode) => {
+                                        const engineMeta = getDinsarEngineMeta(engineCode);
+                                        const result = item.engine_results?.[engineCode] || {};
+                                        const status = result.status || 'missing';
+                                        return (
+                                            <span
+                                                key={engineCode}
+                                                className={`batch-engine-chip tone-${engineResultTone(status)}`}
+                                                title={result.skip_reason || result.run_key || ''}
+                                            >
+                                                {engineMeta.shortLabel}: {status}
+                                            </span>
+                                        );
+                                    })}
+                                </div>
                             </div>
                             <select
                                 value={item.status || 'PENDING'}

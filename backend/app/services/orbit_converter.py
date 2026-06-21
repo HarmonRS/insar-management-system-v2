@@ -1,7 +1,7 @@
 """轨道文件管理与格式转换服务。
 
 目录约定：
-  MONITOR_ORBIT_DIR/   源精轨目录（可为 UNC），平铺 .txt
+  MONITOR_ORBIT_DIR/   本机源精轨目录，平铺 .txt
   ORBIT_POOL_ENVI/     ENVI 本地精轨池
     LT1A/              LT-1A 精轨 .txt
     LT1B/              LT-1B 精轨 .txt
@@ -320,16 +320,17 @@ def summarize_source_orbit_gaps(
 
     source_files: Dict[str, Dict[str, str]] = source_inventory["files"]
     envi_files: Dict[str, Dict[str, str]] = pool_inventory["envi"]["files"]
-    isce2_files: Dict[str, Dict[str, str]] = pool_inventory["isce2"]["files"]
+    isce2_enabled = bool(str(isce2_pool or "").strip())
+    isce2_files: Dict[str, Dict[str, str]] = pool_inventory["isce2"]["files"] if isce2_enabled else {}
 
     source_stems = set(source_files)
     envi_stems = set(envi_files)
     isce2_stems = set(isce2_files)
 
-    source_without_isce2 = sorted(source_stems - isce2_stems)
+    source_without_isce2 = sorted(source_stems - isce2_stems) if isce2_enabled else []
     source_without_envi = sorted(source_stems - envi_stems)
     envi_without_source = sorted(envi_stems - source_stems)
-    isce2_without_source = sorted(isce2_stems - source_stems)
+    isce2_without_source = sorted(isce2_stems - source_stems) if isce2_enabled else []
     sample_limit = 20
 
     def _make_samples(
@@ -349,7 +350,7 @@ def summarize_source_orbit_gaps(
             )
         return samples
 
-    suspect_bad_samples = _make_samples(source_without_isce2, inspect_source=True)
+    suspect_bad_samples = _make_samples(source_without_isce2, inspect_source=True) if isce2_enabled else []
     bad_source_samples = [
         item for item in suspect_bad_samples
         if item.get("has_corruption_signal")
@@ -358,6 +359,7 @@ def summarize_source_orbit_gaps(
     return {
         "sample_limit": sample_limit,
         "quarantine_path": _default_quarantine_root(source_dir, quarantine_root),
+        "isce2_enabled": isce2_enabled,
         "source_without_isce2_count": len(source_without_isce2),
         "source_without_envi_count": len(source_without_envi),
         "envi_without_source_count": len(envi_without_source),
@@ -809,6 +811,7 @@ def sync_orbit_pools(
     envi_pool: str = "",
     isce2_pool: str = "",
     landsar_pool: str = "",
+    validate_without_isce2: bool = True,
 ) -> Dict:
     """从 source_dir 扫描平铺 .txt 精轨，同步到各引擎本地池。
 
@@ -863,11 +866,16 @@ def sync_orbit_pools(
         xml_needs_refresh = bool(isce2_pool) and (
             not os.path.exists(xml_path) or _needs_generated_refresh(fpath, xml_path)
         )
-        requires_validation = xml_needs_refresh or (not isce2_pool and envi_needs_refresh)
+        requires_validation = xml_needs_refresh or (
+            bool(validate_without_isce2) and not isce2_pool and envi_needs_refresh
+        )
 
         staged_dir = ""
         staged_xml = ""
         try:
+            health = _inspect_orbit_txt_health(fpath)
+            if _has_orbit_corruption_signal(health):
+                raise RuntimeError("Source TXT contains NUL bytes or cannot be read as a healthy LT-1 orbit text file.")
             if requires_validation:
                 staged_dir, staged_xml = _stage_isce2_xml(
                     fpath,
@@ -924,8 +932,15 @@ def repair_orbit_pools(
     isce2_pool: str = "",
     landsar_pool: str = "",
 ) -> Dict[str, Any]:
+    isce2_enabled = bool(str(isce2_pool or "").strip())
     before = check_orbit_consistency(envi_pool, isce2_pool)
-    sync_result = sync_orbit_pools(source_dir, envi_pool, isce2_pool, landsar_pool)
+    sync_result = sync_orbit_pools(
+        source_dir,
+        envi_pool,
+        isce2_pool,
+        landsar_pool,
+        validate_without_isce2=isce2_enabled,
+    )
 
     repaired_from_envi: List[str] = []
     repair_errors: List[Dict[str, str]] = []
@@ -934,7 +949,7 @@ def repair_orbit_pools(
     envi_files: Dict[str, Dict[str, str]] = pool_inventory["envi"]["files"]
     isce2_files: Dict[str, Dict[str, str]] = pool_inventory["isce2"]["files"]
 
-    if isce2_pool:
+    if isce2_enabled:
         os.makedirs(isce2_pool, exist_ok=True)
         for stem in sorted(set(envi_files) - set(isce2_files)):
             txt_path = envi_files[stem]["path"]
@@ -952,6 +967,7 @@ def repair_orbit_pools(
         "before": before,
         "after": after,
         "sync_result": sync_result,
+        "isce2_enabled": isce2_enabled,
         "repaired_from_envi": repaired_from_envi,
         "repair_error_count": len(repair_errors),
         "repair_errors": repair_errors,
@@ -968,17 +984,19 @@ def quarantine_bad_orbits(
     isce2_pool: str = "",
     quarantine_root: str = "",
 ) -> Dict[str, Any]:
+    isce2_enabled = bool(str(isce2_pool or "").strip())
     source_inventory = get_source_orbit_inventory(source_dir, recursive=True)
     pool_inventory = get_orbit_pool_inventory(envi_pool, isce2_pool, recursive=True)
 
     source_files: Dict[str, Dict[str, str]] = source_inventory["files"]
     envi_files: Dict[str, Dict[str, str]] = pool_inventory["envi"]["files"]
-    isce2_files: Dict[str, Dict[str, str]] = pool_inventory["isce2"]["files"]
+    isce2_files: Dict[str, Dict[str, str]] = pool_inventory["isce2"]["files"] if isce2_enabled else {}
 
     quarantine_dir = _default_quarantine_root(source_dir, quarantine_root)
-    candidate_stems = sorted(set(source_files) - set(isce2_files))
+    candidate_stems = sorted(set(source_files) - set(isce2_files)) if isce2_enabled else []
 
     result: Dict[str, Any] = {
+        "isce2_enabled": isce2_enabled,
         "quarantine_root": quarantine_dir,
         "candidate_count": len(candidate_stems),
         "validated_count": 0,
@@ -1083,14 +1101,18 @@ def check_orbit_consistency(
             "healthy": bool,
         }
     """
+    isce2_enabled = bool(str(isce2_pool or "").strip())
     inventory = get_orbit_pool_inventory(envi_pool, isce2_pool, recursive=True)
     envi_files: Dict[str, Dict[str, str]] = inventory["envi"]["files"]
-    isce2_files: Dict[str, Dict[str, str]] = inventory["isce2"]["files"]
+    isce2_files: Dict[str, Dict[str, str]] = inventory["isce2"]["files"] if isce2_enabled else {}
     by_satellite: Dict[str, int] = inventory["envi"]["by_satellite"]
 
     # 对比
     envi_stems = set(envi_files)
     isce2_stems = set(isce2_files)
+    if not isce2_enabled:
+        envi_stems = set()
+        isce2_stems = set()
     mismatches = []
     for stem in envi_stems - isce2_stems:
         mismatches.append(
@@ -1112,6 +1134,9 @@ def check_orbit_consistency(
         )
 
     mismatches.sort(key=lambda item: item["name"])
+    errors = list(inventory["envi"]["errors"])
+    if isce2_enabled:
+        errors.extend(inventory["isce2"]["errors"])
 
     return {
         "envi": {
@@ -1121,11 +1146,12 @@ def check_orbit_consistency(
         },
         "isce2": {
             "path": isce2_pool,
+            "enabled": isce2_enabled,
             "total": len(isce2_files),
         },
-        "error_count": len(inventory["envi"]["errors"]) + len(inventory["isce2"]["errors"]),
-        "errors": list(inventory["envi"]["errors"]) + list(inventory["isce2"]["errors"]),
+        "error_count": len(errors),
+        "errors": errors,
         "mismatch_count": len(mismatches),
         "mismatches": mismatches,
-        "healthy": len(mismatches) == 0,
+        "healthy": len(mismatches) == 0 and len(errors) == 0,
     }

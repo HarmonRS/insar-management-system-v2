@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 from sqlalchemy import select
 
 from .. import database
-from ..config import settings
+from ..config import settings, split_env_paths
 from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskItemORM, PsTaskItemORM, RadarDataORM, SARSceneGeoORM, FloodDetectionORM, WaterDetectionORM, WaterExtractionORM, GF3ProcessingORM, AiDiagnosisORM
 from ..scheduler import scan_data_job
 from .data_service import data_service
@@ -88,6 +88,7 @@ JOB_TYPE_GF3_UNPACK = "GF3_UNPACK"
 JOB_TYPE_GF3_BATCH_PROCESS = "GF3_BATCH_PROCESS"
 JOB_TYPE_GF3_SARSCAPE_PRODUCE = "GF3_SARSCAPE_PRODUCE"
 JOB_TYPE_GF3_SARSCAPE_SYNC = "GF3_SARSCAPE_SYNC"
+JOB_TYPE_GF3_QUICKLOOK_WEBP = "GF3_QUICKLOOK_WEBP"
 JOB_TYPE_GF3_SARSCAPE_CLEAN = "GF3_SARSCAPE_CLEAN"
 JOB_TYPE_ISCE2_RUN = "ISCE2_RUN"
 JOB_TYPE_PYINT_RUN = "PYINT_RUN"
@@ -97,6 +98,7 @@ JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
 JOB_TYPE_REBUILD_SBAS_INSAR_CATALOG = "REBUILD_SBAS_INSAR_CATALOG"
 JOB_TYPE_SCAN_ASSET_INVENTORY = "SCAN_ASSET_INVENTORY"
+JOB_TYPE_AUDIT_SOURCE_ARCHIVE_INTEGRITY = "AUDIT_SOURCE_ARCHIVE_INTEGRITY"
 JOB_TYPE_SBAS_COREGISTRATION = "SBAS_COREGISTRATION"
 JOB_TYPE_SBAS_RDC_DEM = "SBAS_RDC_DEM"
 JOB_TYPE_SBAS_INTERFEROGRAMS = "SBAS_INTERFEROGRAMS"
@@ -253,9 +255,12 @@ async def _handle_scan_asset_inventory(job: SystemJobORM) -> None:
             db,
             inventory_types=payload.get("inventory_types") or None,
             root_ids=payload.get("root_ids") or None,
+            families=payload.get("families") or None,
             bind_orbits=bool(payload.get("bind_orbits", True)),
+            build_previews=bool(payload.get("build_previews", True)),
             task_id=job.task_id,
         )
+        preview = result.get("preview_cache") or {}
         await task_service.update_task(
             job.task_id,
             status="COMPLETED",
@@ -265,7 +270,42 @@ async def _handle_scan_asset_inventory(job: SystemJobORM) -> None:
                 f"sources={result.get('source_assets', 0)}, "
                 f"orbits={result.get('orbit_assets', 0)}, "
                 f"matched={((result.get('binding') or {}).get('matched_count', 0))}, "
-                f"missing={((result.get('binding') or {}).get('missing_count', 0))}"
+                f"missing={((result.get('binding') or {}).get('missing_count', 0))}, "
+                f"previews_ready={preview.get('ready', 0)}, "
+                f"previews_skipped={preview.get('skipped_ready', 0)}, "
+                f"previews_failed={preview.get('failed', 0)}, "
+                f"previews_missing={preview.get('missing_source', 0)}"
+            ),
+            db=db,
+        )
+
+
+async def _handle_archive_integrity_audit(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("AUDIT_SOURCE_ARCHIVE_INTEGRITY requires task_id for progress tracking.")
+    payload = job.payload or {}
+    await task_service.start_task(job.task_id, message="Source archive integrity audit started")
+    async with AsyncSessionLocal() as db:
+        result = await asset_inventory_service.audit_source_archive_integrity(
+            db,
+            families=payload.get("families") or None,
+            source_formats=payload.get("source_formats") or None,
+            asset_ids=payload.get("asset_ids") or None,
+            force=bool(payload.get("force", False)),
+            limit=payload.get("limit"),
+            task_id=job.task_id,
+        )
+        await task_service.update_task(
+            job.task_id,
+            status="COMPLETED",
+            progress=100,
+            message=(
+                "Source archive integrity audit completed: "
+                f"checked={result.get('checked', 0)}, "
+                f"skipped={result.get('skipped', 0)}, "
+                f"ok={result.get('ok', 0)}, "
+                f"failed={result.get('failed', 0)}, "
+                f"unsupported={result.get('unsupported', 0)}"
             ),
             db=db,
         )
@@ -345,7 +385,7 @@ async def _handle_copy_data(job: SystemJobORM) -> None:
     copy_statuses = _normalize_copy_statuses(payload.get("copy_statuses"))
     include_orbit_files = bool(payload.get("include_orbit_files"))
     export_zip = bool(payload.get("export_zip"))
-    package_mode = str(payload.get("package_mode") or ("task_zip" if export_zip else "task_folder")).strip().lower()
+    package_mode = str(payload.get("package_mode") or ("source_bundle" if export_zip else "task_folder")).strip().lower()
     skip_existing = payload.get("skip_existing") is not False
     max_items = _normalize_positive_int(payload.get("max_items"))
 
@@ -445,17 +485,27 @@ async def _handle_copy_data(job: SystemJobORM) -> None:
                     skip_existing=skip_existing,
                     max_items=max_items,
                 )
-            else:
+                return
+            if package_mode in {"task_folder", "task"}:
                 await run_dinsar_copy_items(
                     job.task_id,
                     items,
                     dest_dir,
                     include_orbit_files=include_orbit_files,
-                    export_zip=(package_mode == "task_zip" or export_zip),
+                    export_zip=False,
                     skip_existing=skip_existing,
                     max_items=max_items,
                 )
-            return
+                return
+            if package_mode == "task_zip":
+                raise ValueError(
+                    "D-InSAR Task ZIP export is not a production-preparation format. "
+                    "Use package_mode=task_folder for Task_Pool preparation or source_bundle for archive distribution."
+                )
+            raise ValueError(
+                "Unsupported D-InSAR package_mode. "
+                "Use task_folder for production preparation or source_bundle for archive distribution."
+            )
 
     raise ValueError(f"Unknown COPY_DATA file_type: {file_type}")
 
@@ -884,7 +934,9 @@ async def _handle_ai_diagnosis(job: SystemJobORM) -> None:
             from ..ai_service import analyze_map_with_vlm
             diagnosis_markdown = await analyze_map_with_vlm(
                 images_base64=[img_base64],
-                prompt=full_prompt
+                prompt=full_prompt,
+                model_name=model_name,
+                raise_on_error=True,
             )
 
             # 8. 解析风险等级和置信度（简单正则匹配）
@@ -3646,7 +3698,7 @@ async def _handle_gf3_process(job: SystemJobORM) -> None:
     if not settings.GF3_LEGACY_GDAL_ENABLED:
         raise ValueError(
             "Legacy GF3 Python/GDAL preprocessing is disabled. "
-            "Use GF3 SARscape production or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
+            "Use GF3 native _geo result registration or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
         )
 
     payload = job.payload or {}
@@ -3725,7 +3777,7 @@ async def _handle_gf3_unpack(job: SystemJobORM) -> None:
     if not settings.GF3_LEGACY_GDAL_ENABLED:
         raise ValueError(
             "Legacy GF3 archive unpack is disabled. "
-            "Use GF3 SARscape production or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
+            "Use GF3 native _geo result registration or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
         )
 
     if not job.task_id:
@@ -3792,7 +3844,7 @@ async def _handle_gf3_batch_process(job: SystemJobORM) -> None:
     if not settings.GF3_LEGACY_GDAL_ENABLED:
         raise ValueError(
             "Legacy GF3 Python/GDAL preprocessing is disabled. "
-            "Use GF3 SARscape production or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
+            "Use GF3 native _geo result registration or set GF3_LEGACY_GDAL_ENABLED=true explicitly."
         )
 
     payload = job.payload or {}
@@ -3901,7 +3953,7 @@ async def _handle_gf3_batch_process(job: SystemJobORM) -> None:
 
 
 async def _handle_gf3_sarscape_sync(job: SystemJobORM) -> None:
-    """Scan SARscape native GF3 _geo outputs, convert them to GeoTIFF, and register them."""
+    """Scan SARscape native GF3 _geo outputs and register requested assets."""
     from .gf3_standardize_service import standardize_gf3_sarscape_native_roots
 
     if not job.task_id:
@@ -3915,7 +3967,15 @@ async def _handle_gf3_sarscape_sync(job: SystemJobORM) -> None:
     if not storage_root:
         raise ValueError("GF3_SARSCAPE_SYNC: storage_root is empty")
 
-    await task_service.start_task(job.task_id, message="扫描 GF3 SARscape 原生 _geo 结果池...")
+    quicklook_only = bool(payload.get("quicklook_only", False))
+    await task_service.start_task(
+        job.task_id,
+        message=(
+            "按 GF3 日期/场景命名规则登记本机 SARscape _geo 原生结果..."
+            if quicklook_only
+            else "递归扫描 GF3 SARscape 原生 _geo 结果池..."
+        ),
+    )
 
     loop = asyncio.get_running_loop()
 
@@ -3943,6 +4003,7 @@ async def _handle_gf3_sarscape_sync(job: SystemJobORM) -> None:
                 storage_root=storage_root,
                 force=bool(payload.get("force", False)),
                 register=bool(payload.get("register", True)),
+                quicklook_only=quicklook_only,
                 progress_callback=_progress_cb,
             )
     except Exception as exc:
@@ -3954,44 +4015,44 @@ async def _handle_gf3_sarscape_sync(job: SystemJobORM) -> None:
         )
         raise
 
-    message = (
-        "GF3 SARscape 标准化完成: "
-        f"发现 {int(result.get('scene_count') or 0)} 景, "
-        f"可转换 {int(result.get('ready_scene_count') or 0)} 景, "
-        f"转换 {int(result.get('converted_scenes') or 0)} 景, "
-        f"部分 {int(result.get('partial_scenes') or 0)} 景, "
-        f"失败 {int(result.get('failed_scenes') or 0)} 景, "
-        f"新增/更新 GeoTIFF {int(result.get('converted_assets') or 0)} 个, "
-        f"跳过 {int(result.get('skipped_assets') or 0)} 个, "
-        f"入库 {int(result.get('registered') or 0)} 景"
-    )
+    if quicklook_only:
+        message = (
+            "GF3 _geo 原生结果登记完成: "
+            f"规则匹配 {int(result.get('scene_count') or 0)} 景, "
+            f"可登记 {int(result.get('ready_scene_count') or 0)} 景, "
+            f"原生资产 {int(result.get('native_assets') or result.get('quicklook_assets') or 0)} 个, "
+            f"入库 {int(result.get('registered') or 0)} 景, "
+            f"跳过未变化 {int(result.get('skipped_unchanged') or 0)} 景, "
+            f"失败 {int(result.get('failed_scenes') or 0)} 景"
+        )
+    else:
+        message = (
+            "GF3 SARscape 标准化完成: "
+            f"发现 {int(result.get('scene_count') or 0)} 景, "
+            f"可转换 {int(result.get('ready_scene_count') or 0)} 景, "
+            f"转换 {int(result.get('converted_scenes') or 0)} 景, "
+            f"部分 {int(result.get('partial_scenes') or 0)} 景, "
+            f"失败 {int(result.get('failed_scenes') or 0)} 景, "
+            f"新增/更新 GeoTIFF {int(result.get('converted_assets') or 0)} 个, "
+            f"跳过 {int(result.get('skipped_assets') or 0)} 个, "
+            f"入库 {int(result.get('registered') or 0)} 景"
+        )
     await task_service.update_task(job.task_id, status="COMPLETED", progress=100, message=message)
 
 
-async def _handle_gf3_sarscape_produce(job: SystemJobORM) -> None:
-    """Run GF3 raw archive -> SARscape native -> GeoTIFF registration chain."""
-    from .gf3_sarscape_production_service import (
-        cleanup_gf3_sarscape_native_pool,
-        run_gf3_sarscape_production,
-    )
-    from .gf3_standardize_service import standardize_gf3_sarscape_native_roots
+async def _handle_gf3_quicklook_webp(job: SystemJobORM) -> None:
+    """Generate local WebP previews from registered GF3 SARscape native _geo records."""
+    from .gf3_standardize_service import generate_gf3_quicklook_webp_cache
 
     if not job.task_id:
-        raise ValueError("GF3_SARSCAPE_PRODUCE requires task_id for progress tracking.")
+        raise ValueError("GF3_QUICKLOOK_WEBP requires task_id for progress tracking.")
 
     payload = job.payload or {}
-    source_dirs = payload.get("source_dirs") or []
-    native_dirs = payload.get("native_dirs") or []
-    storage_root = payload.get("storage_root") or settings.GF3_STORAGE_DIRS
-    native_root = payload.get("native_root") or (native_dirs[0] if native_dirs else "")
-    if not source_dirs:
-        raise ValueError("GF3_SARSCAPE_PRODUCE: source_dirs is empty")
-    if not native_root:
-        raise ValueError("GF3_SARSCAPE_PRODUCE: native_root is empty")
-    if not storage_root:
-        raise ValueError("GF3_SARSCAPE_PRODUCE: storage_root is empty")
+    force = bool(payload.get("force", False))
+    max_records = _normalize_positive_int(payload.get("max_records"))
+    native_dirs = payload.get("native_dirs") or split_env_paths(settings.GF3_SARSCAPE_NATIVE_DIRS)
+    await task_service.start_task(job.task_id, message="开始从 GF3 _geo 原生数据生成 WebP 缓存...")
 
-    await task_service.start_task(job.task_id, message="GF3 SARscape production starting...")
     loop = asyncio.get_running_loop()
 
     def _progress_cb(progress: int, message: str) -> None:
@@ -4005,143 +4066,49 @@ async def _handle_gf3_sarscape_produce(job: SystemJobORM) -> None:
                 try:
                     fut.result()
                 except Exception as exc:
-                    logger.warning("[GF3 SARscape Produce] progress callback failed: %s", exc)
+                    logger.warning("[GF3 native WebP] progress callback failed: %s", exc)
 
             future.add_done_callback(_swallow_progress_error)
         except RuntimeError:
             return
 
-    def _log_cb(level: str, message: str) -> None:
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                task_service.add_log(job.task_id, level, message),
-                loop,
-            )
-
-            def _swallow_log_error(fut):
-                try:
-                    fut.result()
-                except Exception as exc:
-                    logger.warning("[GF3 SARscape Produce] log callback failed: %s", exc)
-
-            future.add_done_callback(_swallow_log_error)
-        except RuntimeError:
-            return
-
-    async def _production_keepalive() -> None:
-        progress = 8
-        while True:
-            await asyncio.sleep(60)
-            progress = min(68, progress + 1)
-            await task_service.update_task(
-                job.task_id,
-                progress=progress,
-                message="GF3 SARscape production is still running...",
-            )
-
     try:
-        production_task = asyncio.create_task(
-            asyncio.to_thread(
-                run_gf3_sarscape_production,
-                source_dirs=source_dirs,
-                native_root=native_root,
-                wrapper_exe=payload.get("wrapper_exe"),
-                dem_path=payload.get("dem_path"),
-                idlrt_path=payload.get("idlrt_path"),
-                polarizations=payload.get("polarizations"),
-                archive_exts=payload.get("archive_exts") or [],
-                max_archives_per_run=payload.get("max_archives_per_run"),
-                selected_dates=payload.get("selected_dates") or [],
-                task_id=job.task_id,
-                local_staging_root=payload.get("local_staging_root") or settings.GF3_TASK_POOL_ROOT,
-                timeout_seconds=payload.get("timeout_seconds"),
-                keep_extracted=payload.get("keep_extracted"),
-                log_callback=_log_cb,
+        async with AsyncSessionLocal() as db:
+            result = await generate_gf3_quicklook_webp_cache(
+                db,
+                force=force,
+                max_records=max_records,
+                native_dirs=native_dirs,
                 progress_callback=_progress_cb,
-            )
-        )
-        keepalive_task = asyncio.create_task(_production_keepalive())
-        try:
-            production_result = await production_task
-        finally:
-            keepalive_task.cancel()
-            try:
-                await keepalive_task
-            except asyncio.CancelledError:
-                pass
-
-        standardize_result: Dict[str, Any] = {}
-        if bool(payload.get("auto_standardize", True)):
-            await task_service.update_task(
-                job.task_id,
-                progress=72,
-                message="GF3 SARscape production finished; standardizing native _geo outputs...",
-            )
-            async with AsyncSessionLocal() as db:
-                standardize_result = await standardize_gf3_sarscape_native_roots(
-                    db,
-                    native_dirs=native_dirs or [native_root],
-                    storage_root=storage_root,
-                    force=bool(payload.get("force_standardize", False)),
-                    register=bool(payload.get("register", True)),
-                    progress_callback=lambda pct, msg: _progress_cb(72 + int(max(0, min(100, pct)) * 0.16), msg),
-                )
-
-        cleanup_result: Dict[str, Any] = {}
-        production_ok = int(production_result.get("failed_count") or 0) == 0
-        standardize_ok = (
-            not standardize_result
-            or (
-                int(standardize_result.get("failed_assets") or 0) == 0
-                and int(standardize_result.get("failed_scenes") or 0) == 0
-            )
-        )
-        if bool(payload.get("clean_after_success", True)) and production_ok and standardize_ok:
-            await task_service.update_task(
-                job.task_id,
-                progress=90,
-                message="Cleaning GF3 SARscape intermediate files...",
-            )
-            cleanup_result = await asyncio.to_thread(
-                cleanup_gf3_sarscape_native_pool,
-                native_dirs=native_dirs or [native_root],
-                storage_root=storage_root,
-                require_standardized=bool(payload.get("cleanup_require_standardized", True)),
-                dry_run=bool(payload.get("cleanup_dry_run", False)),
-                max_scenes=payload.get("cleanup_max_scenes"),
-                log_callback=_log_cb,
-                progress_callback=lambda pct, msg: _progress_cb(90 + int(max(0, min(100, pct)) * 0.09), msg),
-            )
-        elif bool(payload.get("clean_after_success", True)):
-            _log_cb(
-                "WARNING",
-                "GF3 SARscape automatic cleanup skipped because production or standardization had failures.",
             )
     except Exception as exc:
         await task_service.update_task(
             job.task_id,
             status="FAILED",
             progress=100,
-            message=f"GF3 SARscape production failed: {exc}",
+            message=f"GF3 _geo WebP 生成失败: {exc}",
         )
         raise
 
-    failed_count = int(production_result.get("failed_count") or 0)
-    failed_assets = int(standardize_result.get("failed_assets") or 0)
-    cleanup_errors = int(cleanup_result.get("error_scene_count") or 0)
-    final_status = "FAILED" if failed_count or failed_assets or cleanup_errors else "COMPLETED"
     message = (
-        "GF3 SARscape production chain finished: "
-        f"found={int(production_result.get('found_count') or 0)}, "
-        f"produced={int(production_result.get('processed_count') or 0)}, "
-        f"skipped={int(production_result.get('skipped_count') or 0)}, "
-        f"failed={failed_count}, "
-        f"converted_assets={int(standardize_result.get('converted_assets') or 0)}, "
-        f"registered={int(standardize_result.get('registered') or 0)}, "
-        f"cleaned_scenes={int(cleanup_result.get('cleaned_scene_count') or 0)}, "
-        f"cleaned_bytes={int(cleanup_result.get('bytes_deleted') or 0)}"
+        "GF3 _geo WebP 生成完成: "
+        f"总数 {int(result.get('total') or 0)} 景, "
+        f"生成 {int(result.get('generated') or 0)} 景, "
+        f"跳过 {int(result.get('skipped') or 0)} 景, "
+        f"失败 {int(result.get('failed') or 0)} 景"
     )
-    await task_service.update_task(job.task_id, status=final_status, progress=100, message=message)
+    await task_service.update_task(job.task_id, status="COMPLETED", progress=100, message=message)
+
+
+async def _handle_gf3_sarscape_produce(job: SystemJobORM) -> None:
+    """Reject GF3 production jobs on this management machine."""
+    message = (
+        "GF3 SARscape production is disabled on this management machine. "
+        "Run production on the SARscape host and register local _geo native results here."
+    )
+    if job.task_id:
+        await task_service.update_task(job.task_id, status="FAILED", progress=100, message=message)
+    raise ValueError(message)
 
 
 async def _handle_gf3_sarscape_clean(job: SystemJobORM) -> None:
@@ -5263,6 +5230,7 @@ async def _handle_sbas_landsar_workflow(job: SystemJobORM) -> None:
 _HANDLERS = {
     JOB_TYPE_SCAN_DATA: _handle_scan_data,
     JOB_TYPE_SCAN_ASSET_INVENTORY: _handle_scan_asset_inventory,
+    JOB_TYPE_AUDIT_SOURCE_ARCHIVE_INTEGRITY: _handle_archive_integrity_audit,
     JOB_TYPE_SCAN_DINSAR: _handle_scan_dinsar,
     JOB_TYPE_PUBLISH_DINSAR_PRODUCTS: _handle_publish_dinsar_products_clean,
     JOB_TYPE_REBUILD_DINSAR_CATALOG: _handle_rebuild_dinsar_catalog_clean,
@@ -5301,6 +5269,7 @@ _HANDLERS = {
     JOB_TYPE_GF3_BATCH_PROCESS: _handle_gf3_batch_process,
     JOB_TYPE_GF3_SARSCAPE_PRODUCE: _handle_gf3_sarscape_produce,
     JOB_TYPE_GF3_SARSCAPE_SYNC: _handle_gf3_sarscape_sync,
+    JOB_TYPE_GF3_QUICKLOOK_WEBP: _handle_gf3_quicklook_webp,
     JOB_TYPE_GF3_SARSCAPE_CLEAN: _handle_gf3_sarscape_clean,
     JOB_TYPE_SBAS_COREGISTRATION: _handle_sbas_coregistration,
     JOB_TYPE_SBAS_RDC_DEM: _handle_sbas_rdc_dem,

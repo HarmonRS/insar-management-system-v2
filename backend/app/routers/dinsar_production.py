@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -63,6 +65,43 @@ class WslCheckRequest(BaseModel):
 class PreviewInputAssetsRequest(BaseModel):
     root_dir: str = Field(..., description="Windows root directory or a single Task_* directory")
     num_to_process: int = Field(default=0, ge=0, description="How many tasks to preview; 0 means all")
+
+
+def _is_dinsar_task_dir(path: str) -> bool:
+    return os.path.isdir(os.path.join(path, "master")) and os.path.isdir(os.path.join(path, "slave"))
+
+
+def _is_landsar_task_dir(path: str) -> bool:
+    return os.path.isdir(os.path.join(path, "Input_Data")) or _is_dinsar_task_dir(path)
+
+
+def _count_candidate_tasks(root_dir: str) -> Dict[str, Any]:
+    try:
+        if _is_dinsar_task_dir(root_dir) or _is_landsar_task_dir(root_dir):
+            return {"task_count": 1, "invalid_child_count": 0, "mode": "single_task"}
+        task_count = 0
+        invalid_child_count = 0
+        with os.scandir(root_dir) as entries:
+            for entry in entries:
+                if not entry.is_dir() or entry.name.startswith("._"):
+                    continue
+                child_path = entry.path
+                if _is_dinsar_task_dir(child_path) or _is_landsar_task_dir(child_path):
+                    task_count += 1
+                elif entry.name.lower().startswith("task_"):
+                    invalid_child_count += 1
+        return {
+            "task_count": task_count,
+            "invalid_child_count": invalid_child_count,
+            "mode": "task_root",
+        }
+    except OSError as exc:
+        return {
+            "task_count": 0,
+            "invalid_child_count": 0,
+            "mode": "unreadable",
+            "error": str(exc),
+        }
 
 
 def _get_registry():
@@ -134,6 +173,56 @@ async def run_wsl_check(
         smoke_test=req.smoke_test,
     )
     return report.to_dict()
+
+
+@router.get("/task-roots")
+async def list_task_roots(
+    current_user: AuthUserORM = Depends(_get_current_user),
+):
+    _ = current_user
+    root_dir = os.path.normpath(os.path.abspath(str(settings.DINSAR_TASK_POOL_ROOT or "").strip()))
+    root_exists = bool(root_dir and os.path.isdir(root_dir))
+    items = []
+    child_dir_count = 0
+    if root_exists:
+        try:
+            with os.scandir(root_dir) as entries:
+                child_dirs = sorted(
+                    [entry for entry in entries if entry.is_dir() and not entry.name.startswith("._")],
+                    key=lambda entry: entry.name.lower(),
+                )
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"无法读取 D-InSAR Task_Pool: {exc}") from exc
+        child_dir_count = len(child_dirs)
+
+        for entry in child_dirs:
+            path = os.path.normpath(entry.path)
+            stat = entry.stat()
+            summary = _count_candidate_tasks(path)
+            task_count = int(summary.get("task_count") or 0)
+            invalid_child_count = int(summary.get("invalid_child_count") or 0)
+            items.append(
+                {
+                    "name": entry.name,
+                    "path": path,
+                    "task_count": task_count,
+                    "invalid_child_count": invalid_child_count,
+                    "valid": task_count > 0,
+                    "mode": summary.get("mode"),
+                    "error": summary.get("error"),
+                    "mtime": stat.st_mtime,
+                    "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                }
+            )
+
+    items.sort(key=lambda item: str(item.get("name") or "").lower())
+    return {
+        "root": root_dir,
+        "root_exists": root_exists,
+        "items": items,
+        "count": len(items),
+        "child_dir_count": child_dir_count,
+    }
 
 
 @router.post("/engines/pyint/preview-input-assets")

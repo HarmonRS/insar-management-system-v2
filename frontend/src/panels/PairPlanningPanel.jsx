@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     getPairingHealth,
     rebuildPairingCache,
     reconcileDirtyPairingCache,
 } from '../api/pairing';
+import MiniCoverageMap from '../components/MiniCoverageMap';
 
 const formatIso = (value, en = false) => {
     if (!value) return en ? 'Never' : '未执行';
@@ -34,7 +35,6 @@ export default function PairPlanningPanel({
     isReadOnlyUser,
     hasEnoughRadarScenesForPlanning,
     onOpenPairingModal,
-    onOpenPsModal,
     hasRadarSearched,
     onRefreshRadarSearch,
     onSearchAll,
@@ -48,6 +48,26 @@ export default function PairPlanningPanel({
     const [pairingRepairing, setPairingRepairing] = useState(false);
     const [pairingFullRebuilding, setPairingFullRebuilding] = useState(false);
     const [pairingActionResult, setPairingActionResult] = useState(null);
+    const previewPairs = useMemo(() => foundPairs.slice(0, 20), [foundPairs]);
+    const previewPolygons = useMemo(() => (
+        previewPairs.flatMap((pair, index) => {
+            const taskLabel = pair.task_alias || pair.task_name || `Pair ${index + 1}`;
+            return [
+                {
+                    label: `${taskLabel} / master`,
+                    points: pair.master?.coverage_polygon,
+                    color: '#2563eb',
+                    fillOpacity: 0.08,
+                },
+                {
+                    label: `${taskLabel} / slave`,
+                    points: pair.slave?.coverage_polygon,
+                    color: '#16a34a',
+                    fillOpacity: 0.08,
+                },
+            ];
+        })
+    ), [previewPairs]);
 
     const refreshPairingStatus = useCallback(async () => {
         if (isReadOnlyUser) {
@@ -112,12 +132,23 @@ export default function PairPlanningPanel({
                 </p>
                 <div className="header-buttons" style={{ marginTop: '10px' }}>
                     <button onClick={onOpenPairingModal} disabled={isLoading || !hasEnoughRadarScenesForPlanning || isReadOnlyUser} style={{ flex: 1 }}>
-                        {en ? 'Pair' : '配对'}
-                    </button>
-                    <button onClick={onOpenPsModal} disabled={isLoading || !hasEnoughRadarScenesForPlanning || isReadOnlyUser} style={{ flex: 1 }}>
-                        {en ? 'Timeseries Prep' : '时序准备'}
+                        {en ? 'Plan D-InSAR Pairs' : '生成 D-InSAR 配对'}
                     </button>
                 </div>
+            </div>
+
+            <div style={{ marginTop: '12px' }}>
+                <MiniCoverageMap
+                    title={en ? 'D-InSAR Pair Coverage Preview' : 'D-InSAR配对范围预览'}
+                    subtitle={
+                        foundPairs.length > previewPairs.length
+                            ? `${previewPairs.length}/${foundPairs.length} 对`
+                            : `${foundPairs.length} 对`
+                    }
+                    polygons={previewPolygons}
+                    height={260}
+                    emptyText={en ? 'Run pair planning to preview pair footprints.' : '生成配对后显示候选范围。'}
+                />
             </div>
 
             <div className="panel-card" style={{ marginTop: '12px' }}>

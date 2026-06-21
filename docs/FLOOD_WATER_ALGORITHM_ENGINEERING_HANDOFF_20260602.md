@@ -54,7 +54,7 @@
 | `pixel_size_m` | 近似像元大小 |
 | `status` | `PENDING/RUNNING/DONE/FAILED` |
 
-当前 GF3 SARscape 链路会先产出原生 `_geo` ENVI 二进制，再由平台转换为 `D:\production_results\gf3\standard_l2` 下的 GeoTIFF，并注册到这里。
+当前 GF3 SARscape 链路会先产出原生 `_geo` ENVI 二进制，再由平台转换为 `D:\GaoFen3_Image_Pool\standard_l2` 下的 GeoTIFF，并注册到这里。
 
 ### 3.2 WaterExtractionORM
 

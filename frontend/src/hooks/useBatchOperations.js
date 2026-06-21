@@ -21,6 +21,7 @@ export default function useBatchOperations({
     setBatchItems,
     setBatchLoading,
     setBatchError,
+    includePsBatches = true,
 }) {
     const fetchDinsarBatches = useCallback(async () => {
         try {
@@ -62,13 +63,17 @@ export default function useBatchOperations({
         setBatchLoading(true);
         setBatchError('');
         try {
-            await Promise.all([fetchDinsarBatches(), fetchPsBatches()]);
+            if (includePsBatches) {
+                await Promise.all([fetchDinsarBatches(), fetchPsBatches()]);
+            } else {
+                await fetchDinsarBatches();
+            }
         } catch {
             setBatchError('加载批次失败');
         } finally {
             setBatchLoading(false);
         }
-    }, [fetchDinsarBatches, fetchPsBatches, setBatchLoading, setBatchError]);
+    }, [fetchDinsarBatches, fetchPsBatches, includePsBatches, setBatchLoading, setBatchError]);
 
     const fetchBatchItems = useCallback(async (type, batchId) => {
         if (!batchId) {

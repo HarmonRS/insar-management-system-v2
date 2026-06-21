@@ -45,6 +45,44 @@ const parseDateLikeValue = (value) => {
   return parsed;
 };
 
+const installYearNavigation = (instance) => {
+  const container = instance?.calendarContainer;
+  if (!container || container.dataset.yearNavigationReady === '1') return;
+  const monthsBar = container.querySelector('.flatpickr-months');
+  if (!monthsBar) return;
+
+  const changeYear = (delta) => {
+    instance.changeYear(instance.currentYear + delta);
+    instance.redraw();
+  };
+  const createButton = (delta, className, label, title) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `flatpickr-year-jump ${className}`;
+    button.textContent = label;
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      changeYear(delta);
+    });
+    return button;
+  };
+
+  const prevYearButton = createButton(-1, 'flatpickr-prev-year', '<<', '上一年');
+  const nextYearButton = createButton(1, 'flatpickr-next-year', '>>', '下一年');
+  const prevMonthButton = monthsBar.querySelector('.flatpickr-prev-month');
+  const nextMonthButton = monthsBar.querySelector('.flatpickr-next-month');
+  monthsBar.insertBefore(prevYearButton, prevMonthButton || monthsBar.firstChild);
+  if (nextMonthButton?.nextSibling) {
+    monthsBar.insertBefore(nextYearButton, nextMonthButton.nextSibling);
+  } else {
+    monthsBar.appendChild(nextYearButton);
+  }
+  container.dataset.yearNavigationReady = '1';
+};
+
 export default function UnifiedDatePicker({
   value,
   onChange,
@@ -123,9 +161,11 @@ export default function UnifiedDatePicker({
       maxDate: parsedMaxDate || undefined,
       onReady: (_, __, fp) => {
         applyAltInputAttrs(fp);
+        installYearNavigation(fp);
       },
       onOpen: (_, __, fp) => {
         applyAltInputAttrs(fp);
+        installYearNavigation(fp);
       },
       onChange: (selectedDates) => {
         const nextDate = Array.isArray(selectedDates) && selectedDates.length > 0

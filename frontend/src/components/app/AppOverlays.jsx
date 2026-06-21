@@ -7,7 +7,6 @@ import { formatYmd } from '../../utils/appUiHelpers';
 import { ModalLoadingFallback } from './AppLoadingFallbacks';
 
 const LazyPairingModal = lazy(() => import('../PairingModal'));
-const LazyPsStackModal = lazy(() => import('../PsStackModal'));
 const LazyDataInfoModal = lazy(() => import('../DataInfoModal'));
 const LazyGlobalTaskCenter = lazy(() => import('../GlobalTaskCenter'));
 const LazyStatisticsDashboard = lazy(() => import('../../StatisticsDashboard'));
@@ -19,10 +18,6 @@ export default function AppOverlays({
     onPairingAoiModeChange,
     onPairingProvinceChange,
     onPairingCityChange,
-    onPsSubmit,
-    onPsAoiModeChange,
-    onPsProvinceChange,
-    onPsCityChange,
     licenseLoading,
     licenseStatus,
     isAdmin,
@@ -41,9 +36,8 @@ export default function AppOverlays({
     mapExport,
 }) {
     const { language, t } = useI18n();
-    const { showPairingModal, showPsModal } = usePairingStore(useShallow((state) => ({
+    const { showPairingModal } = usePairingStore(useShallow((state) => ({
         showPairingModal: state.showPairingModal,
-        showPsModal: state.showPsModal,
     })));
     const {
         showStats,
@@ -72,17 +66,6 @@ export default function AppOverlays({
                         onAoiModeChange={onPairingAoiModeChange}
                         onProvinceChange={onPairingProvinceChange}
                         onCityChange={onPairingCityChange}
-                    />
-                </Suspense>
-            )}
-
-            {showPsModal && (
-                <Suspense fallback={<ModalLoadingFallback message="正在加载 PS 参数弹窗..." />}>
-                    <LazyPsStackModal
-                        onSubmit={onPsSubmit}
-                        onAoiModeChange={onPsAoiModeChange}
-                        onProvinceChange={onPsProvinceChange}
-                        onCityChange={onPsCityChange}
                     />
                 </Suspense>
             )}

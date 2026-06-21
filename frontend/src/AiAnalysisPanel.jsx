@@ -23,7 +23,7 @@ const cardStyle = {
 export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
   const { en } = useI18n();
   const aiTaskMonitor = useTaskMonitor({
-    taskTypes: ['AI_ANALYZE'],
+    taskTypes: ['AI_DIAGNOSIS'],
     showRecent: true,
     recentLimit: 1,
     pollRecentMs: 10000,
@@ -82,6 +82,15 @@ export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
     loadInitialData();
   }, [loadInitialData]);
 
+  useEffect(() => {
+    const models = aiStatus?.ollama_vlm_models || [];
+    if (models.length > 0 && !models.includes(selectedModel)) {
+      setSelectedModel(aiStatus?.default_vlm_model && models.includes(aiStatus.default_vlm_model)
+        ? aiStatus.default_vlm_model
+        : models[0]);
+    }
+  }, [aiStatus, selectedModel]);
+
   // 加载诊断列表
   const loadDiagnoses = useCallback(async () => {
     setLoading(true);
@@ -116,6 +125,14 @@ export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
     }
     if (!selectedResultId) {
       setMessage(en ? 'Please select a D-InSAR result' : '请选择 D-InSAR 结果');
+      return;
+    }
+    if (!aiStatus?.ollama_online) {
+      setMessage(en ? 'Failed: Ollama is offline' : '失败: Ollama 未在线');
+      return;
+    }
+    if (!aiStatus?.ollama_vlm_models?.length) {
+      setMessage(en ? 'Failed: no local Ollama vision model is installed' : '失败: 未检测到本机 Ollama 视觉模型');
       return;
     }
 
@@ -175,6 +192,11 @@ export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
     critical: '#c53030',
   };
 
+  const ollamaVlmModels = aiStatus?.ollama_vlm_models || [];
+  const modelOptions = ollamaVlmModels.length > 0
+    ? ollamaVlmModels
+    : [aiStatus?.default_vlm_model || selectedModel].filter(Boolean);
+  const canCreateDiagnosis = !!selectedResultId && !!aiStatus?.ollama_online && ollamaVlmModels.length > 0;
   const totalPages = Math.ceil(totalDiagnoses / pageSize);
 
   return (
@@ -182,7 +204,7 @@ export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
       {/* Header */}
       <div style={{ padding: '12px', borderBottom: '1px solid #e2e8f0', flexShrink: 0 }}>
         <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 600 }}>
-          {en ? 'AI Analysis' : 'AI 分析'}
+          {en ? 'D-InSAR Diagnosis' : 'D-InSAR诊断'}
         </h2>
       </div>
 
@@ -218,12 +240,12 @@ export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
           </h3>
 
           <TaskStatusPanel
-            title={en ? 'AI Diagnosis Task' : 'AI 诊断任务'}
+            title={en ? 'D-InSAR Diagnosis Task' : 'D-InSAR诊断任务'}
             activeTasks={aiTaskMonitor.activeTasks}
             recentTasks={aiTaskMonitor.recentTasks}
             latestTask={aiTaskMonitor.latestTask}
             isBusy={aiTaskMonitor.isBusy}
-            idleText={en ? 'No AI diagnosis task is running.' : '当前没有正在执行的 AI 诊断任务。'}
+            idleText={en ? 'No D-InSAR diagnosis task is running.' : '当前没有正在执行的 D-InSAR 诊断任务。'}
             compact
           />
 
@@ -294,10 +316,15 @@ export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
                 fontSize: '13px',
               }}
             >
-              <option value="llama3.2-vision">llama3.2-vision</option>
-              <option value="llava">llava</option>
-              <option value="qwen2-vl">qwen2-vl</option>
+              {modelOptions.map((modelName) => (
+                <option key={modelName} value={modelName}>{modelName}</option>
+              ))}
             </select>
+            {aiStatus?.ollama_online && ollamaVlmModels.length === 0 && (
+              <div style={{ marginTop: '6px', fontSize: '12px', color: '#e53e3e' }}>
+                {en ? 'Ollama is online, but no local vision model is installed.' : 'Ollama 已在线，但未检测到本机视觉模型。'}
+              </div>
+            )}
           </div>
 
           {/* Prompt Template Selection */}
@@ -363,17 +390,17 @@ export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
           {/* Submit Button */}
           <button
             onClick={handleCreateDiagnosis}
-            disabled={loading || aiTaskMonitor.isBusy || !selectedResultId || !aiStatus?.ollama_online}
+            disabled={loading || aiTaskMonitor.isBusy || !canCreateDiagnosis}
             style={{
               width: '100%',
               padding: '8px',
-              backgroundColor: loading || aiTaskMonitor.isBusy || !selectedResultId || !aiStatus?.ollama_online ? '#cbd5e0' : '#3182ce',
+              backgroundColor: loading || aiTaskMonitor.isBusy || !canCreateDiagnosis ? '#cbd5e0' : '#3182ce',
               color: '#fff',
               border: 'none',
               borderRadius: '4px',
               fontSize: '14px',
               fontWeight: 500,
-              cursor: loading || aiTaskMonitor.isBusy || !selectedResultId || !aiStatus?.ollama_online ? 'not-allowed' : 'pointer',
+              cursor: loading || aiTaskMonitor.isBusy || !canCreateDiagnosis ? 'not-allowed' : 'pointer',
             }}
           >
             {loading || aiTaskMonitor.isBusy ? (en ? 'Creating...' : '创建中...') : (en ? 'Create Diagnosis' : '创建诊断')}

@@ -156,7 +156,13 @@ export default function useDinsarOperations({
             }
         };
 
-        if (taskInfo.task_type === 'AI_ANALYZE') {
+        if (taskInfo.task_type === 'AI_DIAGNOSIS') {
+            if (taskStatus === 'COMPLETED') {
+                addLog('success', taskInfo.message || 'D-InSAR 诊断完成，请在 D-InSAR分析 / D-InSAR诊断 中查看记录。');
+            } else if (taskStatus === 'FAILED') {
+                addLog('error', `D-InSAR 诊断失败: ${taskInfo.message || '未知错误'}`);
+            }
+        } else if (taskInfo.task_type === 'AI_ANALYZE') {
             if (taskInfo.message) {
                 try {
                     const result = JSON.parse(taskInfo.message);
@@ -302,15 +308,33 @@ export default function useDinsarOperations({
 
     const handleAnalyzeResult = async (resultId) => {
         if (!ensureCanOperate()) return;
-        addLog('info', `正在对结果 ID:${resultId} 发起 AI 智能诊断任务...`);
+        addLog('info', `正在对结果 ID:${resultId} 发起 D-InSAR 诊断任务...`);
         try {
-            const response = await apiClient.post(`/ai/analyze-result/${resultId}`);
+            const statusResponse = await apiClient.get('/ai/status');
+            const models = statusResponse.data?.ollama_vlm_models || [];
+            if (!statusResponse.data?.ollama_online) {
+                addLog('error', '发起 D-InSAR 诊断失败: Ollama 未在线。');
+                return;
+            }
+            if (models.length === 0) {
+                addLog('error', '发起 D-InSAR 诊断失败: 未检测到本机 Ollama 视觉模型。');
+                return;
+            }
+            const defaultModel = statusResponse.data?.default_vlm_model;
+            const modelName = (defaultModel && models.includes(defaultModel))
+                ? defaultModel
+                : models[0];
+            const response = await apiClient.post('/ai/diagnosis', {
+                result_id: resultId,
+                model_name: modelName,
+                prompt_template: 'standard',
+            });
             const taskId = response.data.task_id;
             handleTaskStart(taskId);
-            addLog('info', `AI 诊断任务已启动 (ID: ${taskId})，请稍候...`);
+            addLog('info', `D-InSAR 诊断任务已启动 (ID: ${taskId})，请稍候...`);
         } catch (error) {
             const msg = error.response?.data?.detail || error.message;
-            addLog('error', `发起 AI 诊断失败: ${msg}`);
+            addLog('error', `发起 D-InSAR 诊断失败: ${msg}`);
         }
     };
 

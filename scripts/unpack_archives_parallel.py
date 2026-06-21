@@ -457,6 +457,12 @@ def _process_archive(
     target_root = _resolve_target_root(archive_path, source_dirs, target_dirs) if target_dirs else None
     if not target_root:
         target_root = os.path.dirname(archive_path)
+    if delete_archive:
+        log_fn(
+            logging.WARNING,
+            "ignoring delete_archive=true; local archives are the source of record: %s",
+            archive_path,
+        )
 
     base_name = _strip_archive_extension(os.path.basename(archive_path), extensions)
     output_dir = os.path.join(target_root, base_name)
@@ -488,9 +494,6 @@ def _process_archive(
 
         if not extracted:
             return {"status": "skipped", "archive_path": archive_path}
-
-        if delete_archive:
-            os.remove(archive_path)
 
         progress_store.mark_processed(archive_path)
         return {"status": "processed", "archive_path": archive_path}
@@ -559,7 +562,7 @@ def run_unpack_job(env_path=None, log_callback=None, progress_callback=None, con
         or env.get("UNPACK_STORAGE_DIRS")
     )
     min_disk_gb = float(env.get("UNPACK_MIN_DISK_SPACE_GB", "50"))
-    delete_archive = parse_bool(env.get("UNPACK_DELETE_ARCHIVE", "true"))
+    delete_archive = False
     tmp_suffix = env.get("UNPACK_TMP_SUFFIX", ".unpack_tmp")
     extensions = parse_dirs(env.get("UNPACK_ARCHIVE_EXTS", ".tar.gz"))
     scan_workers = parse_int(

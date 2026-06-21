@@ -1,6 +1,6 @@
 ﻿import React, { useCallback, useEffect, useState } from 'react';
 
-import { deleteRunLog, deleteRunRecord, getRunLog, listEngines, listRuns, previewPyintInputAssets, submitRun } from './api/dinsarProduction';
+import { deleteRunLog, deleteRunRecord, getRunLog, listEngines, listRuns, listTaskRoots, previewPyintInputAssets, submitRun } from './api/dinsarProduction';
 import { clearTaskLogs, deleteTaskLog, deleteTaskRecord, getRecentTasks, getTaskLogs } from './api/tasks';
 import { formatSatelliteFamilyLabel, inferSatelliteFamilyFromResultLike } from './utils/satelliteFamily';
 import useTaskMonitor from './hooks/useTaskMonitor';
@@ -16,8 +16,9 @@ const card = {
 const EMPTY_ARRAY = [];
 const EMPTY_OBJECT = {};
 const RUN_HISTORY_PAGE_SIZE = 200;
-const TASK_HISTORY_PAGE_SIZE = 500;
+const TASK_HISTORY_PAGE_SIZE = 200;
 const TASK_LOG_PAGE_SIZE = 1000;
+const INLINE_TASK_LOG_LIMIT = 200;
 const TERMINAL_STATUS_VALUES = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'CANCELED', 'success', 'failed', 'cancelled', 'canceled']);
 
 const ENGINE_STATUS_COLOR = {
@@ -96,6 +97,8 @@ const RERUN_MODE_OPTIONS = [
     description: '忽略已有结果，对本次选中的任务全部重新执行。',
   },
 ];
+const MANUAL_TASK_ROOT_VALUE = '__manual__';
+const NO_TASK_ROOT_VALUE = '';
 
 function formatEngineLabel(engineCode, engineLabel = '') {
   return engineLabel || ENGINE_LABEL[engineCode] || engineCode || '-';
@@ -253,6 +256,15 @@ function getSchemaOptions(schema) {
 function formatPathValue(value) {
   const text = String(value || '').trim();
   return text || '-';
+}
+
+function formatTaskRootUpdatedAt(value) {
+  if (!value) return '';
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return String(value);
+  }
 }
 
 function RunPathBlock({ run }) {
@@ -560,6 +572,12 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const [selectedEngine, setSelectedEngine] = useState('sarscape');
   const [selectedProfile, setSelectedProfile] = useState('custom6');
   const [rootDir, setRootDir] = useState('');
+  const [taskRoots, setTaskRoots] = useState([]);
+  const [taskRootsLoading, setTaskRootsLoading] = useState(false);
+  const [taskRootsError, setTaskRootsError] = useState('');
+  const [taskPoolRoot, setTaskPoolRoot] = useState('');
+  const [selectedTaskRootPath, setSelectedTaskRootPath] = useState('');
+  const [manualRootDir, setManualRootDir] = useState('');
   const [numToProcess, setNumToProcess] = useState(0);
   const [timeoutSec, setTimeoutSec] = useState('');
   const [engineExtraParams, setEngineExtraParams] = useState({});
@@ -588,6 +606,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const [taskLogsLoading, setTaskLogsLoading] = useState(false);
   const [taskLogActionLoading, setTaskLogActionLoading] = useState(false);
   const [taskLogDeletingId, setTaskLogDeletingId] = useState(null);
+  const [monitorLoaded, setMonitorLoaded] = useState(false);
 
   const currentEngineObj = engines.find(engine => engine.engine_code === selectedEngine) || null;
   const currentProfiles = currentEngineObj?.profiles || EMPTY_ARRAY;
@@ -601,9 +620,10 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
       ? 'LandSAR 当前使用已跑通的稳定参数。GACOS 大气相位改正需要外部大气延迟文件，未配置文件前不可启用；垂直向形变为可选输出，默认关闭。'
       : '这些参数影响当前引擎的生产模板。建议先使用默认值，只有在结果边界、噪声或几何表现异常时再逐项调整。';
   const pyintPreviewBlocksSubmit = selectedEngine === 'pyint' && pyintPreview && pyintPreview.allow_submit === false;
+  const selectedTaskRoot = taskRoots.find(item => item.path === selectedTaskRootPath) || null;
   const taskMonitor = useTaskMonitor({
     taskTypes: DINSAR_PRODUCTION_TASK_TYPES,
-    showRecent: true,
+    showRecent: false,
     recentLimit: 1,
   });
   const latestRunWithTask = runs.find(run => run?.task_id) || null;
@@ -638,40 +658,38 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   }, []);
 
+  const loadTaskRoots = useCallback(async () => {
+    setTaskRootsLoading(true);
+    setTaskRootsError('');
+    try {
+      const data = await listTaskRoots();
+      const items = Array.isArray(data?.items) ? data.items : [];
+      setTaskPoolRoot(String(data?.root || ''));
+      setTaskRoots(items);
+      setSelectedTaskRootPath(current => {
+        if (current === MANUAL_TASK_ROOT_VALUE) return current;
+        if (current && items.some(item => item.path === current)) return current;
+        return NO_TASK_ROOT_VALUE;
+      });
+    } catch (err) {
+      setTaskRoots([]);
+      setTaskRootsError(err?.response?.data?.detail || err.message || '生产任务根目录加载失败');
+    } finally {
+      setTaskRootsLoading(false);
+    }
+  }, []);
+
   const loadRuns = useCallback(async (options = {}) => {
     const silent = !!options.silent;
     if (!silent) setRunsLoading(true);
     try {
-      const loadProductionRuns = async () => {
-        const allRuns = [];
-        let offset = 0;
-        while (true) {
-          const data = await listRuns(RUN_HISTORY_PAGE_SIZE, offset);
-          const pageRuns = data?.runs || [];
-          allRuns.push(...pageRuns);
-          const total = Number(data?.total || 0);
-          if (pageRuns.length < RUN_HISTORY_PAGE_SIZE || allRuns.length >= total) break;
-          offset += pageRuns.length;
-        }
-        return allRuns;
-      };
-      const loadRecentTasks = async () => {
-        const allTasks = [];
-        let offset = 0;
-        while (true) {
-          const data = await getRecentTasks(DINSAR_PRODUCTION_TASK_TYPES, [], TASK_HISTORY_PAGE_SIZE, offset);
-          const pageTasks = Array.isArray(data) ? data : (data?.tasks || []);
-          allTasks.push(...pageTasks);
-          if (pageTasks.length < TASK_HISTORY_PAGE_SIZE) break;
-          offset += pageTasks.length;
-        }
-        return allTasks;
-      };
-      const [productionRuns, recentTasks] = await Promise.all([
-        loadProductionRuns(),
-        loadRecentTasks(),
+      const [productionRunData, recentTaskData] = await Promise.all([
+        listRuns(RUN_HISTORY_PAGE_SIZE, 0),
+        getRecentTasks(DINSAR_PRODUCTION_TASK_TYPES, [], TASK_HISTORY_PAGE_SIZE, 0),
       ]);
-      const nextRuns = mergeRunRows(productionRuns, recentTasks);
+      const productionRuns = productionRunData?.runs || [];
+      const recentTasks = Array.isArray(recentTaskData) ? recentTaskData : (recentTaskData?.tasks || []);
+      const nextRuns = mergeRunRows(productionRuns, recentTasks, RUN_HISTORY_PAGE_SIZE);
       setRuns(nextRuns);
       return nextRuns;
     } catch {
@@ -690,7 +708,8 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
     if (!silent) setTaskLogsLoading(true);
     try {
-      const logs = await fetchAllTaskLogs(taskId);
+      const data = await getTaskLogs(taskId, INLINE_TASK_LOG_LIMIT, 0);
+      const logs = data?.logs || [];
       setTaskLogs(logs);
     } catch {
       setTaskLogs([]);
@@ -737,30 +756,27 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
 
   const refreshMonitor = useCallback(async (options = {}) => {
     const silent = !!options.silent;
-    const [nextRuns, nextRecentTasks] = await Promise.all([
-      loadRuns({ silent }),
-      taskMonitor.refreshRecentTasks(),
-    ]);
+    const nextRuns = await loadRuns({ silent });
+    setMonitorLoaded(true);
     const fallbackTaskId =
       taskMonitor.activeTasks[0]?.task_id
-      || nextRecentTasks[0]?.task_id
       || nextRuns.find(run => run?.task_id)?.task_id
       || '';
     await loadTaskLogs(fallbackTaskId, { silent });
-  }, [loadRuns, loadTaskLogs, taskMonitor]);
+  }, [loadRuns, loadTaskLogs, taskMonitor.activeTasks]);
 
   useEffect(() => {
     loadEngines();
-    refreshMonitor();
-  }, [loadEngines, refreshMonitor]);
+    loadTaskRoots();
+  }, [loadEngines, loadTaskRoots]);
 
   useEffect(() => {
-    const intervalMs = taskMonitor.isBusy ? 5000 : 15000;
-    const timer = window.setInterval(() => {
-      refreshMonitor({ silent: true });
-    }, intervalMs);
-    return () => window.clearInterval(timer);
-  }, [taskMonitor.isBusy, refreshMonitor]);
+    if (selectedTaskRootPath === MANUAL_TASK_ROOT_VALUE) {
+      setRootDir(manualRootDir);
+      return;
+    }
+    setRootDir(selectedTaskRootPath);
+  }, [manualRootDir, selectedTaskRootPath]);
 
   useEffect(() => {
     if (currentProfiles.length > 0) {
@@ -984,7 +1000,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   }, [logModal.open, logModal.runId, logTaskId, readOnly, refreshMonitor, runLogDeletingId]);
 
-  const isSubmitDisabled = readOnly || submitting || !currentEngineObj?.available || pyintPreviewBlocksSubmit;
+  const isSubmitDisabled = readOnly || submitting || !currentEngineObj?.available || !rootDir.trim() || pyintPreviewBlocksSubmit;
 
   return (
     <div style={{ padding: '16px 0', width: '100%' }}>
@@ -1153,6 +1169,17 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
               <div style={{ fontSize: 12, color: '#475569' }}>模板：{currentProfileObj?.label || selectedProfile}</div>
               <div style={{ fontSize: 12, color: '#475569' }}>任务数量：{Number(numToProcess) > 0 ? Number(numToProcess) : '全部'}</div>
               <div style={{ fontSize: 12, color: '#475569' }}>执行策略：{RERUN_MODE_LABEL[rerunMode] || rerunMode}</div>
+              <div style={{ fontSize: 12, color: '#475569' }}>
+                根目录：{selectedTaskRoot?.name || (selectedTaskRootPath === MANUAL_TASK_ROOT_VALUE ? '手动路径' : '-')}
+              </div>
+              {selectedTaskRoot && (
+                <div style={{ fontSize: 12, color: '#475569' }}>
+                  可识别 Task：{Number(selectedTaskRoot.task_count || 0)}
+                </div>
+              )}
+              <div style={{ fontSize: 12, color: '#475569', gridColumn: '1 / -1', wordBreak: 'break-all' }}>
+                路径：{rootDir || '-'}
+              </div>
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
@@ -1252,13 +1279,30 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             )}
           </div>
 
-          <div style={{ flex: 2, minWidth: 280 }}>
-            <label style={{ fontSize: 12, color: '#64748b', display: 'block', marginBottom: 4 }}>根目录</label>
-            <input
-              value={rootDir}
-              onChange={event => setRootDir(event.target.value)}
-              placeholder="批处理根目录或单个任务目录"
-              disabled={readOnly}
+          <div style={{ flex: 2, minWidth: 320 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <label style={{ fontSize: 12, color: '#64748b' }}>生产任务根目录</label>
+              <button
+                type="button"
+                onClick={loadTaskRoots}
+                disabled={readOnly || taskRootsLoading}
+                style={{
+                  fontSize: 11,
+                  padding: '2px 8px',
+                  borderRadius: 4,
+                  border: '1px solid #e2e8f0',
+                  background: '#fff',
+                  color: '#475569',
+                  cursor: readOnly || taskRootsLoading ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {taskRootsLoading ? '刷新中' : '刷新'}
+              </button>
+            </div>
+            <select
+              value={selectedTaskRootPath}
+              onChange={event => setSelectedTaskRootPath(event.target.value)}
+              disabled={readOnly || taskRootsLoading}
               style={{
                 width: '100%',
                 padding: '5px 8px',
@@ -1267,7 +1311,47 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                 fontSize: 13,
                 boxSizing: 'border-box',
               }}
-            />
+            >
+              <option value={NO_TASK_ROOT_VALUE}>请选择生产任务根目录</option>
+              {taskRoots.length === 0 && (
+                <option value="" disabled>暂无已准备的生产任务</option>
+              )}
+              {taskRoots.map(item => (
+                <option key={item.path} value={item.path}>
+                  {item.name} ({Number(item.task_count || 0)} 个 Task{item.valid === false ? '，不可运行' : ''})
+                </option>
+              ))}
+              <option value={MANUAL_TASK_ROOT_VALUE}>手动输入其他路径</option>
+            </select>
+            {selectedTaskRootPath === MANUAL_TASK_ROOT_VALUE && (
+              <input
+                value={manualRootDir}
+                onChange={event => setManualRootDir(event.target.value)}
+                placeholder="批处理根目录或单个任务目录"
+                disabled={readOnly}
+                style={{
+                  width: '100%',
+                  marginTop: 6,
+                  padding: '5px 8px',
+                  borderRadius: 4,
+                  border: '1px solid #e2e8f0',
+                  fontSize: 13,
+                  boxSizing: 'border-box',
+                }}
+              />
+            )}
+            <div style={{ fontSize: 11, color: taskRootsError ? '#b91c1c' : '#94a3b8', marginTop: 4, wordBreak: 'break-all' }}>
+              {taskRootsError || (
+                rootDir
+                  ? `服务器路径：${rootDir}`
+                  : `扫描目录：${taskPoolRoot || '未配置'}；请选择其中一个一级生产任务目录。`
+              )}
+            </div>
+            {selectedTaskRoot && (
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 3 }}>
+                最近更新：{formatTaskRootUpdatedAt(selectedTaskRoot.updated_at)}；不可识别 Task：{Number(selectedTaskRoot.invalid_child_count || 0)}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1544,7 +1628,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
               border: 'none',
               background: currentEngineObj?.available ? '#3b82f6' : '#94a3b8',
               color: '#fff',
-              cursor: currentEngineObj?.available ? 'pointer' : 'not-allowed',
+              cursor: isSubmitDisabled ? 'not-allowed' : 'pointer',
               fontSize: 13,
               fontWeight: 600,
             }}
@@ -1564,20 +1648,21 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           <strong style={{ fontSize: 14 }}>运行监控</strong>
           <button
             onClick={refreshMonitor}
+            disabled={runsLoading || taskLogsLoading}
             style={{
               fontSize: 12,
               padding: '3px 10px',
               borderRadius: 4,
               border: '1px solid #e2e8f0',
-              cursor: 'pointer',
-              background: '#f8fafc',
+              cursor: runsLoading || taskLogsLoading ? 'not-allowed' : 'pointer',
+              background: runsLoading || taskLogsLoading ? '#f1f5f9' : '#f8fafc',
             }}
           >
-            刷新
+            {runsLoading || taskLogsLoading ? '刷新中...' : '手动刷新'}
           </button>
         </div>
         <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 10 }}>
-          监控与日志改为手动刷新，避免界面持续轮询请求。
+          监控与日志不会自动轮询；点击手动刷新时只加载最近记录和最近日志。
         </div>
 
         {monitoredTask && (
@@ -1714,7 +1799,9 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
         )}
 
         <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>运行记录（已加载 {runs.length} 条）</div>
-        {runsLoading ? (
+        {!monitorLoaded && !runsLoading ? (
+          <div style={{ fontSize: 12, color: '#94a3b8' }}>尚未加载监控记录，请点击手动刷新。</div>
+        ) : runsLoading ? (
           <div style={{ fontSize: 12, color: '#94a3b8' }}>加载中...</div>
         ) : runs.length === 0 ? (
           <div style={{ fontSize: 12, color: '#94a3b8' }}>暂无记录。</div>

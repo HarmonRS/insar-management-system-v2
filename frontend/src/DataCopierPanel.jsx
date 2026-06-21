@@ -10,14 +10,19 @@ const COPY_STATUS_OPTIONS = [
 ];
 const BATCH_API_PAGE_LIMIT = 500;
 const BATCH_API_MAX_PAGES = 200;
+const DINSAR_PURPOSE_PRODUCTION = 'production_prepare';
+const DINSAR_PURPOSE_DISTRIBUTION = 'source_distribution';
+const FALLBACK_DINSAR_TASK_POOL_ROOT = 'D:\\Task_Pool\\DInSAR';
+const FALLBACK_DATA_DISTRIBUTION_ROOT = 'D:\\Task_Pool\\Data_Distribution';
 
 const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
   const { t } = useI18n();
-  const [activeTab, setActiveTab] = useState('dinsar');
-  const [destDir, setDestDir] = useState('');
+  const [targetName, setTargetName] = useState('');
+  const [dinsarTaskPoolRoot, setDinsarTaskPoolRoot] = useState('');
+  const [dataDistributionRoot, setDataDistributionRoot] = useState('');
+  const [dinsarPurpose, setDinsarPurpose] = useState(DINSAR_PURPOSE_PRODUCTION);
   const [copyStatuses, setCopyStatuses] = useState(['COMPLETED']);
   const [includeDinsarOrbitFiles, setIncludeDinsarOrbitFiles] = useState(true);
-  const [dinsarPackageMode, setDinsarPackageMode] = useState('task_folder');
   const [skipExistingDinsarTasks, setSkipExistingDinsarTasks] = useState(true);
   const [dinsarMaxItems, setDinsarMaxItems] = useState('200');
   const [batches, setBatches] = useState([]);
@@ -57,13 +62,28 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
 
   useEffect(() => {
     fetchBatchesRef.current?.();
-  }, [activeTab]);
+  }, []);
+
+  useEffect(() => {
+    axios.get(`${apiEndpoint}/monitor/status`, { withCredentials: true })
+      .then((response) => {
+        const taskRoot = (response.data?.dinsar_task_pool_root || '').toString().trim();
+        const distributionRoot = (response.data?.data_distribution_root || '').toString().trim();
+        if (taskRoot) {
+          setDinsarTaskPoolRoot(taskRoot);
+        }
+        if (distributionRoot) {
+          setDataDistributionRoot(distributionRoot);
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to load monitor status:', error);
+      });
+  }, [apiEndpoint]);
 
   const fetchBatches = async () => {
     try {
-      const endpoint = activeTab === 'ps'
-        ? `${apiEndpoint}/task-batches/ps`
-        : `${apiEndpoint}/task-batches/dinsar`;
+      const endpoint = `${apiEndpoint}/task-batches/dinsar`;
       const allBatches = [];
       for (let page = 0; page < BATCH_API_MAX_PAGES; page += 1) {
         const offset = page * BATCH_API_PAGE_LIMIT;
@@ -101,13 +121,21 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
   };
   fetchLogsRef.current = fetchLogs;
 
+  const handleDinsarPurposeChange = (nextPurpose) => {
+    setDinsarPurpose(nextPurpose);
+    setTaskId(null);
+    setLogs([]);
+    setStatus('IDLE');
+    setTargetName('');
+  };
+
   const handleStartCopy = async () => {
     if (readOnly) {
       alert('当前账号为只读模式，无法执行复制任务。');
       return;
     }
-    if (!selectedBatchId || !destDir) {
-      alert('请选择批次并设置目标目录。');
+    if (!selectedBatchId || !targetName.trim()) {
+      alert('请选择批次并填写任务名。');
       return;
     }
     if (!copyStatuses.length) {
@@ -119,25 +147,21 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
     setLogs([]);
     setStatus('RUNNING');
 
-    const endpoint = activeTab === 'ps'
-      ? `${apiEndpoint}/tools/copy-ps-stack`
-      : `${apiEndpoint}/tools/copy-dinsar-pairs`;
+    const endpoint = `${apiEndpoint}/tools/copy-dinsar-pairs`;
 
     try {
       const payload = {
         batch_id: selectedBatchId,
-        dest_dir: destDir,
+        target_name: targetName.trim(),
         copy_statuses: copyStatuses,
       };
-      if (activeTab === 'dinsar') {
-        payload.include_orbit_files = includeDinsarOrbitFiles;
-        payload.package_mode = dinsarPackageMode;
-        payload.export_zip = dinsarPackageMode === 'task_zip';
-        payload.skip_existing = skipExistingDinsarTasks;
-        const parsedMaxItems = Number.parseInt(dinsarMaxItems, 10);
-        if (Number.isFinite(parsedMaxItems) && parsedMaxItems > 0) {
-          payload.max_items = parsedMaxItems;
-        }
+      payload.include_orbit_files = includeDinsarOrbitFiles;
+      payload.package_mode = dinsarPurpose === DINSAR_PURPOSE_PRODUCTION ? 'task_folder' : 'source_bundle';
+      payload.export_zip = false;
+      payload.skip_existing = skipExistingDinsarTasks;
+      const parsedMaxItems = Number.parseInt(dinsarMaxItems, 10);
+      if (Number.isFinite(parsedMaxItems) && parsedMaxItems > 0) {
+        payload.max_items = parsedMaxItems;
       }
       const response = await axios.post(endpoint, payload, { withCredentials: true });
       const taskId = response.data.task_id;
@@ -175,110 +199,85 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
 
   return (
     <div className="data-copier-panel" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <div className="tabs-header">
-        <button
-          className={activeTab === 'ps' ? 'active-tab' : ''}
-          onClick={() => setActiveTab('ps')}
-        >
-          PS 分发
-        </button>
-        <button
-          className={activeTab === 'dinsar' ? 'active-tab' : ''}
-          onClick={() => setActiveTab('dinsar')}
-        >
-          D-InSAR 分发
-        </button>
-      </div>
-
       <div className="panel-content" style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '15px', gap: '15px' }}>
         {readOnly && (
           <div style={{ fontSize: '12px', color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '6px', padding: '8px 10px' }}>
             当前账号为只读模式，无法发起复制任务。
           </div>
         )}
-        {activeTab === 'dinsar' && (
-          <div
-            className="input-group"
-            style={{
-              border: '1px solid #c7d2fe',
-              background: '#eef2ff',
-              borderRadius: '8px',
-              padding: '10px 12px',
-            }}
-          >
-            <label>D-InSAR 分发设置：</label>
-            <div style={{ display: 'grid', gap: '6px', marginTop: '8px' }}>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                <input
-                  type="radio"
-                  name="dinsar-package-mode"
-                  value="task_folder"
-                  checked={dinsarPackageMode === 'task_folder'}
-                  onChange={(event) => setDinsarPackageMode(event.target.value)}
-                  disabled={status === 'RUNNING' || readOnly}
-                />
-                <span>生产 Task 文件夹</span>
-              </label>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                <input
-                  type="radio"
-                  name="dinsar-package-mode"
-                  value="task_zip"
-                  checked={dinsarPackageMode === 'task_zip'}
-                  onChange={(event) => setDinsarPackageMode(event.target.value)}
-                  disabled={status === 'RUNNING' || readOnly}
-                />
-                <span>生产 Task ZIP</span>
-              </label>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                <input
-                  type="radio"
-                  name="dinsar-package-mode"
-                  value="source_bundle"
-                  checked={dinsarPackageMode === 'source_bundle'}
-                  onChange={(event) => setDinsarPackageMode(event.target.value)}
-                  disabled={status === 'RUNNING' || readOnly}
-                />
-                <span>去重源数据包（data / orbit / pairs.json）</span>
-              </label>
-            </div>
-            <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', marginTop: '8px' }}>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                <input
-                  type="checkbox"
-                  checked={includeDinsarOrbitFiles}
-                  onChange={(event) => setIncludeDinsarOrbitFiles(event.target.checked)}
-                  disabled={status === 'RUNNING' || readOnly}
-                />
-                <span>{dinsarPackageMode === 'source_bundle' ? '复制精密轨道到 orbit/' : '复制精密轨道到 Task/orbit'}</span>
-              </label>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                <input
-                  type="checkbox"
-                  checked={skipExistingDinsarTasks}
-                  onChange={(event) => setSkipExistingDinsarTasks(event.target.checked)}
-                  disabled={status === 'RUNNING' || readOnly}
-                />
-                <span>{dinsarPackageMode === 'source_bundle' ? '复用已存在的 data/orbit' : '跳过目标目录中已存在的 Task'}</span>
-              </label>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '8px' }}>
-              <label style={{ fontSize: '13px' }}>{dinsarPackageMode === 'source_bundle' ? '每次最多追加新配对:' : '每次最多分发新 Task:'}</label>
-              <input
-                type="number"
-                min="0"
-                value={dinsarMaxItems}
-                onChange={(event) => setDinsarMaxItems(event.target.value)}
-                disabled={status === 'RUNNING' || readOnly}
-                style={{ width: '110px', padding: '5px 7px' }}
-              />
-              <span style={{ fontSize: '12px', color: '#64748b' }}>0 或留空表示不限制</span>
-            </div>
-            <div style={{ fontSize: '12px', color: '#475569', marginTop: '6px' }}>
-              去重源数据包只复制唯一影像和精轨，并写出 pairs.json；再次分发到同一目录时会接着追加未导出的配对。
-            </div>
+        <div
+          className="input-group"
+          style={{
+            border: '1px solid #c7d2fe',
+            background: '#eef2ff',
+            borderRadius: '8px',
+            padding: '10px 12px',
+          }}
+        >
+          <label>D-InSAR 任务用途：</label>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '8px' }}>
+            <button
+              type="button"
+              className={dinsarPurpose === DINSAR_PURPOSE_PRODUCTION ? 'primary-btn' : 'secondary-btn'}
+              onClick={() => handleDinsarPurposeChange(DINSAR_PURPOSE_PRODUCTION)}
+              disabled={status === 'RUNNING' || readOnly}
+            >
+              生产数据准备
+            </button>
+            <button
+              type="button"
+              className={dinsarPurpose === DINSAR_PURPOSE_DISTRIBUTION ? 'primary-btn' : 'secondary-btn'}
+              onClick={() => handleDinsarPurposeChange(DINSAR_PURPOSE_DISTRIBUTION)}
+              disabled={status === 'RUNNING' || readOnly}
+            >
+              数据分发
+            </button>
           </div>
-        )}
+          <div style={{ fontSize: '13px', color: '#1e3a8a', marginTop: '8px', fontWeight: 600 }}>
+            {dinsarPurpose === DINSAR_PURPOSE_PRODUCTION
+              ? '生成可直接运行的 Task_Pool 任务目录（Task_YYYYMMDD_YYYYMMDD / master / slave / orbit）'
+              : '导出源压缩包去重包（data / orbit / pairs.json / manifest.json）'}
+          </div>
+          <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', marginTop: '8px' }}>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+              <input
+                type="checkbox"
+                checked={includeDinsarOrbitFiles}
+                onChange={(event) => setIncludeDinsarOrbitFiles(event.target.checked)}
+                disabled={status === 'RUNNING' || readOnly}
+              />
+              <span>{dinsarPurpose === DINSAR_PURPOSE_PRODUCTION ? '复制精密轨道到 Task/orbit' : '复制精密轨道到 orbit/'}</span>
+            </label>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+              <input
+                type="checkbox"
+                checked={skipExistingDinsarTasks}
+                onChange={(event) => setSkipExistingDinsarTasks(event.target.checked)}
+                disabled={status === 'RUNNING' || readOnly}
+              />
+              <span>{dinsarPurpose === DINSAR_PURPOSE_PRODUCTION ? '跳过已存在的完整 Task' : '复用已存在的 data/orbit'}</span>
+            </label>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '8px' }}>
+            <label style={{ fontSize: '13px' }}>
+              {dinsarPurpose === DINSAR_PURPOSE_PRODUCTION ? '每次最多准备新 Task:' : '每次最多追加新配对:'}
+            </label>
+            <input
+              type="number"
+              min="0"
+              value={dinsarMaxItems}
+              onChange={(event) => setDinsarMaxItems(event.target.value)}
+              disabled={status === 'RUNNING' || readOnly}
+              style={{ width: '110px', padding: '5px 7px' }}
+            />
+            <span style={{ fontSize: '12px', color: '#64748b' }}>0 或留空表示不限制</span>
+          </div>
+          <div style={{ fontSize: '12px', color: '#475569', marginTop: '6px' }}>
+            {dinsarPurpose === DINSAR_PURPOSE_PRODUCTION
+              ? '源池仍管理压缩包；这里按任务解包到本机 Task_Pool，供 D-InSAR 引擎直接使用。'
+              : '该归口用于跨目录/跨机器下发源压缩包，不作为生产运行入口。'}
+          </div>
+        </div>
         <div className="input-group">
           <label>1. 选择批次：</label>
           <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
@@ -320,25 +319,36 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
         </div>
 
         <div className="input-group">
-          <label>3. 目标目录：</label>
+          <label>3. {dinsarPurpose === DINSAR_PURPOSE_PRODUCTION ? '生产任务名' : '分发任务名'}：</label>
           <input
             type="text"
-            value={destDir}
-            onChange={(e) => setDestDir(e.target.value)}
-            placeholder="例如：D:/Data/Project_X/PS_Stack"
+            value={targetName}
+            onChange={(e) => setTargetName(e.target.value)}
+            placeholder={
+              dinsarPurpose === DINSAR_PURPOSE_PRODUCTION
+                ? '例如：MDJ_20240422_20240520'
+                : '例如：Project_X_DInSAR_Source_Bundle'
+            }
             disabled={status === 'RUNNING' || readOnly}
             style={{ width: '100%', padding: '8px' }}
           />
+          <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
+            {dinsarPurpose === DINSAR_PURPOSE_PRODUCTION
+              ? `服务器写入目录：${dinsarTaskPoolRoot || FALLBACK_DINSAR_TASK_POOL_ROOT}\\${targetName || '<任务名>'}`
+              : `服务器写入目录：${dataDistributionRoot || FALLBACK_DATA_DISTRIBUTION_ROOT}\\${targetName || '<任务名>'}`}
+          </div>
         </div>
 
         <div className="actions" style={{ display: 'flex', gap: '10px' }}>
           <button
             onClick={handleStartCopy}
-            disabled={status === 'RUNNING' || isUploading || !selectedBatchId || !destDir || readOnly}
+            disabled={status === 'RUNNING' || isUploading || !selectedBatchId || !targetName.trim() || readOnly}
             className="primary-btn"
             style={{ flex: 1 }}
           >
-            {status === 'RUNNING' ? '复制中...' : (readOnly ? '只读模式' : '开始复制')}
+            {status === 'RUNNING'
+              ? '处理中...'
+              : (readOnly ? '只读模式' : (dinsarPurpose === DINSAR_PURPOSE_PRODUCTION ? '生成生产任务' : '开始分发'))}
           </button>
           {status !== 'IDLE' && status !== 'RUNNING' && (
             <button onClick={handleReset} className="secondary-btn">

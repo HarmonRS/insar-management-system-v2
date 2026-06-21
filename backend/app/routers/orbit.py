@@ -35,6 +35,8 @@ class OrbitPoolActionRequest(BaseModel):
 async def _build_orbit_database_stats(
     db: AsyncSession,
     pool_inventory: Dict[str, Any],
+    *,
+    isce2_enabled: bool = False,
 ) -> Dict[str, Any]:
     total_radar_count = (
         await db.execute(select(func.count(RadarDataORM.id)))
@@ -94,9 +96,9 @@ async def _build_orbit_database_stats(
     }
 
     envi_stems = set(pool_inventory["envi"]["files"].keys())
-    isce2_stems = set(pool_inventory["isce2"]["files"].keys())
+    isce2_stems = set(pool_inventory["isce2"]["files"].keys()) if isce2_enabled else set()
     missing_in_envi = sorted(db_expected_stems - envi_stems)
-    missing_in_isce2 = sorted(db_expected_stems - isce2_stems)
+    missing_in_isce2 = sorted(db_expected_stems - isce2_stems) if isce2_enabled else []
 
     return {
         "total_radar_count": int(total_radar_count or 0),
@@ -110,6 +112,7 @@ async def _build_orbit_database_stats(
         "db_expected_stem_count": len(db_expected_stems),
         "stems_missing_in_envi_count": len(missing_in_envi),
         "stems_missing_in_isce2_count": len(missing_in_isce2),
+        "isce2_enabled": bool(isce2_enabled),
         "sample_missing_in_envi": missing_in_envi[:20],
         "sample_missing_in_isce2": missing_in_isce2[:20],
         "path_errors": db_path_errors,
@@ -123,26 +126,27 @@ async def get_orbit_status(
 ):
     """Return source, pool, consistency, and database orbit status."""
     source_dir = settings.MONITOR_ORBIT_DIR
+    isce2_pool = settings.ORBIT_POOL_ISCE2 if settings.ISCE2_ENABLED else ""
     source_stats = await asyncio.to_thread(scan_orbit_dir, source_dir)
     pool_inventory = await asyncio.to_thread(
         get_orbit_pool_inventory,
         settings.ORBIT_POOL_ENVI,
-        settings.ORBIT_POOL_ISCE2,
+        isce2_pool,
         True,
     )
     consistency = await asyncio.to_thread(
         check_orbit_consistency,
         settings.ORBIT_POOL_ENVI,
-        settings.ORBIT_POOL_ISCE2,
+        isce2_pool,
     )
     source_gap_summary = await asyncio.to_thread(
         summarize_source_orbit_gaps,
         source_dir,
         settings.ORBIT_POOL_ENVI,
-        settings.ORBIT_POOL_ISCE2,
+        isce2_pool,
         settings.ORBIT_QUARANTINE_DIR,
     )
-    database_stats = await _build_orbit_database_stats(db, pool_inventory)
+    database_stats = await _build_orbit_database_stats(db, pool_inventory, isce2_enabled=bool(settings.ISCE2_ENABLED))
 
     return {
         "orbit_root": source_stats.orbit_root,
@@ -184,7 +188,8 @@ async def get_orbit_status(
                 "errors": pool_inventory["envi"]["errors"],
             },
             "isce2": {
-                "path": settings.ORBIT_POOL_ISCE2,
+                "path": isce2_pool,
+                "enabled": bool(settings.ISCE2_ENABLED),
                 "total": pool_inventory["isce2"]["total"],
                 "duplicate_count": pool_inventory["isce2"]["duplicate_count"],
                 "errors": pool_inventory["isce2"]["errors"],
@@ -207,25 +212,28 @@ async def sync_orbit_pool_action(
     Check pool consistency, or repair missing entries when repair=true.
     """
     if payload and payload.quarantine_bad:
+        isce2_pool = settings.ORBIT_POOL_ISCE2 if settings.ISCE2_ENABLED else ""
         return await asyncio.to_thread(
             quarantine_bad_orbits,
             settings.MONITOR_ORBIT_DIR,
             settings.ORBIT_POOL_ENVI,
-            settings.ORBIT_POOL_ISCE2,
+            isce2_pool,
             settings.ORBIT_QUARANTINE_DIR,
         )
     if payload and payload.repair:
+        isce2_pool = settings.ORBIT_POOL_ISCE2 if settings.ISCE2_ENABLED else ""
         return await asyncio.to_thread(
             repair_orbit_pools,
             settings.MONITOR_ORBIT_DIR,
             settings.ORBIT_POOL_ENVI,
-            settings.ORBIT_POOL_ISCE2,
+            isce2_pool,
             settings.ORBIT_POOL_LANDSAR,
         )
+    isce2_pool = settings.ORBIT_POOL_ISCE2 if settings.ISCE2_ENABLED else ""
     return await asyncio.to_thread(
         check_orbit_consistency,
         settings.ORBIT_POOL_ENVI,
-        settings.ORBIT_POOL_ISCE2,
+        isce2_pool,
     )
 
 

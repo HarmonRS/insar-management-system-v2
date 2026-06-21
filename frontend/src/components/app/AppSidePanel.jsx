@@ -15,7 +15,6 @@ import { PanelLoadingBody, PanelLoadingPanel } from './AppLoadingFallbacks';
 
 const LazyDataMonitorPanel = lazy(() => import('../../DataMonitorPanel'));
 const LazyAssetInventoryPanel = lazy(() => import('../../AssetInventoryPanel'));
-const LazyDataCopierPanel = lazy(() => import('../../DataCopierPanel'));
 const LazyIDLAutomationPanel = lazy(() => import('../../IDLAutomationPanel'));
 const LazyHazardPointPanel = lazy(() => import('../../HazardPointPanel'));
 const LazyHealthCheckPanel = lazy(() => import('../../HealthCheckPanel'));
@@ -24,11 +23,8 @@ const LazyUserAdminPanel = lazy(() => import('../../UserAdminPanel'));
 const LazyAuditLogPanel = lazy(() => import('../../AuditLogPanel'));
 const LazyAiQualityPanel = lazy(() => import('../../panels/AiQualityPanel'));
 const LazyAiAnalysisPanel = lazy(() => import('../../AiAnalysisPanel'));
-const LazyPairingPanel = lazy(() => import('../../panels/PairPlanningPanel'));
+const LazyDinsarAnalysisPanel = lazy(() => import('../../panels/DinsarAnalysisPanel'));
 const LazyDinsarResultPanel = lazy(() => import('../../panels/DinsarResultPanel'));
-const LazyBatchPanel = lazy(() => import('../../panels/BatchPanel'));
-const LazyPairsListPanel = lazy(() => import('../../panels/PairsListPanel'));
-const LazyPsResultsPanel = lazy(() => import('../../panels/PsResultsPanel'));
 const LazyPsinsarCatalogPanel = lazy(() => import('../PsinsarCatalogPanel'));
 const LazySbasInsarMapAnalysisPanel = lazy(() => import('../../panels/SbasInsarMapAnalysisPanel'));
 const LazyProductionWorkspace = lazy(() => import('../../ProductionWorkspace'));
@@ -45,7 +41,6 @@ export default function AppSidePanel({
     apiEndpoint,
     licenseOk,
     foundPairs,
-    psResults,
     dinsarTotal,
     selectedPairsCount,
     hasEnoughRadarScenesForPlanning,
@@ -62,14 +57,12 @@ export default function AppSidePanel({
     dinsarPanel,
     aiPanel,
     pairsPanel,
-    psPanel,
     sbasAnalysisPanel,
 }) {
     const isProductionWorkspace = PRODUCTION_WORKSPACE_ROUTE_TABS.has(leftPanelTab);
     const activeLeftGroup = LEFT_TAB_GROUP[leftPanelTab] || 'data';
     const leftTabLabelContext = {
         pairCount: foundPairs.length,
-        psResultCount: psResults ? Object.keys(psResults).length : 0,
         dinsarTotal,
     };
     const getVisibleTabs = (tabs = []) => tabs.filter((tab) => isAdmin || !ADMIN_ONLY_TABS.has(tab));
@@ -251,41 +244,6 @@ export default function AppSidePanel({
                 </div>
             )}
 
-            {leftPanelTab === 'pairing' && (
-                <Suspense fallback={<PanelLoadingPanel message="正在加载组网规划面板..." />}>
-                    <LazyPairingPanel
-                        foundPairs={foundPairs}
-                        selectedPairsCount={selectedPairsCount}
-                        isLoading={isLoading}
-                        isReadOnlyUser={isReadOnlyUser}
-                        hasEnoughRadarScenesForPlanning={hasEnoughRadarScenesForPlanning}
-                        onOpenPairingModal={pairingPanel.onOpenPairingModal}
-                        onOpenPsModal={pairingPanel.onOpenPsModal}
-                        hasRadarSearched={hasRadarSearched}
-                        onRefreshRadarSearch={pairingPanel.onRefreshRadarSearch}
-                        onSearchAll={radarPanel.onSearchAll}
-                        onRefreshDinsar={pairingPanel.onRefreshDinsar}
-                        language={language}
-                    />
-                </Suspense>
-            )}
-
-            {leftPanelTab === 'copier' && (
-                <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <Suspense fallback={<PanelLoadingBody message="正在加载数据分发面板..." />}>
-                        <LazyDataCopierPanel
-                            apiEndpoint={apiEndpoint}
-                            readOnly={isReadOnlyUser}
-                            onJobQueued={(taskId) => taskPanel.onTaskStart(
-                                taskId,
-                                '数据分发任务已入队，正在处理...',
-                                { taskType: 'COPY_DATA', nonBlocking: true },
-                            )}
-                        />
-                    </Suspense>
-                </div>
-            )}
-
             {leftPanelTab === 'idl' && (
                 <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
                     <Suspense fallback={<PanelLoadingBody message="正在加载 IDL 面板..." />}>
@@ -306,6 +264,16 @@ export default function AppSidePanel({
                                 activeEntry={leftPanelTab}
                                 readOnly={isReadOnlyUser}
                                 onTaskStart={taskPanel.onTaskStart}
+                                apiEndpoint={apiEndpoint}
+                                language={language}
+                                foundPairs={foundPairs}
+                                selectedPairsCount={selectedPairsCount}
+                                isLoading={isLoading}
+                                hasEnoughRadarScenesForPlanning={hasEnoughRadarScenesForPlanning}
+                                hasRadarSearched={hasRadarSearched}
+                                pairingPanel={pairingPanel}
+                                radarPanel={radarPanel}
+                                pairsPanel={pairsPanel}
                             />
                         </div>
                     </Suspense>
@@ -401,15 +369,16 @@ export default function AppSidePanel({
             )}
 
             {leftPanelTab === 'dinsar_analysis' && (
-                <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <div style={{ padding: '16px' }}>
-                        <div className="empty-state">
-                            D-InSAR 分析页已预留。
-                            <br />
-                            后续可在这里承接专题筛选、人工判读、统计汇总和分析报告能力。
-                        </div>
-                    </div>
-                </div>
+                <Suspense fallback={<PanelLoadingPanel message="正在加载 D-InSAR 分析面板..." />}>
+                    <LazyDinsarAnalysisPanel
+                        aiStatus={aiStatus}
+                        isLoading={isLoading}
+                        isReadOnlyUser={isReadOnlyUser}
+                        aiPanel={aiPanel}
+                        language={language}
+                        onJobQueued={(taskId) => taskPanel.onTaskStart(taskId, '任务已入队，等待处理...')}
+                    />
+                </Suspense>
             )}
 
             {leftPanelTab === 'psinsar_results' && (
@@ -482,33 +451,6 @@ export default function AppSidePanel({
                 </div>
             )}
 
-            {leftPanelTab === 'pairs' && (
-                <Suspense fallback={<PanelLoadingPanel message="正在加载配对结果面板..." />}>
-                    <LazyPairsListPanel
-                        onVisualizePair={pairsPanel.onVisualizePair}
-                        onTogglePairVisibility={pairsPanel.onTogglePairVisibility}
-                        onCreateDinsarBatch={pairsPanel.onCreateDinsarBatch}
-                    />
-                </Suspense>
-            )}
-
-            {leftPanelTab === 'ps_results' && (
-                <Suspense fallback={<PanelLoadingPanel message="正在加载 PS 候选结果面板..." />}>
-                    <LazyPsResultsPanel
-                        onPreviewPsStack={psPanel.onPreviewPsStack}
-                        onClearPsStackPreview={psPanel.onClearPsStackPreview}
-                        onCreatePsBatch={psPanel.onCreatePsBatch}
-                        onSendToTimeseriesProduction={psPanel.onSendToTimeseriesProduction}
-                        onClearPsResults={psPanel.onClearPsResults}
-                    />
-                </Suspense>
-            )}
-
-            {leftPanelTab === 'batches' && (
-                <Suspense fallback={<PanelLoadingPanel message="正在加载批处理面板..." />}>
-                    <LazyBatchPanel />
-                </Suspense>
-            )}
         </aside>
     );
 }

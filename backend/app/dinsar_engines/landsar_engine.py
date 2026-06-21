@@ -9,18 +9,22 @@ can run in the service process without desktop dependencies.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import queue
 import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+import xml.etree.ElementTree as ET
 
 from ..config import get_env_text, read_bool_env, settings
 from ..services.dinsar_naming import (
@@ -42,8 +46,10 @@ SUPPORTED_PROFILES = {"lt1_dinsar", "standard"}
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _DATE_RE = re.compile(r"(?:^|[_-])((?:19|20)\d{6})(?:[_-]|$)")
+_CENTER_RE = re.compile(r"(?:^|_)E([+-]?\d+(?:\.\d+)?)_N([+-]?\d+(?:\.\d+)?)(?:_|$)", re.IGNORECASE)
 _SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z._-]+")
 _SUCCESS_RE = re.compile(r"(success|成功)", re.IGNORECASE)
+_DEFAULT_DEM_CROP_MARGIN_DEGREES = 0.35
 
 _DEFAULT_PARAM_VALUES: Dict[str, Any] = {
     "dem_file_type": 0,
@@ -271,6 +277,33 @@ def _extract_date(name: str) -> str:
     return fallback.group(1) if fallback else ""
 
 
+def _safe_path_name(value: Any, fallback: str = "item") -> str:
+    text = _SAFE_NAME_RE.sub("_", str(value or "").strip()).strip("._-")
+    return text or fallback
+
+
+def _extract_center_from_name(name: str) -> Optional[tuple[float, float]]:
+    match = _CENTER_RE.search(name or "")
+    if not match:
+        return None
+    try:
+        return float(match.group(1)), float(match.group(2))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_center_from_path(path: str) -> Optional[tuple[float, float]]:
+    source = _norm_path(path)
+    if not source:
+        return None
+    candidates = [os.path.basename(source), os.path.basename(os.path.dirname(source))]
+    for candidate in candidates:
+        center = _extract_center_from_name(candidate)
+        if center:
+            return center
+    return None
+
+
 def _collect_tail(text: str, max_chars: int = 4000) -> str:
     content = str(text or "")
     if len(content) <= max_chars:
@@ -296,6 +329,13 @@ def _summarize_landsar_failure(stdout_text: str, stage: str, return_code: int) -
         return f"{prefix}: LandSAR license dongle login failed{status_text}."
     if "cann't find 'config.csv'" in lowered or "can't find 'config.csv'" in lowered:
         return f"{prefix}: LandSAR config.csv is missing. Run versionControl.exe once from LANDSAR_HOME."
+    if "cannot operate regis module" in lowered or "invalid parameters" in lowered:
+        return (
+            f"{prefix}: registration module failed. "
+            "LandSAR could not obtain a valid coregistration solution for this pair."
+        )
+    if "invalid data type" in lowered or "access window out of range" in lowered or "subterrain phase failed" in lowered:
+        return f"{prefix}: DEM/sub-terrain processing failed. Check DEM coverage, data type, and LandSAR-readable format."
     lines = [line.strip() for line in content.splitlines() if line.strip()]
     error_lines = [
         line
@@ -418,6 +458,348 @@ def _looks_like_raw_task_dir(task_dir: str) -> bool:
     )
 
 
+def _find_lt1_scene_token(directory: str) -> str:
+    source_dir = _norm_path(directory)
+    if not os.path.isdir(source_dir):
+        return ""
+    for entry in os.scandir(source_dir):
+        if entry.is_file():
+            match = re.match(r"^(LT1[AB])_", entry.name, re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
+    return ""
+
+
+def _infer_lt1_import_sat_mode(master_dir: str, slave_dir: str) -> str:
+    master_sat = _find_lt1_scene_token(master_dir)
+    slave_sat = _find_lt1_scene_token(slave_dir)
+    if master_sat and slave_sat and master_sat != slave_sat:
+        return "BIST"
+    return "MONO"
+
+
+def _read_dem_bounds(dem_path: str) -> Optional[tuple[float, float, float, float]]:
+    path = _norm_path(dem_path)
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        import rasterio  # type: ignore
+
+        with rasterio.open(path) as dataset:
+            bounds = dataset.bounds
+            return float(bounds.left), float(bounds.bottom), float(bounds.right), float(bounds.top)
+    except Exception:
+        return None
+
+
+def _scene_centers_outside_dem(
+    parsed_pair: Dict[str, Any],
+    dem_path: str,
+    *,
+    margin_degrees: float = 0.25,
+) -> List[str]:
+    bounds = _read_dem_bounds(dem_path)
+    if not bounds:
+        return []
+    left, bottom, right, top = bounds
+    blockers: List[str] = []
+    for role, key in (("master", "master_xml"), ("slave", "slave_xml")):
+        source_path = str(parsed_pair.get(key) or "")
+        center = _extract_center_from_path(source_path)
+        if not center:
+            continue
+        lon, lat = center
+        if lon < left + margin_degrees or lon > right - margin_degrees or lat < bottom + margin_degrees or lat > top - margin_degrees:
+            blockers.append(
+                f"{role} center E{lon:.3f}/N{lat:.3f} is outside or too close to DEM bounds "
+                f"E{left:.3f}-{right:.3f}, N{bottom:.3f}-{top:.3f}"
+            )
+    return blockers
+
+
+def _xml_local_name(tag: str) -> str:
+    return str(tag or "").rsplit("}", 1)[-1].lower()
+
+
+def _xml_float_text(value: Any) -> Optional[float]:
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _xml_child_float_by_local_names(element: ET.Element, names: Iterable[str]) -> Optional[float]:
+    wanted = {str(name).lower() for name in names}
+    for child in element.iter():
+        if child is element:
+            continue
+        if _xml_local_name(child.tag) in wanted:
+            value = _xml_float_text(child.text)
+            if value is not None:
+                return value
+    return None
+
+
+def _extract_scene_lonlat_points_from_xml(xml_path: str) -> List[tuple[float, float]]:
+    source = _norm_path(xml_path)
+    if not source or not os.path.isfile(source):
+        return []
+    try:
+        root = ET.parse(source).getroot()
+    except Exception:
+        return []
+
+    points: List[tuple[float, float]] = []
+    for element in root.iter():
+        if _xml_local_name(element.tag) != "scenecornercoord":
+            continue
+        lon = _xml_child_float_by_local_names(element, ("lon", "longitude"))
+        lat = _xml_child_float_by_local_names(element, ("lat", "latitude"))
+        if lon is not None and lat is not None:
+            points.append((lon, lat))
+    if points:
+        return points
+
+    for element in root.iter():
+        if _xml_local_name(element.tag) != "scenecentercoord":
+            continue
+        lon = _xml_child_float_by_local_names(element, ("lon", "longitude"))
+        lat = _xml_child_float_by_local_names(element, ("lat", "latitude"))
+        if lon is not None and lat is not None:
+            return [(lon, lat)]
+    return []
+
+
+def _bbox_from_points(points: Iterable[tuple[float, float]]) -> Optional[tuple[float, float, float, float]]:
+    cleaned = [
+        (float(lon), float(lat))
+        for lon, lat in points
+        if math.isfinite(float(lon)) and math.isfinite(float(lat))
+    ]
+    if not cleaned:
+        return None
+    lons = [item[0] for item in cleaned]
+    lats = [item[1] for item in cleaned]
+    return min(lons), min(lats), max(lons), max(lats)
+
+
+def _expand_lonlat_bbox(
+    bbox: tuple[float, float, float, float],
+    margin_degrees: float,
+) -> tuple[float, float, float, float]:
+    margin = max(0.0, float(margin_degrees or 0.0))
+    left, bottom, right, top = bbox
+    return (
+        max(-180.0, float(left) - margin),
+        max(-90.0, float(bottom) - margin),
+        min(180.0, float(right) + margin),
+        min(90.0, float(top) + margin),
+    )
+
+
+def derive_landsar_dem_bbox_from_xml_paths(
+    xml_paths: Iterable[str],
+    *,
+    fallback_paths: Iterable[str] = (),
+) -> Optional[tuple[float, float, float, float]]:
+    points: List[tuple[float, float]] = []
+    for xml_path in xml_paths:
+        points.extend(_extract_scene_lonlat_points_from_xml(str(xml_path or "")))
+    bbox = _bbox_from_points(points)
+    if bbox:
+        return bbox
+
+    fallback_points: List[tuple[float, float]] = []
+    for path in fallback_paths:
+        center = _extract_center_from_path(str(path or ""))
+        if center:
+            fallback_points.append(center)
+    return _bbox_from_points(fallback_points)
+
+
+def derive_landsar_pair_dem_bbox(parsed_pair: Dict[str, Any]) -> Optional[tuple[float, float, float, float]]:
+    return derive_landsar_dem_bbox_from_xml_paths(
+        [
+            str(parsed_pair.get("master_xml") or ""),
+            str(parsed_pair.get("slave_xml") or ""),
+        ],
+        fallback_paths=[
+            str(parsed_pair.get("master_xml") or parsed_pair.get("master_tif") or ""),
+            str(parsed_pair.get("slave_xml") or parsed_pair.get("slave_tif") or ""),
+        ],
+    )
+
+
+def _align_raster_window(window: Any, width: int, height: int) -> Any:
+    from rasterio.windows import Window
+
+    col_off = max(0, int(math.floor(window.col_off)))
+    row_off = max(0, int(math.floor(window.row_off)))
+    col_stop = min(width, int(math.ceil(window.col_off + window.width)))
+    row_stop = min(height, int(math.ceil(window.row_off + window.height)))
+    if col_stop <= col_off or row_stop <= row_off:
+        raise ValueError("DEM crop bbox does not overlap source DEM")
+    return Window(col_off, row_off, col_stop - col_off, row_stop - row_off)
+
+
+def _iter_raster_windows(width: int, height: int, block_size: int = 2048) -> Iterable[Any]:
+    from rasterio.windows import Window
+
+    step = max(256, int(block_size or 2048))
+    for row in range(0, int(height), step):
+        h = min(step, int(height) - row)
+        for col in range(0, int(width), step):
+            w = min(step, int(width) - col)
+            yield Window(col, row, w, h)
+
+
+def _format_bbox_key(bbox: tuple[float, float, float, float]) -> str:
+    return ",".join(f"{value:.8f}" for value in bbox)
+
+
+def prepare_landsar_dem_crop(
+    source_dem_path: str,
+    crop_root: str,
+    bbox: tuple[float, float, float, float],
+    *,
+    label: str = "task",
+    margin_degrees: float = _DEFAULT_DEM_CROP_MARGIN_DEGREES,
+    block_size: int = 2048,
+) -> Dict[str, Any]:
+    source = _norm_path(source_dem_path)
+    if not source or not os.path.isfile(source):
+        raise FileNotFoundError(f"LandSAR DEM source file is missing: {source or '<empty>'}")
+    if not bbox:
+        raise ValueError("LandSAR DEM crop bbox is empty")
+
+    expanded_bbox = _expand_lonlat_bbox(bbox, margin_degrees)
+    crop_dir = Path(_norm_path(crop_root))
+    crop_dir.mkdir(parents=True, exist_ok=True)
+    safe_label = _safe_path_name(label, "task")
+    key = hashlib.sha1(f"{source}|{_format_bbox_key(expanded_bbox)}".encode("utf-8", errors="ignore")).hexdigest()[:16]
+    target = crop_dir / f"{safe_label}_{key}_dem.tif"
+    manifest = target.with_suffix(target.suffix + ".json")
+
+    if target.is_file() and manifest.is_file():
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        return {
+            "source_dem_path": source,
+            "dem_path": str(target),
+            "bbox": list(bbox),
+            "expanded_bbox": list(expanded_bbox),
+            "reused": True,
+            "manifest_path": str(manifest),
+            **({"bounds": payload.get("bounds")} if payload.get("bounds") else {}),
+        }
+
+    try:
+        import rasterio  # type: ignore
+        from rasterio.transform import array_bounds
+        from rasterio.windows import Window, from_bounds
+    except Exception as exc:
+        raise RuntimeError("rasterio is required to crop LandSAR DEMs") from exc
+
+    temp_path: Optional[Path] = None
+    with rasterio.open(source) as src:
+        source_dtype = str(src.dtypes[0]).lower()
+        if source_dtype != "int16":
+            raise ValueError(f"LandSAR DEM source must be a prepared Int16 GeoTIFF, got dtype={src.dtypes[0]}: {source}")
+        bounds = src.bounds
+        left, bottom, right, top = expanded_bbox
+        if left < bounds.left or right > bounds.right or bottom < bounds.bottom or top > bounds.top:
+            raise ValueError(
+                "LandSAR DEM crop bbox is outside source DEM bounds: "
+                f"bbox=E{left:.6f}-{right:.6f},N{bottom:.6f}-{top:.6f}; "
+                f"source=E{bounds.left:.6f}-{bounds.right:.6f},N{bounds.bottom:.6f}-{bounds.top:.6f}"
+            )
+
+        source_window = _align_raster_window(from_bounds(*expanded_bbox, transform=src.transform), src.width, src.height)
+        source_window = Window(
+            int(source_window.col_off),
+            int(source_window.row_off),
+            int(source_window.width),
+            int(source_window.height),
+        )
+        transform = src.window_transform(source_window)
+        crop_bounds = array_bounds(int(source_window.height), int(source_window.width), transform)
+
+        profile = src.profile.copy()
+        profile.update(
+            driver="GTiff",
+            height=int(source_window.height),
+            width=int(source_window.width),
+            count=1,
+            dtype=src.dtypes[0],
+            crs=src.crs,
+            transform=transform,
+            nodata=src.nodata,
+            compress="NONE",
+            BIGTIFF="YES",
+            interleave="band",
+        )
+        profile.pop("photometric", None)
+        profile.pop("predictor", None)
+        if int(source_window.width) >= 512 and int(source_window.height) >= 512:
+            profile.update(tiled=True, blockxsize=512, blockysize=512)
+        else:
+            profile.pop("blockxsize", None)
+            profile.pop("blockysize", None)
+            profile["tiled"] = False
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix=f"{target.stem}.",
+                suffix=".tmp.tif",
+                dir=str(crop_dir),
+                delete=False,
+            ) as tmp:
+                temp_path = Path(tmp.name)
+
+            with rasterio.open(temp_path, "w", **profile) as dst:
+                for rel_window in _iter_raster_windows(int(source_window.width), int(source_window.height), block_size):
+                    src_window = Window(
+                        source_window.col_off + rel_window.col_off,
+                        source_window.row_off + rel_window.row_off,
+                        rel_window.width,
+                        rel_window.height,
+                    )
+                    dst.write(src.read(1, window=src_window, masked=False), 1, window=rel_window)
+            os.replace(temp_path, target)
+            temp_path = None
+            payload = {
+                "source_dem_path": source,
+                "dem_path": str(target),
+                "bbox": list(bbox),
+                "expanded_bbox": list(expanded_bbox),
+                "bounds": [float(value) for value in crop_bounds],
+                "width": int(source_window.width),
+                "height": int(source_window.height),
+                "dtype": src.dtypes[0],
+                "nodata": src.nodata,
+                "margin_degrees": float(margin_degrees),
+            }
+            manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        finally:
+            if temp_path and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+
+    return {
+        "source_dem_path": source,
+        "dem_path": str(target),
+        "bbox": list(bbox),
+        "expanded_bbox": list(expanded_bbox),
+        "bounds": [float(value) for value in crop_bounds],
+        "reused": False,
+        "manifest_path": str(manifest),
+    }
+
+
 def parse_lt1_slc_pair(input_data_dir: str) -> Optional[Dict[str, Any]]:
     """Return the first chronological LT-1 SLC pair from Input_Data."""
 
@@ -431,6 +813,10 @@ def parse_lt1_slc_pair(input_data_dir: str) -> Optional[Dict[str, Any]]:
             continue
         lower_name = entry.name.lower()
         if not lower_name.endswith((".xml", ".tif", ".tiff")):
+            continue
+        if lower_name.endswith(".meta.xml") or lower_name.endswith("_check.xml"):
+            continue
+        if lower_name.endswith(".xml") and "_slc" not in lower_name:
             continue
         date_text = _extract_date(entry.name)
         if not date_text:
@@ -830,6 +1216,9 @@ class LandsarEngine(DinsarEngine):
                 "type": "string",
                 "default": self._default_dem_path,
                 "section": "输入数据",
+                "readonly": True,
+                "readonly_label": "服务器固定",
+                "include_in_payload": False,
                 "description": "传给 LandSAR 200014 D-InSAR 模块的外部参考 DEM，建议使用已验证可用的 GeoTIFF。",
             },
             "az_looks": {
@@ -1178,14 +1567,14 @@ class LandsarEngine(DinsarEngine):
             )
 
         extra = self.normalize_extra(request.extra)
-        dem_path = _norm_path(extra.get("dem_path") or self._default_dem_path)
-        if not dem_path or not os.path.isfile(dem_path):
+        dem_source_path = _norm_path(extra.get("dem_path") or self._default_dem_path)
+        if not dem_source_path or not os.path.isfile(dem_source_path):
             return RunResult(
                 success=False,
                 engine_code=self.engine_code,
                 profile=request.profile,
                 job_id=request.job_id,
-                error=f"LandSAR DEM file is missing: {dem_path or '<empty>'}",
+                error=f"LandSAR DEM source file is missing: {dem_source_path or '<empty>'}",
             )
         if _coerce_bool(extra.get("do_atmosphere")):
             gacos_path = _norm_path(extra.get("gacos_file"))
@@ -1341,6 +1730,85 @@ class LandsarEngine(DinsarEngine):
                     continue
                 task_alias, pair_key, pair_meta = self._resolve_task_identity(task_dir, task_name, parsed_pair)
 
+            dem_blockers = _scene_centers_outside_dem(parsed_pair, dem_source_path)
+            if dem_blockers:
+                pairs_failed += 1
+                error_text = "LandSAR DEM coverage preflight failed: " + "; ".join(dem_blockers)
+                emit_progress("pair_finished", pair_index=pair_index, pair_total=len(task_dirs), success=False, error=error_text)
+                task_results.append(
+                    self._build_task_result(
+                        task_name=task_name,
+                        task_alias=task_alias,
+                        pair_key=pair_key,
+                        run_key=run_key,
+                        task_dir=task_dir,
+                        run_dir=run_dir,
+                        native_output_dir=native_output_dir,
+                        landsar_output_dir=landsar_output_dir,
+                        command=command,
+                        success=False,
+                        returncode=-2,
+                        error=error_text,
+                        stdout_tail="",
+                        param_file="",
+                        dem_source_path=dem_source_path,
+                        dem_path=effective_dem_path,
+                        dem_crop=dem_crop_info,
+                    )
+                )
+                continue
+
+            effective_dem_path = dem_source_path
+            dem_crop_info: Dict[str, Any] = {}
+            try:
+                dem_bbox = derive_landsar_pair_dem_bbox(parsed_pair)
+                if not dem_bbox:
+                    raise ValueError("cannot derive DEM crop bbox from LT-1 XML corner coordinates")
+                dem_crop_info = prepare_landsar_dem_crop(
+                    dem_source_path,
+                    os.path.join(native_output_dir, "dem_crop"),
+                    dem_bbox,
+                    label=task_alias,
+                )
+                effective_dem_path = str(dem_crop_info.get("dem_path") or dem_source_path)
+                emit_progress(
+                    "log",
+                    pair_index=pair_index,
+                    pair_total=len(task_dirs),
+                    task_name=task_name,
+                    task_alias=task_alias,
+                    pair_key=pair_key,
+                    level="INFO",
+                    source="dem",
+                    message=(
+                        f"LandSAR DEM crop ready: {effective_dem_path} "
+                        f"from {dem_source_path}"
+                    ),
+                )
+            except Exception as exc:
+                pairs_failed += 1
+                error_text = f"LandSAR DEM crop failed: {exc}"
+                emit_progress("pair_finished", pair_index=pair_index, pair_total=len(task_dirs), success=False, error=error_text)
+                task_results.append(
+                    self._build_task_result(
+                        task_name=task_name,
+                        task_alias=task_alias,
+                        pair_key=pair_key,
+                        run_key=run_key,
+                        task_dir=task_dir,
+                        run_dir=run_dir,
+                        native_output_dir=native_output_dir,
+                        landsar_output_dir=landsar_output_dir,
+                        command=command,
+                        success=False,
+                        returncode=-2,
+                        error=error_text,
+                        stdout_tail="",
+                        param_file="",
+                    )
+                )
+                continue
+
             param_values = {**_DEFAULT_PARAM_VALUES}
             param_values.update({key: value for key, value in extra.items() if key in _DEFAULT_PARAM_VALUES})
             param_file = _generate_dinsar_param_file(
@@ -1349,7 +1817,7 @@ class LandsarEngine(DinsarEngine):
                 master_tif=parsed_pair["master_tif"],
                 slave_xml=parsed_pair["slave_xml"],
                 slave_tif=parsed_pair["slave_tif"],
-                dem_path=dem_path,
+                dem_path=effective_dem_path,
                 output_dir=landsar_output_dir,
                 params=param_values,
             )
@@ -1375,7 +1843,7 @@ class LandsarEngine(DinsarEngine):
                 pair_key=pair_key,
                 level="INFO",
                 source="dem",
-                message=dem_path,
+                message=effective_dem_path,
             )
 
             rc, stdout_text, timed_out = self._run_console(
@@ -1461,7 +1929,9 @@ class LandsarEngine(DinsarEngine):
                         request=request,
                         pair_meta=pair_meta_payload,
                         params=param_values,
-                        dem_path=dem_path,
+                        dem_path=effective_dem_path,
+                        dem_source_path=dem_source_path,
+                        dem_crop=dem_crop_info,
                         landsar_output_dir=landsar_output_dir,
                         primary_file=primary_file,
                         source_files=source_files,
@@ -1510,18 +1980,20 @@ class LandsarEngine(DinsarEngine):
                     param_file=param_file,
                     raw_primary_file=primary_raw,
                     raw_coherence_file=coherence_raw,
+                    dem_source_path=dem_source_path,
+                    dem_path=effective_dem_path,
+                    dem_crop=dem_crop_info,
                 )
             )
 
         invalid_candidates = validation.get("invalid_candidates", [])
         pairs_failed += len(invalid_candidates)
-        overall_success = pairs_processed > 0 and pairs_failed == 0
-        if pairs_processed > 0 and pairs_failed > 0:
-            overall_success = False
+        overall_success = pairs_processed > 0 or (pairs_processed == 0 and pairs_failed == 0)
+        run_status = "COMPLETED" if pairs_failed == 0 else ("PARTIAL" if pairs_processed > 0 else "FAILED")
         error = None
         if not overall_success:
             failed_names = [item.get("task_alias") or item.get("task_name") for item in task_results if not item.get("success")]
-            error = f"LandSAR run failed: {', '.join(failed_names[:10])}" if failed_names else "LandSAR run failed."
+            error = f"All LandSAR tasks failed: {', '.join(failed_names[:10])}" if failed_names else "LandSAR run failed."
 
         return RunResult(
             success=overall_success,
@@ -1534,6 +2006,7 @@ class LandsarEngine(DinsarEngine):
             error=error,
             detail={
                 "mode": validation["mode"],
+                "run_status": run_status,
                 "task_count": len(task_dirs),
                 "selected_tasks": [item.get("task_alias") or item.get("task_name") for item in task_results],
                 "invalid_candidates": invalid_candidates,
@@ -1541,7 +2014,8 @@ class LandsarEngine(DinsarEngine):
                 "run_key": run_key,
                 "started_at": run_started_at_text,
                 "timeout_seconds": timeout,
-                "dem_path": dem_path,
+                "dem_path": dem_source_path,
+                "dem_role": "global_prepared_source",
                 "console_path": console_path,
             },
         )
@@ -1674,13 +2148,14 @@ class LandsarEngine(DinsarEngine):
                 "error": "Task directory has neither valid Input_Data nor valid master/slave raw LT-1 folders.",
             }
 
+        sat_mode = _infer_lt1_import_sat_mode(master_dir, slave_dir)
         param_file = _generate_import_param_file(
             os.path.join(export_dir, f"{IMPORT_PROID}.txt"),
             master_dir=master_dir,
             slave_dir=slave_dir,
             export_dir=export_dir,
             import_method="dir",
-            sat_mode="BIST",
+            sat_mode=sat_mode,
             read_xml=True,
             read_slc=True,
             export_to_new=True,
@@ -1695,7 +2170,7 @@ class LandsarEngine(DinsarEngine):
             pair_key=pair_key,
             level="INFO",
             source="import",
-            message=f"LandSAR import 100016 -> {export_dir}",
+            message=f"LandSAR import 100016 ({sat_mode}) -> {export_dir}",
         )
         rc, stdout_text, timed_out = self._run_console(
             command,
@@ -1832,6 +2307,8 @@ class LandsarEngine(DinsarEngine):
         source_files: List[str],
         returncode: int,
         started_at: str,
+        dem_source_path: str = "",
+        dem_crop: Optional[Dict[str, Any]] = None,
     ) -> None:
         payload = {
             "run_key": run_key,
@@ -1850,6 +2327,8 @@ class LandsarEngine(DinsarEngine):
             "params": {
                 **dict(params or {}),
                 "dem_path": dem_path,
+                "dem_source_path": dem_source_path or dem_path,
+                "dem_crop": dem_crop or {},
             },
             "metrics": {
                 "returncode": returncode,
@@ -1902,6 +2381,9 @@ class LandsarEngine(DinsarEngine):
         param_file: str = "",
         raw_primary_file: str = "",
         raw_coherence_file: str = "",
+        dem_source_path: str = "",
+        dem_path: str = "",
+        dem_crop: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         command_text = command if isinstance(command, str) else " ".join(str(part) for part in command)
         return {
@@ -1919,6 +2401,9 @@ class LandsarEngine(DinsarEngine):
             "raw_primary_file": _norm_path(raw_primary_file) if raw_primary_file else "",
             "raw_coherence_file": _norm_path(raw_coherence_file) if raw_coherence_file else "",
             "param_file": _norm_path(param_file) if param_file else "",
+            "dem_source_path": _norm_path(dem_source_path) if dem_source_path else "",
+            "dem_path": _norm_path(dem_path) if dem_path else "",
+            "dem_crop": dem_crop or {},
             "validation": validation or {},
             "layout": layout or {},
             "command": command_text,

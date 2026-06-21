@@ -22,12 +22,13 @@ GF3 原始压缩包池
 推荐把输入、生产结果和运行时目录分开，避免把系统工作文件混入业务结果池。
 
 ```env
-GF3_ARCHIVE_SOURCE_DIRS=D:\production_inputs\gf3\archives
+GF3_TASK_POOL_ROOT=D:\GaoFen3_Task_Pool
+GF3_ARCHIVE_SOURCE_DIRS=D:\GaoFen3_Image_Pool\archives
 GF3_LEGACY_GDAL_ENABLED=false
 GF3_SOURCE_DIRS=
-GF3_SARSCAPE_NATIVE_DIRS=D:\production_results\gf3\sarscape_native
-GF3_STORAGE_DIRS=D:\production_results\gf3\standard_l2
-GF3_SARSCAPE_RUNTIME_DIR=D:\production_runtime\gf3\sarscape_runtime
+GF3_SARSCAPE_NATIVE_DIRS=D:\GaoFen3_Image_Pool\sarscape_native
+GF3_STORAGE_DIRS=D:\GaoFen3_Image_Pool\standard_l2
+GF3_SARSCAPE_RUNTIME_DIR=D:\GaoFen3_Task_Pool\sarscape_runtime
 SAR_ANALYSIS_READY_ROOT=D:\production_results\sar_analysis_ready
 ```
 
@@ -49,7 +50,7 @@ SAR_ANALYSIS_READY_ROOT=D:\production_results\sar_analysis_ready
 原生池以批次日期或人工批次号分组。单景目录名尽量保持 GF3 原始产品名。
 
 ```text
-D:\production_results\gf3\sarscape_native
+D:\GaoFen3_Image_Pool\sarscape_native
   20260514
     GF3_MH1_FSII_051377_E132.3_N48.2_20260514_L1A_HHHV_L10007356478
       GF3_MH1_FSII_..._hh_geo
@@ -115,7 +116,7 @@ SLC 中间产物
 系统从原生池转换后写入 `GF3_STORAGE_DIRS`。
 
 ```text
-D:\production_results\gf3\standard_l2
+D:\GaoFen3_Image_Pool\standard_l2
   20260514
     GF3_MH1_FSII_051377_E132.3_N48.2_20260514_L1A_HHHV_L10007356478
       HH_L2.tif
@@ -456,7 +457,7 @@ GF3_SARSCAPE_IDLRT_PATH=C:\Program Files\Harris\ENVI56\IDL88\bin\bin.x86_64\idlr
 GF3_SARSCAPE_DEM_PATH=D:\DEM\GMTED2010.jp2
 GF3_SARSCAPE_POLARIZATIONS=HH,HV
 GF3_SARSCAPE_KEEP_EXTRACTED=true
-GF3_SARSCAPE_AUTO_STANDARDIZE=true
+GF3_SARSCAPE_AUTO_STANDARDIZE=false
 GF3_SARSCAPE_CLEAN_AFTER_SUCCESS=true
 GF3_SARSCAPE_PRODUCE_TIMEOUT_SECONDS=0
 ```
@@ -465,8 +466,9 @@ GF3_SARSCAPE_PRODUCE_TIMEOUT_SECONDS=0
 
 | 任务 | 接口 | 用途 |
 | --- | --- | --- |
-| `GF3_SARSCAPE_PRODUCE` | `POST /api/monitor/gf3-sarscape-produce` | 从原始 `.tar.gz/.tgz` 触发 SARscape 生产，随后自动标准化、入库、清理 |
-| `GF3_SARSCAPE_SYNC` | `POST /api/monitor/gf3-sarscape-sync` | 仅扫描已有 `_geo` 原生结果并转 GeoTIFF 入库 |
+| `GF3_SARSCAPE_PRODUCE` | `POST /api/monitor/gf3-sarscape-produce` | 停用；本机不触发 SARscape wrapper 生产 |
+| `GF3_SARSCAPE_SYNC` | `POST /api/monitor/gf3-sarscape-sync` | 登记本机已有 `_geo` 原生结果；监控面板使用原生结果登记模式 |
+| `GF3_QUICKLOOK_WEBP` | `POST /api/monitor/gf3-quicklook-webp` | 从已登记 `_geo` ENVI 二进制生成本机 WebP 预览缓存 |
 | `GF3_SARSCAPE_CLEAN` | `POST /api/monitor/gf3-sarscape-clean` | 手动清理原生池中间数据 |
 
 清理策略：
@@ -478,34 +480,23 @@ GF3_SARSCAPE_PRODUCE_TIMEOUT_SECONDS=0
 - 每景写 `gf3_cleanup_manifest.json`，记录删除条目和释放字节数。
 - 不删除 `GF3_ARCHIVE_SOURCE_DIRS` 中的原始压缩包，也不删除 `GF3_STORAGE_DIRS` 中的标准 GeoTIFF。
 
-这样 `D:\production_results\gf3\sarscape_native` 只长期保存可追溯的最终 `_geo` 原生结果组，中间过程文件在标准化完成后自动释放空间；wrapper 配置和临时运行文件放在 `D:\production_runtime\gf3\sarscape_runtime`。
+这样 `D:\GaoFen3_Image_Pool\sarscape_native` 只长期保存可追溯的最终 `_geo` 原生结果组，中间过程文件在标准化完成后自动释放空间；wrapper 配置和临时运行文件放在 `D:\GaoFen3_Task_Pool\sarscape_runtime`。
 
-## 2026-06-15 Production Preflight Rule
+## 2026-06-15 Local Production Stop Rule
 
-GF3 SARscape production must check existing results before invoking the external wrapper.
+GF3 SARscape production on this management machine is disabled.
 
-Skip production when either condition is true:
+- `POST /api/monitor/gf3-sarscape-produce` returns 409.
+- `GET /api/monitor/gf3-sarscape-dates` returns 409 because date-scoped production selection is no longer used here.
+- Existing queued `GF3_SARSCAPE_PRODUCE` jobs fail immediately and do not call `gf3wrapper.exe`.
+- The durable result layer is the registered local `_geo` native result plus optional standardized L2 assets.
 
-- SARscape native output is already complete in `GF3_SARSCAPE_NATIVE_DIRS` for every requested polarization.
-- Standardized L2 output already exists in `GF3_STORAGE_DIRS/<imaging_date>/<scene_name>` with `gf3_standard_manifest.json` status `DONE`/`PARTIAL` and every requested polarization has a valid `*_L2.tif`.
+## 2026-06-15 Local Native Registration Rule
 
-This prevents reprocessing when native intermediates were cleaned but registered/standardized results still exist. The standardized L2 and registered assets are the durable result layer; source archives on UNC should not be reprocessed unless the operator explicitly removes or invalidates the existing result.
+GF3 SARscape production is not run on this management machine.
 
-## 2026-06-15 Date-Scoped Production
-
-GF3 SARscape production now supports an optional scene-date filter.
-
-- `GET /api/monitor/gf3-sarscape-dates` scans `GF3_ARCHIVE_SOURCE_DIRS`, groups wrapper-supported raw archives by the `YYYYMMDD` date embedded in the GF3 scene name, and returns scene counts per date.
-- `POST /api/monitor/gf3-sarscape-produce` accepts `selected_dates: ["YYYYMMDD"]`. When omitted or empty, production keeps the previous all-date behavior.
-- The frontend monitor panel exposes a date selector in the GF3 SARscape production section. Operators can select one image date before starting production, or leave it as all dates.
-- The existing duplicate-result preflight still runs after date filtering. A selected date will not reprocess scenes whose standardized L2 result or complete native `_geo` outputs already exist.
-
-## 2026-06-15 Local Task_Pool Staging
-
-GF3 SARscape production no longer passes UNC archives directly to `gf3wrapper.exe`.
-
-- Source archives may remain on UNC storage for source management.
-- Before each wrapper run, the selected archive is copied to `GF3_TASK_POOL_ROOT\SARscape\<task_id>\<scene>\source\`.
-- The wrapper receives the local staged archive path as `-input`.
-- Native SARscape output still goes to `GF3_SARSCAPE_NATIVE_DIRS`, then standardization writes durable L2 GeoTIFFs to `GF3_STORAGE_DIRS`.
-- This avoids network extraction stalls and makes source staging part of the local Task_Pool cleanup domain.
+- Completed SARscape `_geo` result folders are copied to local `GF3_SARSCAPE_NATIVE_DIRS`.
+- The monitor registration action scans real `_geo` ENVI binaries plus `.hdr/.sml` sidecars.
+- `*_geo_ql.tif` remains an auxiliary quicklook only and is not used as the WebP source.
+- WebP preview cache is generated locally from the `_geo` ENVI binary with rasterio.
+- Full GeoTIFF standardization remains a separate explicit path and is not triggered by native-result registration.

@@ -374,9 +374,10 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   const orbitPools = orbitStatus?.pools || {};
   const orbitConsistency = orbitStatus?.consistency || {};
   const orbitDatabase = orbitStatus?.database || {};
+  const orbitIsce2Enabled = Boolean(orbitPools.isce2?.enabled || orbitConsistency.isce2?.enabled || orbitDatabase.isce2_enabled);
   const orbitMismatchCount = toNumber(orbitConsistency.mismatch_count);
   const orbitDbMissingEnviCount = toNumber(orbitDatabase.stems_missing_in_envi_count);
-  const orbitDbMissingIsce2Count = toNumber(orbitDatabase.stems_missing_in_isce2_count);
+  const orbitDbMissingIsce2Count = orbitIsce2Enabled ? toNumber(orbitDatabase.stems_missing_in_isce2_count) : 0;
   const orbitDbMissingPathCount = toNumber(orbitDatabase.db_missing_path_count);
   const orbitDbFlagIssueCount =
     toNumber(orbitDatabase.has_orbit_but_missing_path_count) +
@@ -384,15 +385,15 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   const orbitScanErrorCount =
     (orbitSource.errors?.length || 0) +
     (orbitPools.envi?.errors?.length || 0) +
-    (orbitPools.isce2?.errors?.length || 0);
+    (orbitIsce2Enabled ? (orbitPools.isce2?.errors?.length || 0) : 0);
   const orbitDuplicateCount =
     toNumber(orbitSource.duplicate_count) +
     toNumber(orbitPools.envi?.duplicate_count) +
-    toNumber(orbitPools.isce2?.duplicate_count);
+    (orbitIsce2Enabled ? toNumber(orbitPools.isce2?.duplicate_count) : 0);
   const orbitSuspectBadCount = toNumber(orbitSource.suspect_bad_count);
   const orbitSourceWithoutEnviCount = toNumber(orbitSource.source_without_envi_count);
   const orbitEnviWithoutSourceCount = toNumber(orbitSource.envi_without_source_count);
-  const orbitIsce2WithoutSourceCount = toNumber(orbitSource.isce2_without_source_count);
+  const orbitIsce2WithoutSourceCount = orbitIsce2Enabled ? toNumber(orbitSource.isce2_without_source_count) : 0;
   const orbitQuarantinePath = orbitSource.quarantine_path || orbitStatus?.source_gaps?.quarantine_path;
   const orbitBadSourceSamples = asArray(orbitSource.bad_source_samples).filter(hasOrbitCorruptionSignal);
   const orbitSuspectBadSamples = asArray(orbitSource.suspect_bad_samples);
@@ -1118,9 +1119,15 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                 )}
               </div>
               <div className="health-card-row">
-                <span>{en ? 'Source / ENVI / ISCE2' : '源目录 / ENVI / ISCE2'}</span>
                 <span>
-                  {toNumber(orbitSource.total_source)} / {toNumber(orbitPools.envi?.total)} / {toNumber(orbitPools.isce2?.total)}
+                  {orbitIsce2Enabled
+                    ? (en ? 'Source / ENVI-Gamma TXT / ISCE2 XML' : '源目录 / ENVI-Gamma TXT / ISCE2 XML')
+                    : (en ? 'Source / ENVI-Gamma TXT' : '源目录 / ENVI-Gamma TXT')}
+                </span>
+                <span>
+                  {orbitIsce2Enabled
+                    ? `${toNumber(orbitSource.total_source)} / ${toNumber(orbitPools.envi?.total)} / ${toNumber(orbitPools.isce2?.total)}`
+                    : `${toNumber(orbitSource.total_source)} / ${toNumber(orbitPools.envi?.total)}`}
                 </span>
               </div>
               <div className="health-card-row">
@@ -1133,17 +1140,24 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                 <span>{en ? 'Pool mismatches' : '池不一致'}</span>
                 <span>{orbitMismatchCount}</span>
               </div>
+              {orbitIsce2Enabled ? (
+                <div className="health-card-row">
+                  <span>{en ? 'Suspect bad TXT / source-only' : '疑似坏 TXT / 仅源存在'}</span>
+                  <span>{orbitSuspectBadCount} / {orbitSourceWithoutEnviCount}</span>
+                </div>
+              ) : (
+                <div className="health-card-row">
+                  <span>{en ? 'Source-only' : '仅源存在'}</span>
+                  <span>{orbitSourceWithoutEnviCount}</span>
+                </div>
+              )}
               <div className="health-card-row">
-                <span>{en ? 'Suspect bad TXT / source-only' : '疑似坏 TXT / 仅源存在'}</span>
-                <span>{orbitSuspectBadCount} / {orbitSourceWithoutEnviCount}</span>
+                <span>{orbitIsce2Enabled ? (en ? 'TXT-only / ISCE2-only' : '仅 TXT / 仅 ISCE2') : (en ? 'TXT-only' : '仅 TXT')}</span>
+                <span>{orbitIsce2Enabled ? `${orbitEnviWithoutSourceCount} / ${orbitIsce2WithoutSourceCount}` : orbitEnviWithoutSourceCount}</span>
               </div>
               <div className="health-card-row">
-                <span>{en ? 'ENVI-only / ISCE2-only' : '仅 ENVI / 仅 ISCE2'}</span>
-                <span>{orbitEnviWithoutSourceCount} / {orbitIsce2WithoutSourceCount}</span>
-              </div>
-              <div className="health-card-row">
-                <span>{en ? 'DB missing in ENVI / ISCE2' : '数据库在 ENVI / ISCE2 缺失'}</span>
-                <span>{orbitDbMissingEnviCount} / {orbitDbMissingIsce2Count}</span>
+                <span>{orbitIsce2Enabled ? (en ? 'DB missing in TXT / ISCE2' : '数据库在 TXT / ISCE2 缺失') : (en ? 'DB missing in TXT' : '数据库在 TXT 缺失')}</span>
+                <span>{orbitIsce2Enabled ? `${orbitDbMissingEnviCount} / ${orbitDbMissingIsce2Count}` : orbitDbMissingEnviCount}</span>
               </div>
               <div className="health-card-row">
                 <span>{en ? 'Duplicate stems / scan errors' : '重复 stem / 扫描异常'}</span>
@@ -1152,14 +1166,21 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
 
               <div className="health-card-note" style={{ marginTop: 4 }}>
                 {en
-                  ? 'Orbit scan writes ENVI TXT and ISCE2 XML pools automatically. This panel now shows source, pool, and database consistency together.'
-                  : '“扫描精轨”会自动同步 ENVI TXT 和 ISCE2 XML。本卡片同时展示源目录、本地池和数据库三侧的一致性。'}
+                  ? (orbitIsce2Enabled
+                    ? 'LT-1 orbit scans synchronize the production TXT pool and the legacy ISCE2 XML pool. S1 EOF files remain registered as source orbit assets.'
+                    : 'LT-1 orbit scans synchronize the production TXT pool for ENVI/SARscape and Gamma. S1 EOF files remain registered as source orbit assets; ISCE2 XML is disabled.')
+                  : (orbitIsce2Enabled
+                    ? 'LT-1 精轨扫描会同步生产 TXT 池和 legacy ISCE2 XML 池；S1 EOF 只登记为源精轨资产。'
+                    : 'LT-1 精轨扫描会同步 ENVI/SARscape 与 Gamma 共用的生产 TXT 池；S1 EOF 只登记为源精轨资产，ISCE2 XML 已停用。')}
               </div>
               <div className="health-card-note">{en ? 'Source path: ' : '源目录路径：'}{formatPathText(orbitSource.path)}</div>
-              <div className="health-card-note">{en ? 'ENVI pool: ' : 'ENVI 池：'}{formatPathText(orbitPools.envi?.path)}</div>
-              <div className="health-card-note">{en ? 'ISCE2 pool: ' : 'ISCE2 池：'}{formatPathText(orbitPools.isce2?.path)}</div>
-              <div className="health-card-note">{en ? 'LANDSAR pool: ' : 'LANDSAR 池：'}{formatPathText(orbitPools.landsar?.path)}</div>
-              <div className="health-card-note">{en ? 'Quarantine path: ' : '隔离目录：'}{formatPathText(orbitQuarantinePath)}</div>
+              <div className="health-card-note">{en ? 'Production TXT pool: ' : '生产 TXT 池：'}{formatPathText(orbitPools.envi?.path)}</div>
+              {orbitIsce2Enabled && (
+                <>
+                  <div className="health-card-note">{en ? 'Legacy ISCE2 pool: ' : 'Legacy ISCE2 池：'}{formatPathText(orbitPools.isce2?.path)}</div>
+                  <div className="health-card-note">{en ? 'Quarantine path: ' : '隔离目录：'}{formatPathText(orbitQuarantinePath)}</div>
+                </>
+              )}
 
               {orbitDuplicateCount > 0 && (
                 <div className="health-card-note warn">
@@ -1182,7 +1203,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                     : `数据库 orbit_file_path 指向不存在文件：${orbitDbMissingPathCount} / ${toNumber(orbitDatabase.distinct_orbit_path_count)}`}
                 </div>
               )}
-              {orbitSuspectBadCount > 0 && (
+              {orbitIsce2Enabled && orbitSuspectBadCount > 0 && (
                 <div className="health-card-note warn">
                   {en
                     ? `Suspect bad source TXT (source exists but ISCE2 XML missing): ${orbitSuspectBadCount}`
@@ -1202,7 +1223,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                   {orbitDatabase.sample_missing_in_envi.slice(0, 5).join(', ')}
                 </div>
               )}
-              {orbitDatabase.sample_missing_in_isce2?.length > 0 && (
+              {orbitIsce2Enabled && orbitDatabase.sample_missing_in_isce2?.length > 0 && (
                 <div className="health-card-note error">
                   {en ? 'DB expected but ISCE2 pool missing: ' : '数据库期望但 ISCE2 池缺失：'}
                   {orbitDatabase.sample_missing_in_isce2.slice(0, 5).join(', ')}
@@ -1214,7 +1235,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                   {renderOrbitSourceIssueDetails(item, en, formatPathText)}
                 </div>
               ))}
-              {orbitSuspectWithoutCorruptionSamples.slice(0, 5).map((item) => (
+              {orbitIsce2Enabled && orbitSuspectWithoutCorruptionSamples.slice(0, 5).map((item) => (
                 <div key={`orbit-suspect-bad-${item.name}`} className="health-card-note warn">
                   {item.name}
                   {renderOrbitSourceIssueDetails(item, en, formatPathText)}
@@ -1257,7 +1278,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                   {en ? 'ENVI pool scan error: ' : 'ENVI 池扫描异常：'}{item}
                 </div>
               ))}
-              {(orbitPools.isce2?.errors || []).slice(0, 3).map((item, index) => (
+              {orbitIsce2Enabled && (orbitPools.isce2?.errors || []).slice(0, 3).map((item, index) => (
                 <div key={`orbit-isce2-error-${index}`} className="health-card-note error">
                   {en ? 'ISCE2 pool scan error: ' : 'ISCE2 池扫描异常：'}{item}
                 </div>
@@ -1283,44 +1304,48 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                 >
                   {orbitSyncing ? (en ? 'Checking...' : '检查中...') : (en ? 'Check Consistency' : '精轨一致性检查')}
                 </button>
-                <button
-                  onClick={async () => {
-                    setOrbitRepairing(true);
-                    setOrbitSyncResult(null);
-                    try {
-                      const result = await syncOrbitPools({ repair: true });
-                      setOrbitSyncResult(result);
-                      await refreshOrbitStatus();
-                    } catch (e) {
-                      setOrbitSyncResult({ error: e.response?.data?.detail || e.message });
-                    } finally {
-                      setOrbitRepairing(false);
-                    }
-                  }}
-                  disabled={orbitSyncing || orbitRepairing || orbitQuarantining}
-                  style={{ padding: '4px 12px', background: '#0f766e', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
-                >
-                  {orbitRepairing ? (en ? 'Repairing...' : '修复中...') : (en ? 'Repair Missing XML' : '修复缺失 XML')}
-                </button>
-                <button
-                  onClick={async () => {
-                    setOrbitQuarantining(true);
-                    setOrbitSyncResult(null);
-                    try {
-                      const result = await syncOrbitPools({ quarantine_bad: true });
-                      setOrbitSyncResult(result);
-                      await refreshOrbitStatus();
-                    } catch (e) {
-                      setOrbitSyncResult({ error: e.response?.data?.detail || e.message });
-                    } finally {
-                      setOrbitQuarantining(false);
-                    }
-                  }}
-                  disabled={orbitSyncing || orbitRepairing || orbitQuarantining}
-                  style={{ padding: '4px 12px', background: '#b45309', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
-                >
-                  {orbitQuarantining ? (en ? 'Quarantining...' : '隔离中...') : (en ? 'Quarantine Bad TXT' : '隔离坏精轨')}
-                </button>
+                {orbitIsce2Enabled && (
+                  <>
+                    <button
+                      onClick={async () => {
+                        setOrbitRepairing(true);
+                        setOrbitSyncResult(null);
+                        try {
+                          const result = await syncOrbitPools({ repair: true });
+                          setOrbitSyncResult(result);
+                          await refreshOrbitStatus();
+                        } catch (e) {
+                          setOrbitSyncResult({ error: e.response?.data?.detail || e.message });
+                        } finally {
+                          setOrbitRepairing(false);
+                        }
+                      }}
+                      disabled={orbitSyncing || orbitRepairing || orbitQuarantining}
+                      style={{ padding: '4px 12px', background: '#0f766e', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
+                    >
+                      {orbitRepairing ? (en ? 'Repairing...' : '修复中...') : (en ? 'Repair Missing XML' : '修复缺失 XML')}
+                    </button>
+                    <button
+                      onClick={async () => {
+                        setOrbitQuarantining(true);
+                        setOrbitSyncResult(null);
+                        try {
+                          const result = await syncOrbitPools({ quarantine_bad: true });
+                          setOrbitSyncResult(result);
+                          await refreshOrbitStatus();
+                        } catch (e) {
+                          setOrbitSyncResult({ error: e.response?.data?.detail || e.message });
+                        } finally {
+                          setOrbitQuarantining(false);
+                        }
+                      }}
+                      disabled={orbitSyncing || orbitRepairing || orbitQuarantining}
+                      style={{ padding: '4px 12px', background: '#b45309', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
+                    >
+                      {orbitQuarantining ? (en ? 'Quarantining...' : '隔离中...') : (en ? 'Quarantine Bad TXT' : '隔离坏精轨')}
+                    </button>
+                  </>
+                )}
               </div>
 
               {orbitSyncResult && (
@@ -1387,8 +1412,8 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                           </div>
                           <div className="health-card-note">
                             {en
-                              ? `Source scan ${toNumber(orbitSyncResult.sync_result?.total_source)}, ENVI copied ${(orbitSyncResult.sync_result?.envi?.copied || []).length}, ENVI refreshed ${(orbitSyncResult.sync_result?.envi?.updated || []).length}, ISCE2 converted ${(orbitSyncResult.sync_result?.isce2?.converted || []).length}, ISCE2 refreshed ${(orbitSyncResult.sync_result?.isce2?.reconverted || []).length}`
-                              : `源目录扫描 ${toNumber(orbitSyncResult.sync_result?.total_source)} 项，ENVI 新增 ${(orbitSyncResult.sync_result?.envi?.copied || []).length} 项、刷新 ${(orbitSyncResult.sync_result?.envi?.updated || []).length} 项，ISCE2 新增转换 ${(orbitSyncResult.sync_result?.isce2?.converted || []).length} 项、重转 ${(orbitSyncResult.sync_result?.isce2?.reconverted || []).length} 项`}
+                              ? `Source scan ${toNumber(orbitSyncResult.sync_result?.total_source)}, TXT copied ${(orbitSyncResult.sync_result?.envi?.copied || []).length}, TXT refreshed ${(orbitSyncResult.sync_result?.envi?.updated || []).length}${orbitSyncResult.isce2_enabled ? `, ISCE2 converted ${(orbitSyncResult.sync_result?.isce2?.converted || []).length}, ISCE2 refreshed ${(orbitSyncResult.sync_result?.isce2?.reconverted || []).length}` : ', ISCE2 disabled'}`
+                              : `源目录扫描 ${toNumber(orbitSyncResult.sync_result?.total_source)} 项，TXT 新增 ${(orbitSyncResult.sync_result?.envi?.copied || []).length} 项、刷新 ${(orbitSyncResult.sync_result?.envi?.updated || []).length} 项${orbitSyncResult.isce2_enabled ? `，ISCE2 新增转换 ${(orbitSyncResult.sync_result?.isce2?.converted || []).length} 项、重转 ${(orbitSyncResult.sync_result?.isce2?.reconverted || []).length} 项` : '，ISCE2 已停用'}`}
                           </div>
                           {(orbitSyncResult.repaired_from_envi || []).slice(0, 5).length > 0 && (
                             <div className="health-card-note ok">
@@ -1428,8 +1453,8 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                           </div>
                           <div className="health-card-note">
                             {en
-                              ? `ENVI ${toNumber(orbitSyncResult.envi?.total)}, ISCE2 ${toNumber(orbitSyncResult.isce2?.total)}, scan errors ${toNumber(orbitSyncResult.error_count)}`
-                              : `ENVI ${toNumber(orbitSyncResult.envi?.total)} 项，ISCE2 ${toNumber(orbitSyncResult.isce2?.total)} 项，扫描异常 ${toNumber(orbitSyncResult.error_count)} 项`}
+                              ? `TXT ${toNumber(orbitSyncResult.envi?.total)}${orbitSyncResult.isce2?.enabled ? `, ISCE2 ${toNumber(orbitSyncResult.isce2?.total)}` : ', ISCE2 disabled'}, scan errors ${toNumber(orbitSyncResult.error_count)}`
+                              : `TXT ${toNumber(orbitSyncResult.envi?.total)} 项${orbitSyncResult.isce2?.enabled ? `，ISCE2 ${toNumber(orbitSyncResult.isce2?.total)} 项` : '，ISCE2 已停用'}，扫描异常 ${toNumber(orbitSyncResult.error_count)} 项`}
                           </div>
                           {(orbitSyncResult.mismatches || []).slice(0, 5).map((item, index) => (
                             <div key={`orbit-check-mismatch-${index}`} className="health-card-note error">

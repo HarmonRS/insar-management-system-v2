@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import os
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..config import read_int_env
+from ..config import read_int_env, settings
 from ..database import get_db
 from ..services.job_queue_service import job_queue_service
 from ..services.task_service import TASK_LOG_DEFAULT_LIMIT, TASK_LOG_MAX_LIMIT, TASK_QUERY_MAX_OFFSET, task_service
@@ -33,12 +35,14 @@ COPY_BATCH_MAX_COPY_ITEMS = read_int_env(
     minimum=1,
     maximum=200000,
 )
-COPY_DINSAR_PACKAGE_MODES = {"task_folder", "task_zip", "source_bundle"}
+COPY_DINSAR_PACKAGE_MODES = {"task_folder", "source_bundle"}
+_COPY_TARGET_NAME_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff._-]+")
 
 
 class CopyBatchRequest(BaseModel):
     batch_id: str = Field(max_length=COPY_BATCH_TEXT_MAX_LENGTH)
-    dest_dir: str = Field(max_length=COPY_BATCH_TEXT_MAX_LENGTH)
+    dest_dir: str = Field(default="", max_length=COPY_BATCH_TEXT_MAX_LENGTH)
+    target_name: Optional[str] = Field(default=None, max_length=255)
     copy_statuses: Optional[List[str]] = None
     include_orbit_files: bool = False
     export_zip: bool = False
@@ -46,13 +50,24 @@ class CopyBatchRequest(BaseModel):
     skip_existing: bool = True
     max_items: Optional[int] = None
 
-    @field_validator("batch_id", "dest_dir", mode="before")
+    @field_validator("batch_id", mode="before")
     @classmethod
     def _normalize_required_text(cls, value):
         normalized = str(value or "").strip()
         if not normalized:
             raise ValueError("Field must not be empty.")
         return normalized
+
+    @field_validator("dest_dir", mode="before")
+    @classmethod
+    def _normalize_optional_dest_dir(cls, value):
+        return str(value or "").strip()
+
+    @field_validator("target_name", mode="before")
+    @classmethod
+    def _normalize_optional_target_name(cls, value):
+        normalized = str(value or "").strip()
+        return normalized or None
 
     @field_validator("copy_statuses", mode="before")
     @classmethod
@@ -88,6 +103,10 @@ class CopyBatchRequest(BaseModel):
     @classmethod
     def _normalize_package_mode(cls, value):
         normalized = str(value or "task_folder").strip().lower()
+        if normalized == "task_zip":
+            normalized = "task_folder"
+        if normalized in {"bundle", "dedupe_source"}:
+            normalized = "source_bundle"
         if normalized not in COPY_DINSAR_PACKAGE_MODES:
             raise ValueError(
                 f"package_mode must be one of: {sorted(COPY_DINSAR_PACKAGE_MODES)}."
@@ -115,6 +134,28 @@ def _normalize_copy_batch_statuses(copy_statuses: Optional[List[str]]) -> List[s
     return normalized or ["COMPLETED"]
 
 
+def _safe_copy_target_name(value: Optional[str]) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="target_name 不能为空")
+    if os.path.isabs(raw) or os.path.splitdrive(raw)[0] or "\\" in raw or "/" in raw:
+        raise HTTPException(status_code=400, detail="target_name 只能是任务名，不能包含路径")
+    normalized = _COPY_TARGET_NAME_RE.sub("_", raw).strip("._ ")
+    if not normalized:
+        raise HTTPException(status_code=400, detail="target_name 不合法")
+    if normalized.upper() in {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3"}:
+        raise HTTPException(status_code=400, detail="target_name 是 Windows 保留名称")
+    return normalized[:120]
+
+
+def _server_copy_destination(package_mode: str, target_name: Optional[str]) -> str:
+    safe_name = _safe_copy_target_name(target_name)
+    root = settings.DINSAR_TASK_POOL_ROOT if package_mode == "task_folder" else settings.DATA_DISTRIBUTION_ROOT
+    if not root:
+        raise HTTPException(status_code=500, detail="服务器目标根目录未配置")
+    return os.path.normpath(os.path.join(root, safe_name))
+
+
 @router.post("/tools/copy-ps-stack")
 async def copy_ps_stack_endpoint(
     request: CopyBatchRequest,
@@ -124,20 +165,26 @@ async def copy_ps_stack_endpoint(
     """
     Start PS-InSAR copy task from a batch.
     """
-    _validate_export_path(request.dest_dir, "dest_dir")
     try:
         copy_statuses = _normalize_copy_batch_statuses(request.copy_statuses)
+        if request.target_name:
+            dest_dir = _server_copy_destination("source_bundle", request.target_name)
+        else:
+            dest_dir = request.dest_dir
+            _validate_export_path(dest_dir, "dest_dir")
         params = {
-            "dest_dir": request.dest_dir,
+            "dest_dir": dest_dir,
+            "target_name": request.target_name,
             "file_type": "PS_STACK",
             "batch_id": request.batch_id,
             "copy_statuses": copy_statuses,
         }
-        task_id = await task_service.create_task("COPY_DATA", f"PS数据分发: {request.dest_dir}", params=params)
+        task_id = await task_service.create_task("COPY_DATA", f"PS数据分发: {request.target_name or dest_dir}", params=params)
 
         payload = {
             "file_type": "PS_STACK",
-            "dest_dir": request.dest_dir,
+            "dest_dir": dest_dir,
+            "target_name": request.target_name,
             "batch_id": request.batch_id,
             "copy_statuses": copy_statuses,
         }
@@ -150,7 +197,8 @@ async def copy_ps_stack_endpoint(
             detail={
                 "task_id": task_id,
                 "batch_id": request.batch_id,
-                "dest_dir": request.dest_dir,
+                "dest_dir": dest_dir,
+                "target_name": request.target_name,
                 "copy_statuses": copy_statuses,
             },
         )
@@ -169,32 +217,41 @@ async def copy_dinsar_pairs_endpoint(
     """
     Start D-InSAR copy task from a batch.
     """
-    _validate_export_path(request.dest_dir, "dest_dir")
     try:
         copy_statuses = _normalize_copy_batch_statuses(request.copy_statuses)
         package_mode = request.package_mode
-        if bool(request.export_zip) and package_mode == "task_folder":
-            package_mode = "task_zip"
+        if request.target_name:
+            dest_dir = _server_copy_destination(package_mode, request.target_name)
+        else:
+            dest_dir = request.dest_dir
+            _validate_export_path(dest_dir, "dest_dir")
         params = {
-            "dest_dir": request.dest_dir,
+            "dest_dir": dest_dir,
+            "target_name": request.target_name,
             "file_type": "DINSAR_PAIRS",
             "batch_id": request.batch_id,
             "copy_statuses": copy_statuses,
             "include_orbit_files": bool(request.include_orbit_files),
-            "export_zip": package_mode == "task_zip",
+            "export_zip": False,
             "package_mode": package_mode,
             "skip_existing": bool(request.skip_existing),
             "max_items": request.max_items,
         }
-        task_id = await task_service.create_task("COPY_DATA", f"D-InSAR 数据分发: {request.dest_dir}", params=params)
+        task_name = (
+            f"D-InSAR 生产数据准备: {request.target_name or dest_dir}"
+            if package_mode == "task_folder"
+            else f"D-InSAR 数据分发: {request.target_name or dest_dir}"
+        )
+        task_id = await task_service.create_task("COPY_DATA", task_name, params=params)
 
         payload = {
             "file_type": "DINSAR_PAIRS",
-            "dest_dir": request.dest_dir,
+            "dest_dir": dest_dir,
+            "target_name": request.target_name,
             "batch_id": request.batch_id,
             "copy_statuses": copy_statuses,
             "include_orbit_files": bool(request.include_orbit_files),
-            "export_zip": package_mode == "task_zip",
+            "export_zip": False,
             "package_mode": package_mode,
             "skip_existing": bool(request.skip_existing),
             "max_items": request.max_items,
@@ -208,10 +265,11 @@ async def copy_dinsar_pairs_endpoint(
             detail={
                 "task_id": task_id,
                 "batch_id": request.batch_id,
-                "dest_dir": request.dest_dir,
+                "dest_dir": dest_dir,
+                "target_name": request.target_name,
                 "copy_statuses": copy_statuses,
                 "include_orbit_files": bool(request.include_orbit_files),
-                "export_zip": package_mode == "task_zip",
+                "export_zip": False,
                 "package_mode": package_mode,
                 "skip_existing": bool(request.skip_existing),
                 "max_items": request.max_items,

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  auditSourceArchiveIntegrity,
   getAssetInventoryStatus,
   listAssetIssues,
   listOrbitAssets,
@@ -46,6 +47,9 @@ const Metric = ({ label, value, hint }) => (
   </div>
 );
 
+const INVENTORY_FAMILIES = ['LT1', 'S1'];
+const ACTIVE_ROOT_ROLES = new Set(['source_product_pool', 'orbit_asset_pool']);
+
 export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
   const [status, setStatus] = useState(null);
   const [sources, setSources] = useState({ items: [], total: 0, offset: 0, has_more: false });
@@ -55,10 +59,11 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
   const [family, setFamily] = useState('all');
   const [loading, setLoading] = useState(false);
   const [scanLoading, setScanLoading] = useState(false);
+  const [auditLoading, setAuditLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
-  const familyParam = useMemo(() => (family === 'all' ? undefined : family), [family]);
+  const familyParam = useMemo(() => (family === 'all' ? INVENTORY_FAMILIES.join(',') : family), [family]);
 
   const refresh = useCallback(async ({ sourceOffset = 0, orbitOffset = 0, issueOffset = 0 } = {}) => {
     setLoading(true);
@@ -85,13 +90,23 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
     refresh();
   }, [refresh]);
 
-  const handleScan = async () => {
+  const handleScan = async (scanPayload = {}, label = '源数据/精轨资产扫描') => {
     if (readOnly || scanLoading) return;
     setScanLoading(true);
     setMessage('');
     setError('');
+    const requestPayload =
+      scanPayload && typeof scanPayload === 'object' && scanPayload.nativeEvent
+        ? {}
+        : scanPayload;
     try {
-      const result = await scanAssetInventory({ inventory_types: [], root_ids: [], bind_orbits: true });
+      const result = await scanAssetInventory({
+        inventory_types: [],
+        root_ids: [],
+        bind_orbits: true,
+        families: INVENTORY_FAMILIES,
+        ...requestPayload,
+      });
       setMessage(`资产扫描任务已入队: ${result.task_id}`);
       onTaskStart?.(result.task_id, '源数据/精轨资产扫描已入队', {
         taskType: 'SCAN_ASSET_INVENTORY',
@@ -104,7 +119,36 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
     }
   };
 
-  const states = status?.states || [];
+  const handleArchiveIntegrityAudit = async (auditPayload = {}, label = '压缩包完整性审计') => {
+    if (readOnly || auditLoading) return;
+    setAuditLoading(true);
+    setMessage('');
+    setError('');
+    try {
+      const result = await auditSourceArchiveIntegrity({
+        families: family === 'all' ? INVENTORY_FAMILIES : [family],
+        source_formats: [],
+        asset_ids: [],
+        force: false,
+        ...auditPayload,
+      });
+      setMessage(`压缩包完整性审计任务已入队: ${result.task_id}`);
+      onTaskStart?.(result.task_id, `${label}已入队`, {
+        taskType: 'AUDIT_SOURCE_ARCHIVE_INTEGRITY',
+        nonBlocking: true,
+      });
+    } catch (err) {
+      setError(err?.response?.data?.detail || err.message || '启动压缩包完整性审计失败');
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
+  const states = (status?.states || []).filter((item) => (
+    item?.enabled !== false &&
+    ACTIVE_ROOT_ROLES.has(item?.root_role) &&
+    item?.status !== 'NEVER_SCANNED'
+  ));
   const sourceRoots = states.filter(item => item.inventory_type === 'source_product');
   const orbitRoots = states.filter(item => item.inventory_type === 'orbit_asset');
 
@@ -132,10 +176,17 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
             <option value="all">全部卫星族</option>
             <option value="S1">Sentinel-1</option>
             <option value="LT1">LT-1</option>
-            <option value="GF3">GF3</option>
           </select>
           <button type="button" onClick={() => refresh()} disabled={loading}>刷新</button>
-          <button type="button" onClick={handleScan} disabled={readOnly || scanLoading}>扫描资产</button>
+          <button type="button" onClick={() => handleScan({ families: INVENTORY_FAMILIES }, '全部资产扫描')} disabled={readOnly || scanLoading}>全部扫描</button>
+          <button type="button" onClick={() => handleScan({ families: ['LT1'] }, 'LT-1资产扫描')} disabled={readOnly || scanLoading}>LT-1扫描</button>
+          <button type="button" onClick={() => handleScan({ families: ['S1'] }, 'Sentinel-1资产扫描')} disabled={readOnly || scanLoading}>S1扫描</button>
+          <button type="button" onClick={() => handleScan({ inventory_types: ['orbit_asset'], families: INVENTORY_FAMILIES }, '全部精轨扫描')} disabled={readOnly || scanLoading}>全部精轨</button>
+          <button type="button" onClick={() => handleScan({ inventory_types: ['orbit_asset'], families: ['LT1'] }, 'LT-1精轨扫描')} disabled={readOnly || scanLoading}>LT-1精轨</button>
+          <button type="button" onClick={() => handleScan({ inventory_types: ['orbit_asset'], families: ['S1'] }, 'Sentinel-1精轨扫描')} disabled={readOnly || scanLoading}>S1精轨</button>
+          <button type="button" onClick={() => handleArchiveIntegrityAudit()} disabled={readOnly || auditLoading}>
+            {auditLoading ? '审计启动中' : '压缩包完整性审计'}
+          </button>
         </div>
       </div>
 
@@ -147,6 +198,11 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
         <Metric label="精轨资产" value={status?.orbit_asset_count} hint={`${orbitRoots.length} 个精轨根`} />
         <Metric label="已绑定场景" value={status?.selected_binding_count} />
         <Metric label="开放问题" value={status?.open_issue_count} />
+        <Metric
+          label="压缩包完整性"
+          value={status?.archive_integrity_counts?.OK || 0}
+          hint={`未审计 ${status?.archive_integrity_counts?.NOT_CHECKED || 0} / 失败 ${status?.archive_integrity_counts?.FAILED || 0}`}
+        />
       </div>
 
       <div className="asset-root-strip">
@@ -183,6 +239,7 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
                 <th>产品</th>
                 <th>轨道</th>
                 <th>状态</th>
+                <th>完整性</th>
                 <th>动作</th>
                 <th>文件</th>
               </tr>
@@ -196,6 +253,10 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
                     <td>{item.source_format}<small>{item.imaging_mode} / {item.polarization}</small></td>
                     <td>{item.relative_orbit || '-'}<small>abs {item.absolute_orbit || '-'}</small></td>
                     <td><StatusBadge value={item.parse_status} /></td>
+                    <td title={item.archive_integrity_error || ''}>
+                      <StatusBadge value={item.archive_integrity_status || 'NOT_CHECKED'} />
+                      <small>{item.archive_integrity_member_count != null ? `${item.archive_integrity_member_count} files` : item.archive_integrity_method || '-'}</small>
+                    </td>
                     <td>
                       <span className="asset-action-placeholder">-</span>
                     </td>

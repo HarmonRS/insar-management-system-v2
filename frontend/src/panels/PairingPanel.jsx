@@ -5,7 +5,6 @@ export default function PairingPanel({
     isReadOnlyUser,
     hasEnoughRadarScenesForPlanning,
     onOpenPairingModal,
-    onOpenPsModal,
     hasRadarSearched,
     onRefreshRadarSearch,
     onSearchAll,
@@ -25,10 +24,7 @@ export default function PairingPanel({
                 </p>
                 <div className="header-buttons" style={{ marginTop: '10px' }}>
                     <button onClick={onOpenPairingModal} disabled={isLoading || !hasEnoughRadarScenesForPlanning || isReadOnlyUser} style={{ flex: 1 }}>
-                        {en ? 'Pair' : '配对'}
-                    </button>
-                    <button onClick={onOpenPsModal} disabled={isLoading || !hasEnoughRadarScenesForPlanning || isReadOnlyUser} style={{ flex: 1 }}>
-                        {en ? 'Timeseries Prep' : '时序准备'}
+                        {en ? 'Plan D-InSAR Pairs' : '生成 D-InSAR 配对'}
                     </button>
                 </div>
             </div>

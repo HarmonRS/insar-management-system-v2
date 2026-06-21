@@ -56,40 +56,120 @@ export const getBaseLayerConfig = key => BASE_LAYERS[key] || BASE_LAYERS[TILE_LA
 
 export const PRODUCTION_WORKSPACE_TAB = 'production_management';
 export const PRODUCTION_WORKSPACE_LEGACY_TABS = [
+  'pairing',
+  'pairs',
+  'ps_results',
+  'batches',
+  'copier',
   'dinsar_production',
   'dinsar_products',
   'ps_production',
   'ps_products',
 ];
 
-export const PRODUCTION_WORKSPACE_VIEWS = [
+export const PRODUCTION_WORKSPACE_DINSAR_VIEWS = [
+  {
+    key: 'dinsar_pairing',
+    label: '配对规划',
+    description: '按时间基线、空间关系、覆盖重叠率和 AOI 生成 D-InSAR 候选干涉对。',
+  },
+  {
+    key: 'dinsar_pairs',
+    label: '候选对与批次',
+    description: '审查候选干涉对，选择可进入生产的任务，并在同一流程中管理 D-InSAR 批次。',
+  },
+  {
+    key: 'dinsar_prepare',
+    label: '生产准备',
+    description: '按批次解包源压缩包到本机 Task_Pool，或导出源压缩包分发包。',
+  },
   {
     key: 'dinsar_runs',
-    label: 'D-InSAR 运行',
+    label: '生产运行',
     description: '运行任务编排、引擎切换与过程监控',
   },
   {
-    key: 'sbas_insar_production',
-    label: 'SBAS-InSAR Production',
-    description: 'Gamma IPTA SBAS stack production, velocity maps, quality metrics, and monitor-point curves',
-  },
-  {
-    key: 'sbas_insar_products',
-    label: 'SBAS-InSAR 结果',
-    description: 'Gamma SBAS LOS velocity, uncertainty, coverage and monitoring-point product catalog',
-  },
-  {
     key: 'dinsar_products',
-    label: 'D-InSAR 产物',
+    label: '结果管理',
     description: '结果提取、标准目录发布与产物编目',
   },
 ];
 
+export const PRODUCTION_WORKSPACE_SBAS_VIEWS = [
+  {
+    key: 'sbas_insar_planning',
+    label: '序列规划',
+    description: '按生产区域发现 SBAS 候选序列，审计覆盖、时序密度、精轨和公共重叠范围。',
+  },
+  {
+    key: 'sbas_insar_batches',
+    label: '候选栈与Run',
+    description: '查看候选序列、Manifest 与已创建的 SBAS 生产 Run。',
+  },
+  {
+    key: 'sbas_insar_prepare',
+    label: '生产准备',
+    description: '配置 DEM、处理器参数、Workflow Manifest 与生产前检查。',
+  },
+  {
+    key: 'sbas_insar_runs',
+    label: '生产运行',
+    description: '跟踪 LandSAR/Gamma SBAS Run 状态、任务执行和阶段产物。',
+  },
+  {
+    key: 'sbas_insar_products',
+    label: '结果管理',
+    description: 'Gamma SBAS LOS velocity, uncertainty, coverage and monitoring-point product catalog',
+  },
+];
+
+export const PRODUCTION_WORKSPACE_WORKBENCHES = [
+  {
+    key: 'dinsar_workbench',
+    label: 'D-InSAR工作台',
+    description: '配对规划、候选对与批次、生产准备、生产运行和结果管理集中到一条 D-InSAR 工作流。',
+    defaultView: 'dinsar_pairing',
+    views: PRODUCTION_WORKSPACE_DINSAR_VIEWS,
+  },
+  {
+    key: 'sbas_workbench',
+    label: 'SBAS-InSAR工作台',
+    description: '围绕 SBAS 序列发现、生产执行和结果 catalog 管理组织时序 InSAR 生产。',
+    defaultView: 'sbas_insar_planning',
+    views: PRODUCTION_WORKSPACE_SBAS_VIEWS,
+  },
+];
+
+export const PRODUCTION_WORKSPACE_VIEWS = [
+  ...PRODUCTION_WORKSPACE_DINSAR_VIEWS,
+  ...PRODUCTION_WORKSPACE_SBAS_VIEWS,
+  {
+    key: 'lt1_production',
+    label: '陆探生产占位',
+    description: 'LT-1 源压缩包本机登记，按需 materialize 到 Task_Pool；D-InSAR/SBAS 生产不走 UNC。',
+  },
+  {
+    key: 'sentinel1_production',
+    label: '哨兵生产占位',
+    description: 'Sentinel-1 ZIP/SAFE 与 EOF 精轨本机管理，按需解包；当前 SBAS 仅保留规划能力。',
+  },
+  {
+    key: 'gf3_native_registration',
+    label: '高分三结果登记',
+    description: 'GF3 在外部 SARscape 服务器生产，本机只登记复制回来的 _geo 二进制并生成 WebP。',
+  },
+];
+
 export const PRODUCTION_WORKSPACE_ENTRY_TO_VIEW = Object.freeze({
-  [PRODUCTION_WORKSPACE_TAB]: 'dinsar_runs',
+  [PRODUCTION_WORKSPACE_TAB]: 'dinsar_pairing',
+  pairing: 'dinsar_pairing',
+  pairs: 'dinsar_pairs',
+  ps_results: 'sbas_insar_planning',
+  batches: 'dinsar_pairs',
+  copier: 'dinsar_prepare',
   dinsar_production: 'dinsar_runs',
   dinsar_products: 'dinsar_products',
-  ps_production: 'sbas_insar_production',
+  ps_production: 'sbas_insar_runs',
   ps_products: 'sbas_insar_products',
 });
 
@@ -100,27 +180,13 @@ export const PRODUCTION_WORKSPACE_ROUTE_TABS = new Set([
 
 export const LEFT_GROUP_LABELS = {
   data: '数据管理',
-  production_planning: '生产规划',
   production_management: '生产管理',
   insar_analysis: 'InSAR形变分析',
-  ai_analysis: 'AI分析',
   flood_analysis: '洪涝灾害分析',
   ops: '运行维护',
 };
 
 export const LEFT_GROUP_SECTIONS = {
-  production_planning: [
-    {
-      key: 'planning',
-      label: '规划编组',
-      tabs: ['pairing', 'pairs', 'ps_results', 'batches'],
-    },
-    {
-      key: 'dispatch',
-      label: '数据分发',
-      tabs: ['copier'],
-    },
-  ],
   insar_analysis: [
     {
       key: 'dinsar',
@@ -129,30 +195,16 @@ export const LEFT_GROUP_SECTIONS = {
     },
     {
       key: 'psinsar',
-      label: '时序InSAR',
+      label: 'SBAS',
       tabs: ['psinsar_analysis'],
-    },
-  ],
-  ai_analysis: [
-    {
-      key: 'deformation_ai',
-      label: '形变智能分析',
-      tabs: ['ai_quality', 'ai_diagnosis'],
-    },
-    {
-      key: 'vision_ai',
-      label: '遥感视觉分析',
-      tabs: ['landslide_segmentation', 'uav_image_analysis'],
     },
   ],
 };
 
 export const LEFT_GROUP_TABS = {
   data: ['ingest', 'asset_inventory', 'data', 'hazard'],
-  production_planning: LEFT_GROUP_SECTIONS.production_planning.flatMap(section => section.tabs),
   production_management: [PRODUCTION_WORKSPACE_TAB],
   insar_analysis: LEFT_GROUP_SECTIONS.insar_analysis.flatMap(section => section.tabs),
-  ai_analysis: LEFT_GROUP_SECTIONS.ai_analysis.flatMap(section => section.tabs),
   flood_analysis: ['flood_analysis'],
   ops: ['health', 'users', 'audit'],
 };

@@ -18,7 +18,7 @@ from ..models import (
 
 
 PAIRING_CACHE_SCOPE_GLOBAL = "global"
-DEFAULT_PAIRING_METRIC_VERSION = "2026.05.raw.v1"
+DEFAULT_PAIRING_METRIC_VERSION = "2026.06.dinsar.family.v1"
 PAIRING_ORIENTATION_RULE_VERSION = "date_then_scene_uid_v1"
 
 

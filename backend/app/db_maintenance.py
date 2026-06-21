@@ -40,6 +40,8 @@ MIGRATION_FILES = [
     "008_timeseries_stack_plan_edges.sql",
     "009_raw_source_pairing_fields.sql",
     "010_source_orbit_asset_inventory.sql",
+    "011_source_metadata_documents.sql",
+    "012_source_archive_integrity.sql",
 ]
 
 

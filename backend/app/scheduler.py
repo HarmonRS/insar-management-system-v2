@@ -13,8 +13,11 @@ MONITOR_CONFIG = {
     # LT-1 链路
     "radar_dirs": split_env_paths(settings.MONITOR_RADAR_DIRS),
     "orbit_dir": settings.MONITOR_ORBIT_DIR,
-    "dinsar_dirs": split_env_paths(settings.MONITOR_DINSAR_DIRS),
-    # Sentinel-1 链路
+    "dinsar_dirs": split_env_paths(settings.MONITOR_DINSAR_DIRS) or [settings.DINSAR_PRODUCT_DIR],
+    "task_pool_root": settings.TASK_POOL_ROOT,
+    "dinsar_task_pool_root": settings.DINSAR_TASK_POOL_ROOT,
+    "sbas_task_pool_root": settings.SBAS_TASK_POOL_ROOT,
+    # LT-1 / Sentinel-1 source inventory
     "s1_source_dirs": split_env_paths(settings.SOURCE_PRODUCT_DIRS),
     "s1_storage_dirs": split_env_paths(settings.SENTINEL1_STORAGE_DIRS),
     "s1_orbit_dirs": split_env_paths(settings.ORBIT_SOURCE_DIRS),

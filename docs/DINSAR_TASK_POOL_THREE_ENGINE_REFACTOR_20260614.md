@@ -222,7 +222,7 @@ Current direction:
   - directory sources are copied into `master/` and `slave/`;
   - `S1_ZIP`, `LT1_ARCHIVE`, and other supported archives are extracted into `master/` and `slave/`;
   - staged orbit files go into `orbit/`.
-- Engines must consume local Task_Pool paths, not UNC source archive paths.
+- Engines must consume local Task_Pool paths. LT-1 and Sentinel-1 source archives are also local; UNC is not an active production source pool.
 - `.dinsar_pair.json` records `source_materialization` so cleanup can distinguish copied directories, extracted archives, and staged files.
 
 Cleanup implication:

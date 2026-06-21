@@ -138,12 +138,15 @@ export default function useRadarSearch({
     }, [setRadarSearchOptions, setRadarSearchOptionsLoading]);
 
     const processAndSetAllData = useCallback((data) => {
-        const nameCounts = {};
         const dataWithDisplayNames = data.map(item => {
-            const baseName = `${item.satellite}_${item.imaging_mode}_${item.imaging_date}`;
-            nameCounts[baseName] = (nameCounts[baseName] || 0) + 1;
-            const count = nameCounts[baseName];
-            const displayName = count > 1 ? `${baseName}_${count - 1}` : baseName;
+            const filePath = String(item.file_path || '').trim().replace(/[\\/]+$/, '');
+            const fileName = filePath ? filePath.split(/[\\/]/).pop() : '';
+            const displayName =
+                fileName
+                || item.product_unique_id
+                || item.unique_id
+                || [item.satellite, item.imaging_mode, item.imaging_date].filter(Boolean).join('_')
+                || `SAR_${item.id}`;
             const previewStatus = normalizePreviewStatus(item.preview_cache_status);
             return {
                 ...item,

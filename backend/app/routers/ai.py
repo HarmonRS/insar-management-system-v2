@@ -15,7 +15,9 @@ from typing import List, Optional
 
 from ..ai_service import (
     analyze_map_with_vlm,
+    get_ollama_models,
     get_model_info,
+    is_likely_vlm_model,
     is_model_trained,
     predict_quality,
     train_quality_model,
@@ -146,12 +148,12 @@ async def get_ai_status(db: AsyncSession = Depends(get_db)):
     counts = await dinsar_read_service.get_ai_status_counts(db)
 
     ollama_online = False
+    ollama_models: List[str] = []
+    ollama_vlm_models: List[str] = []
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=1.0) as client:
-            ollama_base = settings.OLLAMA_BASE_URL
-            response = await client.get(f"{ollama_base.rstrip('/')}/api/tags")
-            ollama_online = response.status_code == 200
+        ollama_models = await get_ollama_models(timeout=1.0)
+        ollama_vlm_models = [model for model in ollama_models if is_likely_vlm_model(model)]
+        ollama_online = True
     except Exception:
         ollama_online = False
 
@@ -161,7 +163,11 @@ async def get_ai_status(db: AsyncSession = Depends(get_db)):
         "labeled_count": counts["labeled_count"],
         "good_count": counts["good_count"],
         "bad_count": counts["bad_count"],
-        "ollama_online": ollama_online
+        "ollama_online": ollama_online,
+        "ollama_models": ollama_models,
+        "ollama_vlm_models": ollama_vlm_models,
+        "ollama_base_url": settings.OLLAMA_BASE_URL,
+        "default_vlm_model": settings.DEFAULT_VLM_MODEL,
     }
 
 

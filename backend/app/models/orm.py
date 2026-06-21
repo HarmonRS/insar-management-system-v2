@@ -3,7 +3,7 @@ SQLAlchemy ORM 模型定义。
 所有数据库表对应的 ORM 类均在此文件中定义。
 """
 from sqlalchemy import (
-    Column, Integer, BigInteger, String, Boolean, Float, JSON, Text,
+    Column, Integer, BigInteger, String, Boolean, Float, JSON, Text, LargeBinary,
     DateTime, func, ForeignKey, UniqueConstraint, Index,
 )
 from sqlalchemy.orm import relationship
@@ -384,7 +384,15 @@ class PairingMetricCacheORM(Base):
     spatial_baseline_meters = Column(Float, index=True, nullable=True)
     scene_center_distance_meters = Column(Float, index=True, nullable=True)
     scene_overlap_ratio = Column(Float, index=True, nullable=True)
+    pair_aoi_overlap_ratio = Column(Float, nullable=True)
     orbit_direction = Column(String, index=True, nullable=True)
+    same_relative_orbit = Column(Boolean, nullable=False, default=False, server_default="false", index=True)
+    master_relative_orbit = Column(String(64), nullable=True)
+    slave_relative_orbit = Column(String(64), nullable=True)
+    dinsar_quality_tier = Column(String(16), nullable=False, default="C", server_default="C", index=True)
+    dinsar_quality_score = Column(Float, nullable=True)
+    dinsar_readiness = Column(String(32), nullable=False, default="CANDIDATE", server_default="CANDIDATE", index=True)
+    dinsar_reasons_json = Column(JSON, nullable=True)
     same_satellite = Column(Boolean, nullable=False, default=True)
     same_satellite_family = Column(Boolean, nullable=False, default=True, server_default="true")
     same_look_direction = Column(Boolean, nullable=False, default=True, server_default="true")
@@ -875,6 +883,12 @@ class SourceProductAssetORM(Base):
     mtime_epoch = Column(Float, nullable=True)
     checksum_sha256 = Column(String(64), nullable=True)
     checksum_status = Column(String(32), nullable=False, default="NOT_COMPUTED", server_default="NOT_COMPUTED")
+    archive_integrity_status = Column(String(32), nullable=False, default="NOT_CHECKED", server_default="NOT_CHECKED", index=True)
+    archive_integrity_method = Column(String(64), nullable=True)
+    archive_integrity_checked_at = Column(DateTime, nullable=True)
+    archive_integrity_error = Column(Text, nullable=True)
+    archive_integrity_version = Column(String(32), nullable=True)
+    archive_integrity_member_count = Column(Integer, nullable=True)
     parser_name = Column(String(64), nullable=True)
     parser_version = Column(String(32), nullable=True)
     parse_status = Column(String(32), nullable=False, default="PENDING", server_default="PENDING", index=True)
@@ -892,6 +906,84 @@ class SourceProductAssetORM(Base):
         Index("idx_source_product_assets_family_date", "satellite_family", "imaging_date"),
         Index("idx_source_product_assets_logical_product", "logical_product_uid"),
         Index("idx_source_product_assets_root_active", "root_ref_id", "is_active"),
+    )
+
+
+class SourceMetadataDocumentORM(Base):
+    __tablename__ = "source_metadata_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_asset_id = Column(Integer, ForeignKey("source_product_assets.id", ondelete="CASCADE"), index=True, nullable=False)
+    radar_data_id = Column(Integer, ForeignKey("radar_data.id", ondelete="SET NULL"), index=True, nullable=True)
+    satellite_family = Column(String(32), index=True, nullable=True)
+    source_format = Column(String(32), index=True, nullable=True)
+    document_type = Column(String(32), index=True, nullable=False)
+    member_path = Column(String, nullable=False)
+    content_sha256 = Column(String(64), index=True, nullable=False)
+    content_encoding = Column(String(16), nullable=False, default="gzip", server_default="gzip")
+    content_bytes = Column(LargeBinary, nullable=False)
+    content_size_bytes = Column(BigInteger, nullable=True)
+    archive_path = Column(String, nullable=True)
+    archive_mtime = Column(Float, nullable=True)
+    parser_version = Column(String(32), nullable=True)
+    parse_status = Column(String(32), nullable=False, default="OK", server_default="OK", index=True)
+    parse_error = Column(Text, nullable=True)
+    extracted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    source_asset = relationship("SourceProductAssetORM")
+    radar_data = relationship("RadarDataORM")
+
+    __table_args__ = (
+        UniqueConstraint("source_asset_id", "document_type", "member_path", name="uq_source_metadata_document_member"),
+        Index("idx_source_metadata_documents_asset_type", "source_asset_id", "document_type"),
+        Index("idx_source_metadata_documents_radar_type", "radar_data_id", "document_type"),
+    )
+
+
+class SARSceneGeometryProfileORM(Base):
+    __tablename__ = "sar_scene_geometry_profiles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_asset_id = Column(Integer, ForeignKey("source_product_assets.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
+    radar_data_id = Column(Integer, ForeignKey("radar_data.id", ondelete="CASCADE"), unique=True, index=True, nullable=True)
+    satellite_family = Column(String(32), index=True, nullable=True)
+    satellite = Column(String(32), index=True, nullable=True)
+    source_format = Column(String(32), index=True, nullable=True)
+    imaging_mode = Column(String(64), index=True, nullable=True)
+    polarization = Column(String(64), index=True, nullable=True)
+    orbit_direction = Column(String(32), index=True, nullable=True)
+    look_direction = Column(String(32), index=True, nullable=True)
+    absolute_orbit = Column(String(64), index=True, nullable=True)
+    relative_orbit = Column(String(64), index=True, nullable=True)
+    acquisition_start_time_utc = Column(DateTime, index=True, nullable=True)
+    acquisition_stop_time_utc = Column(DateTime, nullable=True)
+    scene_center_lon = Column(Float, nullable=True)
+    scene_center_lat = Column(Float, nullable=True)
+    footprint_geom = Column(Geometry("POLYGON", srid=4326), index=True, nullable=True)
+    footprint_polygon = Column(JSON, nullable=True)
+    swath_summary_json = Column(JSON, nullable=True)
+    burst_summary_json = Column(JSON, nullable=True)
+    incidence_angle_min = Column(Float, nullable=True)
+    incidence_angle_max = Column(Float, nullable=True)
+    doppler_summary_json = Column(JSON, nullable=True)
+    state_vector_summary_json = Column(JSON, nullable=True)
+    metadata_quality = Column(String(32), nullable=False, default="UNKNOWN", server_default="UNKNOWN", index=True)
+    production_readiness = Column(String(32), nullable=False, default="UNKNOWN", server_default="UNKNOWN", index=True)
+    readiness_reasons_json = Column(JSON, nullable=True)
+    parser_version = Column(String(32), nullable=True)
+    parsed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    source_asset = relationship("SourceProductAssetORM")
+    radar_data = relationship("RadarDataORM")
+
+    __table_args__ = (
+        Index("idx_sar_scene_geometry_profiles_family_date", "satellite_family", "acquisition_start_time_utc"),
+        Index("idx_sar_scene_geometry_profiles_track", "satellite_family", "relative_orbit", "orbit_direction"),
+        Index("idx_sar_scene_geometry_profiles_readiness", "production_readiness", "metadata_quality"),
     )
 
 

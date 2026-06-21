@@ -1,6 +1,6 @@
 # 文档索引
 
-最后更新：2026-06-14
+最后更新：2026-06-16
 
 本页是当前有效文档入口。没有列在本页的历史设计、实验记录和过程文档不再作为当前系统事实依据。
 
@@ -23,15 +23,25 @@
 - [GLOBAL_TASK_STATUS_LOCK_REDESIGN_20260612.md](GLOBAL_TASK_STATUS_LOCK_REDESIGN_20260612.md)  
   全局界面锁降级为任务状态中心、功能级任务面板和后端资源锁的重构设计。
 
+- [OLLAMA_DINSAR_DIAGNOSIS_DEPLOYMENT_20260620.md](OLLAMA_DINSAR_DIAGNOSIS_DEPLOYMENT_20260620.md)
+  D-InSAR 分析中 Ollama 本机 VLM 诊断的部署配置、模型选择和运行约定。
+
 ## 生产与结果
+
+- [THREE_SENSOR_LOCAL_PRODUCTION_CONTRACT_20260616.md](THREE_SENSOR_LOCAL_PRODUCTION_CONTRACT_20260616.md)
+  当前陆探一号、Sentinel-1、高分三本机生产、按需解包、GF3 外部生产登记、结果管理和 UNC 退出约定。
 
 - [PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md](PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md)  
   统一结果目录、标准产品包、catalog 与多引擎结果共存约定。D-InSAR 当前引擎集合以 2026-06-14 三引擎 Task_Pool 重构设计为准。
 
 - [DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md](DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md)  
   D-InSAR 保留 ENVI/SARscape、LandSAR、Gamma/PyINT 三引擎，退出 ISCE2，统一 Task_Pool、结果聚合和中间文件清理的当前设计。
+- [LANDSAR_DEM_PREPARATION_CONTRACT_20260618.md](LANDSAR_DEM_PREPARATION_CONTRACT_20260618.md)
+  LandSAR D-InSAR/SBAS 的全球 DEM 一次性 Int16 标准化、区域裁剪 tif、生产配置和 guardrail 约定。
 - [UNC_SOURCE_ARCHIVE_AND_MATERIALIZE_DESIGN_20260615.md](UNC_SOURCE_ARCHIVE_AND_MATERIALIZE_DESIGN_20260615.md)
-  UNC/SMB 源压缩包管理、包内 XML/manifest 资产化、本地 materialize 和 D-InSAR/SBAS 生产边界。
+  LT-1/Sentinel-1 本地源压缩包管理、包内 XML/manifest 资产化、本地 Task_Pool materialize，以及 UNC 退出运行链路后的本机部署边界。
+- [SOURCE_ARCHIVE_INTEGRITY_AUDIT_20260620.md](SOURCE_ARCHIVE_INTEGRITY_AUDIT_20260620.md)
+  LT-1/Sentinel-1 源压缩包完整性审计的独立任务、增量语义、数据库字段和问题登记规则。
 
 - [DINSAR_PRODUCTION_CORES_OVERVIEW.md](DINSAR_PRODUCTION_CORES_OVERVIEW.md)  
   旧版 ENVI/SARscape、ISCE2、Gamma/PyINT D-InSAR 生产核心说明。ISCE2 相关内容仅作历史背景。
@@ -57,6 +67,8 @@
 
 - [SENTINEL1_SOURCE_ORBIT_ASSET_DESIGN_20260512.md](SENTINEL1_SOURCE_ORBIT_ASSET_DESIGN_20260512.md)  
   Sentinel-1 / LT-1 源数据与精密轨道资产层设计。
+- [PRECISE_ORBIT_PRODUCTION_CONTRACT_20260617.md](PRECISE_ORBIT_PRODUCTION_CONTRACT_20260617.md)
+  Current LT-1/Sentinel-1 precise-orbit source assets, LT-1 production TXT pools, Gamma/PyINT, LandSAR, and retired ISCE2 orbit boundaries.
 
 - [FLOOD_GEOTIFF_GAMMA_PREPROCESS_DESIGN_20260515.md](FLOOD_GEOTIFF_GAMMA_PREPROCESS_DESIGN_20260515.md)  
   洪涝模块 GeoTIFF 化与 Gamma 前处理方向。

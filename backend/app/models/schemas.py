@@ -261,10 +261,10 @@ class PairingRequest(BaseModel):
     """D-InSAR 配对请求的参数模型（增强版 v2.0）"""
     # === 时空约束（保留） ===
     time_baseline_min: int = Field(default=1, ge=0, le=3650)
-    time_baseline_max: int = Field(default=90, ge=1, le=3650)
+    time_baseline_max: int = Field(default=30, ge=1, le=3650)
     overlap_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
-    spatial_baseline_max_meters: int = Field(default=3000, ge=0, le=PAIRING_CENTER_DISTANCE_MAX_METERS)
-    limit_footprint_center_distance: bool = False
+    spatial_baseline_max_meters: int = Field(default=5000, ge=0, le=PAIRING_CENTER_DISTANCE_MAX_METERS)
+    limit_footprint_center_distance: bool = True
     coverage_diversity_penalty: float = Field(default=0.3, ge=0.0, le=1.0)
     require_same_imaging_mode: bool = True
     require_same_polarization: bool = True
@@ -280,7 +280,7 @@ class PairingRequest(BaseModel):
     slave_date_to: Optional[str] = Field(default=None, pattern=r'^\d{8}$|^$')
 
     # === 配对策略（新增） ===
-    strategy: str = Field(default="all", pattern=r'^(all|sbas|sequential|star)$')
+    strategy: str = Field(default="dinsar_production", pattern=r'^dinsar_production$')
     num_connections: int = Field(default=1, ge=1, le=10)
     reference_image_id: Optional[int] = None
 
@@ -303,6 +303,7 @@ class PairingRequest(BaseModel):
             normalized['overlap_threshold'] = normalized['pair_footprint_overlap_min_ratio']
         if normalized.get('footprint_center_distance_max_meters') not in (None, ''):
             normalized['spatial_baseline_max_meters'] = normalized['footprint_center_distance_max_meters']
+        normalized['strategy'] = 'dinsar_production'
         return normalized
 
     @field_validator(
@@ -343,8 +344,15 @@ class PairingRequest(BaseModel):
             return None
         if not isinstance(value, list):
             return value
-        normalized = [str(item).strip() for item in value if str(item).strip()]
-        return normalized or None
+        normalized = []
+        for item in value:
+            compact = str(item).strip().upper().replace("-", "").replace("_", "").replace(" ", "")
+            if compact in {"LT1", "LT1A", "LT1B", "LUTAN1", "LUTAN1A", "LUTAN1B"}:
+                normalized.append("LT1")
+            elif compact in {"S1", "S1A", "S1B", "S1C", "SENTINEL1", "SENTINEL1A", "SENTINEL1B", "SENTINEL1C"}:
+                normalized.append("S1")
+        deduped = list(dict.fromkeys(normalized))
+        return deduped or ["__UNSUPPORTED_DINSAR_FAMILY__"]
 
     @field_validator('master_date_to')
     @classmethod
@@ -381,6 +389,16 @@ class RadarPair(BaseModel):
     time_baseline_days: int
     spatial_baseline_meters: float
     scene_center_distance_meters: Optional[float] = None
+    scene_overlap_ratio: Optional[float] = None
+    pair_aoi_overlap_ratio: Optional[float] = None
+    dinsar_quality_tier: Optional[str] = None
+    dinsar_quality_score: Optional[float] = None
+    dinsar_readiness: Optional[str] = None
+    dinsar_reasons: Optional[List[str]] = None
+    same_relative_orbit: Optional[bool] = None
+    master_relative_orbit: Optional[str] = None
+    slave_relative_orbit: Optional[str] = None
+    production_summary: Optional[Dict[str, Any]] = None
 
 
 class PairingResponse(BaseModel):

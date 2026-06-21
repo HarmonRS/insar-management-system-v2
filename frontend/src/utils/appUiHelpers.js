@@ -40,35 +40,35 @@ export const getLeftTabLabel = (tabKey, metrics = {}) => {
     case 'hazard':
       return '灾害点';
     case 'pairing':
-      return '配对规划';
+      return 'D-InSAR配对规划';
     case 'pairs':
-      return `任务规划 (${pairCount})`;
+      return `D-InSAR候选对与批次 (${pairCount})`;
     case 'ps_results':
-      return `时序候选栈 (${psResultCount})`;
+      return `SBAS序列规划 (${psResultCount})`;
     case 'batches':
-      return '任务批次';
+      return 'D-InSAR候选对与批次';
     case 'copier':
-      return '数据分发';
+      return 'D-InSAR生产准备';
     case 'production_management':
       return '生产管理';
     case 'idl':
       return 'D-InSAR生产（旧）';
     case 'dinsar_production':
-      return 'D-InSAR运行';
+      return 'D-InSAR生产运行';
     case 'dinsar_products':
-      return 'D-InSAR产物';
+      return 'D-InSAR结果管理';
     case 'ps_production':
-      return '时序InSAR运行';
+      return 'SBAS-InSAR生产工作流';
     case 'ps_products':
-      return '时序InSAR产物';
+      return 'SBAS-InSAR结果管理';
     case 'dinsar_results':
       return `D-InSAR结果 (${dinsarTotal})`;
     case 'dinsar_analysis':
       return 'D-InSAR分析';
     case 'psinsar_results':
-      return '时序InSAR结果';
+      return 'SBAS-InSAR结果';
     case 'psinsar_analysis':
-      return '时序InSAR分析';
+      return 'SBAS-InSAR分析';
     case 'ai_quality':
       return 'AI质量评估';
     case 'ai_diagnosis':

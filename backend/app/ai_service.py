@@ -13,6 +13,7 @@ from sklearn.preprocessing import StandardScaler
 from scipy.stats import entropy
 from concurrent.futures import ProcessPoolExecutor
 import functools
+from typing import List, Optional
 
 from .config import settings
 
@@ -224,25 +225,74 @@ def get_model_info() -> dict:
 OLLAMA_BASE_URL = settings.OLLAMA_BASE_URL
 OLLAMA_API_URL = settings.OLLAMA_API_URL
 DEFAULT_VLM_MODEL = settings.DEFAULT_VLM_MODEL
+VLM_MODEL_MARKERS = (
+    "qwen3-vl",
+    "qwen2-vl",
+    "minicpm-v",
+    "llama3.2-vision",
+    "llava",
+    "vision",
+    "-vl",
+    "_vl",
+)
 
-async def _get_available_vlm_model() -> str:
+def _normalize_model_name(model_name: Optional[str]) -> Optional[str]:
+    normalized = str(model_name or "").strip()
+    return normalized or None
+
+def is_likely_vlm_model(model_name: Optional[str]) -> bool:
+    lower = str(model_name or "").strip().lower()
+    return bool(lower and any(marker in lower for marker in VLM_MODEL_MARKERS))
+
+async def get_ollama_models(timeout: float = 2.0) -> List[str]:
+    """Return model names reported by the local Ollama service."""
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags")
+        resp.raise_for_status()
+        return [
+            str(model.get("name") or "").strip()
+            for model in resp.json().get("models", [])
+            if str(model.get("name") or "").strip()
+        ]
+
+async def get_ollama_vlm_models(timeout: float = 2.0) -> List[str]:
+    """Return installed Ollama models whose names indicate image-input support."""
+    return [
+        model_name
+        for model_name in await get_ollama_models(timeout=timeout)
+        if is_likely_vlm_model(model_name)
+    ]
+
+async def _get_available_vlm_model(preferred_model: Optional[str] = None) -> str:
     """自动检测本地可用的 VLM 模型"""
+    preferred = _normalize_model_name(preferred_model)
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
-            if resp.status_code == 200:
-                models = [m['name'] for m in resp.json().get('models', [])]
-                # 优先级：qwen3-vl > qwen2-vl > minicpm-v > 任何包含 vl 的模型
-                for target in ["qwen3-vl:8b", "qwen2-vl", "minicpm-v"]:
-                    for m in models:
-                        if target in m: return m
-                for m in models:
-                    if "vl" in m.lower(): return m
-    except:
+        models = await get_ollama_models(timeout=2.0)
+        if preferred and is_likely_vlm_model(preferred):
+            if preferred in models:
+                return preferred
+            for model in models:
+                if is_likely_vlm_model(model) and (model.startswith(preferred) or preferred in model):
+                    return model
+        # 优先级：qwen3-vl > qwen2-vl > minicpm-v > 任何包含 vl/vision/llava 的模型
+        for target in ["qwen3-vl", "qwen2-vl", "minicpm-v", "llama3.2-vision", "llava"]:
+            for model in models:
+                if target in model.lower():
+                    return model
+        for model in models:
+            if is_likely_vlm_model(model):
+                return model
+    except Exception:
         pass
     return DEFAULT_VLM_MODEL
 
-async def analyze_map_with_vlm(images_base64: list, prompt: str, progress_callback=None) -> str:
+async def analyze_map_with_vlm(
+    images_base64: list,
+    prompt: str,
+    progress_callback=None,
+    model_name: Optional[str] = None,
+    raise_on_error: bool = False,
+) -> str:
     """
     使用本地 Ollama 部署的多模态大模型分析地图截图。
     已改为一次性返回模式，以提高连接稳定性。
@@ -250,10 +300,10 @@ async def analyze_map_with_vlm(images_base64: list, prompt: str, progress_callba
     if not images_base64:
         return "未接收到有效的地图截图。"
 
-    model_name = await _get_available_vlm_model()
+    resolved_model_name = await _get_available_vlm_model(model_name)
 
     payload = {
-        "model": model_name,
+        "model": resolved_model_name,
         "prompt": prompt,
         "images": [img.split(",")[1] if "," in img else img for img in images_base64],
         "stream": False, # 关闭流式传输，改为一次性返回
@@ -282,9 +332,11 @@ async def analyze_map_with_vlm(images_base64: list, prompt: str, progress_callba
                 final_output += f"> [!NOTE] 思考过程\n> {full_thinking}\n\n"
             final_output += full_response
             
-            return final_output.strip() if final_output else f"模型 ({model_name}) 未返回任何内容。"
+            return final_output.strip() if final_output else f"模型 ({resolved_model_name}) 未返回任何内容。"
 
     except Exception as e:
+        if raise_on_error:
+            raise RuntimeError(f"Ollama VLM request failed: {str(e)}") from e
         return f"AI 分析过程中发生错误: {str(e)}"
 
 async def generate_dinsar_diagnosis(
@@ -293,12 +345,13 @@ async def generate_dinsar_diagnosis(
     date_str: str,
     quality_context: str,
     hazard_info: str,
-    progress_callback=None
+    progress_callback=None,
+    model_name: Optional[str] = None,
 ) -> str:
     """
     针对 VLM 优化的 D-InSAR 专家诊断逻辑。
     """
-    model_name = await _get_available_vlm_model()
+    resolved_model_name = await _get_available_vlm_model(model_name)
     
     prompt = (
         f"你是一位拥有 20 年经验的资深 InSAR 地质灾害解译专家。请根据提供的 D-InSAR 形变图及背景信息，撰写一份专业的诊断报告。\n\n"
@@ -320,22 +373,22 @@ async def generate_dinsar_diagnosis(
         f"- 使用 Markdown 格式，语言严谨、专业，严禁幻觉。\n"
         f"- 报告末尾必须包含以下加粗文字：\n"
         f"**--- 免责声明 ---**\n"
-        f"**本报告由 AI 自动生成（模型：{model_name}），仅供科研参考，不具备法律效力。**"
+        f"**本报告由 AI 自动生成（模型：{resolved_model_name}），仅供科研参考，不具备法律效力。**"
     )
 
-    return await analyze_map_with_vlm(images_base64, prompt, progress_callback=progress_callback)
+    return await analyze_map_with_vlm(images_base64, prompt, progress_callback=progress_callback, model_name=resolved_model_name)
 
-async def warm_up_vlm() -> bool:
+async def warm_up_vlm(model_name: Optional[str] = None) -> bool:
     """
     预热 VLM 模型，将其加载至显存。
     发送一个轻量级请求以触发模型冷启动。
     返回 True 表示成功，False 表示失败。
     """
-    # 预热时直接使用探测到的模型
-    model_name = await _get_available_vlm_model()
+    # 预热时直接使用指定模型或探测到的模型
+    resolved_model_name = await _get_available_vlm_model(model_name)
     
     payload = {
-        "model": model_name,
+        "model": resolved_model_name,
         "prompt": "hi",
         "stream": False,
         "keep_alive": "30m"

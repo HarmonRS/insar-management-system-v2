@@ -345,7 +345,7 @@ ORBIT_SOURCE_DIRS=
 对用户当前样本，推荐后续配置形态是：
 
 ```text
-SOURCE_PRODUCT_DIRS=D:\LuTan1_Image_Pool;D:\Sentinel1_Image_Pool_ZIP
+SOURCE_PRODUCT_DIRS=D:\LuTan1_Image_Pool_Zip;D:\Sentinel1_Image_Pool_ZIP
 ORBIT_SOURCE_DIRS=D:\LT1_data_lsarorbit;D:\Sentinel1_EOF_Pool
 ```
 

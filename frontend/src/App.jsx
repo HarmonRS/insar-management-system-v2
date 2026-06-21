@@ -333,7 +333,7 @@ function App() {
         setBatchError: state.setBatchError,
     })));
     const {
-        foundPairs, setFoundPairs, psResults,
+        foundPairs, setFoundPairs,
         setShowPairingModal,
         pairingAoiMode, setPairingAoiMode,
         pairingRegionOptions, setPairingRegionOptions,
@@ -347,7 +347,6 @@ function App() {
     } = usePairingStore(useShallow((state) => ({
         foundPairs: state.foundPairs,
         setFoundPairs: state.setFoundPairs,
-        psResults: state.psResults,
         setShowPairingModal: state.setShowPairingModal,
         pairingAoiMode: state.pairingAoiMode,
         setPairingAoiMode: state.setPairingAoiMode,
@@ -666,11 +665,8 @@ function App() {
     const {
         fetchRegionGeometry,
         handlePairingAoiModeChange,
-        handlePsAoiModeChange,
         handlePairingProvinceChange,
         handlePairingCityChange,
-        handlePsProvinceChange,
-        handlePsCityChange,
         toggleMapRegionLocator,
         handleMapRegionProvinceChange,
         handleMapRegionCityChange,
@@ -681,7 +677,6 @@ function App() {
         locateSelectedRegionOnMap,
         clearMapRegionHighlight,
         openPairingModal,
-        openPsModal,
     } = useRegionAoiHandlers({
         setPairingRegionLoading,
         setPairingRegionError,
@@ -1641,10 +1636,7 @@ function App() {
 
     const {
         findPairs,
-        handleFindPsStack,
         createDinsarBatch,
-        createPsBatch,
-        clearPsResults,
     } = usePairingLogic({
         fetchRegionGeometry,
         refreshBatchList,
@@ -2076,7 +2068,6 @@ function App() {
     };
     const pairingPanel = {
         onOpenPairingModal: openPairingModal,
-        onOpenPsModal: openPsModal,
         onRefreshRadarSearch: refreshCurrentRadarSearch,
         onRefreshDinsar: refreshDinsarResults,
     };
@@ -2121,13 +2112,6 @@ function App() {
         onVisualizePair: visualizePair,
         onTogglePairVisibility: togglePairVisibility,
         onCreateDinsarBatch: createDinsarBatch,
-    };
-    const psPanel = {
-        onPreviewPsStack: previewPsStack,
-        onClearPsStackPreview: clearPsStackPreview,
-        onCreatePsBatch: createPsBatch,
-        onSendToTimeseriesProduction: (direction, stack) => createPsBatch(direction, stack, { sendToProduction: true }),
-        onClearPsResults: clearPsResults,
     };
 
     if (!authChecked) {
@@ -2175,7 +2159,6 @@ function App() {
                     apiEndpoint={apiClient.defaults.baseURL}
                     licenseOk={licenseOk}
                     foundPairs={foundPairs}
-                    psResults={psResults}
                     dinsarTotal={dinsarPagination.total}
                     selectedPairsCount={selectedPairsCount}
                     hasEnoughRadarScenesForPlanning={hasEnoughRadarScenesForPlanning}
@@ -2192,7 +2175,6 @@ function App() {
                     dinsarPanel={dinsarPanel}
                     aiPanel={aiPanel}
                     pairsPanel={pairsPanel}
-                    psPanel={psPanel}
                     sbasAnalysisPanel={sbasAnalysisPanel}
                 />
 
@@ -2246,10 +2228,6 @@ function App() {
                 onPairingAoiModeChange={handlePairingAoiModeChange}
                 onPairingProvinceChange={handlePairingProvinceChange}
                 onPairingCityChange={handlePairingCityChange}
-                onPsSubmit={handleFindPsStack}
-                onPsAoiModeChange={handlePsAoiModeChange}
-                onPsProvinceChange={handlePsProvinceChange}
-                onPsCityChange={handlePsCityChange}
                 licenseLoading={licenseLoading}
                 licenseStatus={licenseStatus}
                 isAdmin={isAdmin}

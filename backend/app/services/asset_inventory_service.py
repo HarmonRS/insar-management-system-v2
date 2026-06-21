@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -9,12 +11,12 @@ import tarfile
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from geoalchemy2.shape import from_shape
 from lxml import etree
 from shapely.geometry import Polygon
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,8 +27,11 @@ from ..models import (
     AssetInventoryStateORM,
     ManagedRootORM,
     OrbitAssetORM,
+    OrbitAssetDerivativeORM,
     RadarDataORM,
+    SARSceneGeometryProfileORM,
     SceneOrbitBindingORM,
+    SourceMetadataDocumentORM,
     SourceProductAssetORM,
 )
 from ..utils import (
@@ -37,12 +42,19 @@ from ..utils import (
     parse_xml_metadata,
 )
 from .pairing_state_service import pairing_state_service
+from .data_service import DataService
+from .image_service import image_service
+from .orbit_converter import sync_orbit_pools
 from .task_service import task_service
 
 
-PARSER_VERSION = "asset_inventory_v1"
+PARSER_VERSION = "asset_inventory_v2"
+ARCHIVE_INTEGRITY_VERSION = "archive_integrity_v1"
 S1_ORBIT_MATCH_RULE_VERSION = "s1_orbit_window_v1"
 LT1_ORBIT_MATCH_RULE_VERSION = "lt1_orbit_day_v1"
+ASSET_SCAN_LOG_INTERVAL = 100
+ASSET_SCAN_DETAILED_PARSE_LOG_LIMIT = 200
+ARCHIVE_INTEGRITY_LOG_INTERVAL = 10
 
 _WINDOWS_DRIVE_RE = re.compile(r"^[a-zA-Z]:[\\/]")
 _S1_SOURCE_RE = re.compile(
@@ -138,6 +150,32 @@ def _target_root_for_s1_archive(archive_path: str, target_root: Optional[str] = 
     return storage_dirs[0]
 
 
+def _task_pool_materialize_root(source_format: str) -> str:
+    base = _normalize_path(getattr(settings, "TASK_POOL_ROOT", "") or "")
+    if not base:
+        base = _normalize_path(os.path.join(settings.BACKEND_DIR, "runtime", "task_pool"))
+    folder = {
+        "S1_ZIP": "sentinel1",
+        "S1_SAFE_DIR": "sentinel1",
+        "LT1_ARCHIVE": "lutan1",
+        "GF3_ARCHIVE": "gf3",
+    }.get(str(source_format or "").upper(), "source")
+    return _normalize_path(os.path.join(base, "source_materialized", folder))
+
+
+def _source_ref_for_materialized_root(path: str) -> str:
+    normalized = os.path.normcase(_normalize_path(path))
+    task_root = os.path.normcase(_normalize_path(getattr(settings, "TASK_POOL_ROOT", "") or ""))
+    if task_root and (normalized == task_root or normalized.startswith(task_root + os.sep)):
+        return "TASK_POOL_ROOT"
+    storage_roots = _configured_sentinel1_storage_dirs()
+    for storage_root in storage_roots:
+        storage_norm = os.path.normcase(_normalize_path(storage_root))
+        if storage_norm and (normalized == storage_norm or normalized.startswith(storage_norm + os.sep)):
+            return "SENTINEL1_STORAGE_DIRS"
+    return "SOURCE_PRODUCT_DIRS"
+
+
 def _new_session() -> AsyncSession:
     if database.AsyncSessionLocal is None:
         database.init_db()
@@ -176,6 +214,13 @@ def _path_kind(path: str) -> str:
     return "relative"
 
 
+def _ensure_local_runtime_path(path: str, label: str) -> str:
+    normalized = _normalize_path(path)
+    if _path_kind(normalized) == "unc":
+        raise ValueError(f"{label} cannot use UNC path for active production: {normalized}")
+    return normalized
+
+
 def _stat_path(path: str) -> Dict[str, Optional[float]]:
     try:
         stat = os.stat(path)
@@ -186,6 +231,15 @@ def _stat_path(path: str) -> Dict[str, Optional[float]]:
         }
     except OSError:
         return {"size_bytes": None, "mtime_epoch": None, "ctime_epoch": None}
+
+
+def _activity_progress(progress_start: int, progress_end: int, count: int) -> int:
+    start = max(0, min(100, int(progress_start)))
+    end = max(start, min(100, int(progress_end)))
+    collect_end = max(start, end - 6)
+    if count <= 0 or collect_end <= start:
+        return start
+    return min(collect_end, start + 1 + int(count // 50))
 
 
 def _asset_uid(prefix: str, path: str) -> str:
@@ -205,6 +259,153 @@ def _strip_known_suffix(name: str) -> str:
     if lower.endswith(".safe"):
         return name[:-5]
     return name
+
+
+def _file_ext_for_path(path: str) -> str:
+    name = os.path.basename(str(path or ""))
+    lower = name.lower()
+    for suffix in (".tar.gz", ".tgz", ".zip", ".tar", ".safe", ".eof", ".txt"):
+        if lower.endswith(suffix):
+            return suffix
+    ext = os.path.splitext(name)[1].lower()
+    return ext[:32] if ext else ""
+
+
+def _ordered_closed_polygon(points: Sequence[Any]) -> Optional[List[Tuple[float, float]]]:
+    unique: List[Tuple[float, float]] = []
+    for point in points or []:
+        try:
+            lon = float(point[0])
+            lat = float(point[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        current = (lon, lat)
+        if unique and abs(unique[-1][0] - lon) < 1e-12 and abs(unique[-1][1] - lat) < 1e-12:
+            continue
+        if unique and abs(unique[0][0] - lon) < 1e-12 and abs(unique[0][1] - lat) < 1e-12:
+            continue
+        if current not in unique:
+            unique.append(current)
+    if len(unique) < 3:
+        return None
+
+    candidates: List[List[Tuple[float, float]]] = []
+    candidates.append(unique)
+    if len(unique) == 4:
+        center_lon = sum(point[0] for point in unique) / len(unique)
+        center_lat = sum(point[1] for point in unique) / len(unique)
+        candidates.insert(
+            0,
+            sorted(
+                unique,
+                key=lambda point: math.atan2(point[1] - center_lat, point[0] - center_lon),
+            ),
+        )
+
+    for candidate in candidates:
+        ring = list(candidate)
+        if ring[0] != ring[-1]:
+            ring.append(ring[0])
+        try:
+            polygon = Polygon(ring)
+            if polygon.is_valid and not polygon.is_empty and polygon.area > 0:
+                return ring
+        except Exception:
+            continue
+    return None
+
+
+def _closed_polygon_if_valid(points: Sequence[Any]) -> Optional[List[Tuple[float, float]]]:
+    ring: List[Tuple[float, float]] = []
+    for point in points or []:
+        try:
+            ring.append((float(point[0]), float(point[1])))
+        except (TypeError, ValueError, IndexError):
+            return None
+    if len(ring) < 3:
+        return None
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+    try:
+        polygon = Polygon(ring)
+        if polygon.is_valid and not polygon.is_empty and polygon.area > 0:
+            return ring
+    except Exception:
+        return None
+    return None
+
+
+def _ordered_closed_polygon_from_corners(corners: Sequence[Dict[str, Any]]) -> Optional[List[Tuple[float, float]]]:
+    entries = [
+        item
+        for item in (corners or [])
+        if item.get("lon") is not None and item.get("lat") is not None
+    ]
+    if len(entries) < 3:
+        return None
+
+    by_name = {
+        str(item.get("name") or "").strip().lower(): item
+        for item in entries
+        if str(item.get("name") or "").strip()
+    }
+    name_order = ["bottomleft", "bottomright", "topright", "topleft"]
+    if all(name in by_name for name in name_order):
+        ordered = [(by_name[name]["lon"], by_name[name]["lat"]) for name in name_order]
+        valid = _closed_polygon_if_valid(ordered)
+        if valid:
+            return valid
+
+    ref_entries = [
+        item
+        for item in entries
+        if item.get("ref_row") is not None and item.get("ref_col") is not None
+    ]
+    if len(ref_entries) >= 4:
+        min_row = min(float(item["ref_row"]) for item in ref_entries)
+        max_row = max(float(item["ref_row"]) for item in ref_entries)
+        min_col = min(float(item["ref_col"]) for item in ref_entries)
+        max_col = max(float(item["ref_col"]) for item in ref_entries)
+        targets = [(min_row, min_col), (min_row, max_col), (max_row, max_col), (max_row, min_col)]
+        remaining = list(ref_entries)
+        ordered_entries: List[Dict[str, Any]] = []
+        for target_row, target_col in targets:
+            chosen = min(
+                remaining,
+                key=lambda item: (
+                    abs(float(item["ref_row"]) - target_row) + abs(float(item["ref_col"]) - target_col),
+                    str(item.get("name") or ""),
+                ),
+            )
+            ordered_entries.append(chosen)
+            remaining.remove(chosen)
+        ordered = [(item["lon"], item["lat"]) for item in ordered_entries]
+        valid = _closed_polygon_if_valid(ordered)
+        if valid:
+            return valid
+
+    return _ordered_closed_polygon([(item["lon"], item["lat"]) for item in entries])
+
+
+def _root_supported_families(root: ManagedRootORM) -> List[str]:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            root.path,
+            root.root_code,
+            root.root_role,
+            root.display_name,
+            root.source_ref,
+        )
+    ).lower()
+    families: List[str] = []
+    if "lutan" in text or "lt1" in text or "lt-1" in text:
+        families.append("LT1")
+    if "sentinel" in text or "sentinel1" in text or "eof" in text or "safe" in text:
+        families.append("S1")
+    if "gaofen" in text or "gf3" in text:
+        families.append("GF3")
+    return families
 
 
 def _has_archive_suffix(name: str, suffixes: Sequence[str]) -> bool:
@@ -356,6 +557,139 @@ def _extract_archive_to_dir(archive_path: str, target_dir: str, *, overwrite: bo
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _archive_integrity_supported(source_format: Any, path: str) -> bool:
+    normalized_format = str(source_format or "").upper()
+    if normalized_format not in {"LT1_ARCHIVE", "S1_ZIP", "GF3_ARCHIVE"}:
+        return False
+    ext = _file_ext_for_path(path)
+    if normalized_format == "S1_ZIP":
+        return ext == ".zip"
+    return ext in {".tar.gz", ".tgz", ".tar", ".zip"}
+
+
+def _truncate_error_text(value: Any, limit: int = 1000) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _check_zip_archive_integrity(path: str) -> Dict[str, Any]:
+    method = "zip_testzip"
+    with zipfile.ZipFile(path, "r") as archive:
+        infos = archive.infolist()
+        member_count = 0
+        total_uncompressed = 0
+        for info in infos:
+            _safe_archive_member_name(info.filename, path)
+            if info.is_dir():
+                continue
+            member_count += 1
+            total_uncompressed += int(info.file_size or 0)
+        bad_member = archive.testzip()
+        if bad_member:
+            return {
+                "status": "FAILED",
+                "method": method,
+                "error": f"ZIP CRC failed at member: {bad_member}",
+                "member_count": member_count,
+                "uncompressed_bytes": total_uncompressed,
+            }
+    return {
+        "status": "OK",
+        "method": method,
+        "error": None,
+        "member_count": member_count,
+        "uncompressed_bytes": total_uncompressed,
+    }
+
+
+def _check_tar_archive_integrity(path: str) -> Dict[str, Any]:
+    method = "tar_stream_list"
+    member_count = 0
+    total_uncompressed = 0
+    with tarfile.open(path, "r:*") as archive:
+        for member in archive:
+            _safe_archive_member_name(member.name, path)
+            if member.issym() or member.islnk() or member.isdev():
+                raise ValueError(f"Unsupported TAR member type: {member.name}")
+            if member.isfile():
+                member_count += 1
+                total_uncompressed += int(member.size or 0)
+            elif member.isdir():
+                continue
+            else:
+                raise ValueError(f"Unsupported TAR member type: {member.name}")
+    return {
+        "status": "OK",
+        "method": method,
+        "error": None,
+        "member_count": member_count,
+        "uncompressed_bytes": total_uncompressed,
+    }
+
+
+def _check_archive_integrity(path: str, source_format: Any = None) -> Dict[str, Any]:
+    archive = _normalize_path(path)
+    started = _utcnow()
+    stat = _stat_path(archive)
+    if not os.path.isfile(archive):
+        return {
+            "status": "FAILED",
+            "method": None,
+            "error": f"Archive file is missing: {archive}",
+            "member_count": None,
+            "size_bytes": stat.get("size_bytes"),
+            "mtime_epoch": stat.get("mtime_epoch"),
+            "duration_seconds": 0.0,
+            "version": ARCHIVE_INTEGRITY_VERSION,
+        }
+    if not _archive_integrity_supported(source_format, archive):
+        return {
+            "status": "UNSUPPORTED",
+            "method": None,
+            "error": f"Unsupported archive integrity source_format={source_format} ext={_file_ext_for_path(archive)}",
+            "member_count": None,
+            "size_bytes": stat.get("size_bytes"),
+            "mtime_epoch": stat.get("mtime_epoch"),
+            "duration_seconds": 0.0,
+            "version": ARCHIVE_INTEGRITY_VERSION,
+        }
+    try:
+        ext = _file_ext_for_path(archive)
+        if ext == ".zip":
+            result = _check_zip_archive_integrity(archive)
+        elif ext in {".tar.gz", ".tgz", ".tar"}:
+            result = _check_tar_archive_integrity(archive)
+        else:
+            result = {
+                "status": "UNSUPPORTED",
+                "method": None,
+                "error": f"Unsupported archive extension: {ext}",
+                "member_count": None,
+            }
+    except Exception as exc:
+        result = {
+            "status": "FAILED",
+            "method": "zip_testzip" if _file_ext_for_path(archive) == ".zip" else "tar_stream_list",
+            "error": str(exc),
+            "member_count": None,
+        }
+    duration = (_utcnow() - started).total_seconds()
+    result.update(
+        {
+            "size_bytes": stat.get("size_bytes"),
+            "mtime_epoch": stat.get("mtime_epoch"),
+            "duration_seconds": round(max(0.0, duration), 3),
+            "version": ARCHIVE_INTEGRITY_VERSION,
+        }
+    )
+    result["error"] = _truncate_error_text(result.get("error"))
+    return result
+
+
 def _parse_datetime_token(value: Optional[str]) -> Optional[datetime]:
     text = str(value or "").strip()
     if not text:
@@ -412,24 +746,45 @@ def _xml_float(value: Optional[str]) -> Optional[float]:
         return None
 
 
+def _xml_int(value: Optional[str]) -> Optional[int]:
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_radar_xml_metadata_bytes(data: bytes) -> Tuple[Optional[List[Tuple[float, float]]], Dict[str, Any]]:
     parser = _xml_parser()
     root = etree.fromstring(data, parser=parser)
 
-    corners: List[Tuple[float, float]] = []
+    corners: List[Dict[str, Any]] = []
     for element in root.iter():
         if etree.QName(element).localname.lower() != "scenecornercoord":
             continue
         lon = _xml_float(_xml_text_under_local_path(element, "sceneCornerCoord", "lon") or _xml_text_by_local_names(element, ["lon"]))
         lat = _xml_float(_xml_text_under_local_path(element, "sceneCornerCoord", "lat") or _xml_text_by_local_names(element, ["lat"]))
         if lon is not None and lat is not None:
-            corners.append((lon, lat))
+            corners.append(
+                {
+                    "name": element.get("name"),
+                    "lon": lon,
+                    "lat": lat,
+                    "ref_row": _xml_int(
+                        _xml_text_under_local_path(element, "sceneCornerCoord", "refRow")
+                        or _xml_text_by_local_names(element, ["refRow"])
+                    ),
+                    "ref_col": _xml_int(
+                        _xml_text_under_local_path(element, "sceneCornerCoord", "refColumn")
+                        or _xml_text_by_local_names(element, ["refColumn"])
+                    ),
+                }
+            )
 
     coverage_polygon: Optional[List[Tuple[float, float]]] = None
     if len(corners) >= 4:
-        coverage_polygon = corners[:4]
-        if coverage_polygon[0] != coverage_polygon[-1]:
-            coverage_polygon.append(coverage_polygon[0])
+        coverage_polygon = _ordered_closed_polygon_from_corners(corners[:4])
 
     start_time = (
         _xml_text_under_local_path(root, "start", "timeUTC")
@@ -461,14 +816,24 @@ def _parse_radar_xml_metadata_bytes(data: bytes) -> Tuple[Optional[List[Tuple[fl
         "scene_center_lat": center_lat,
         "acquisition_time_utc": start_time,
         "acquisition_stop_time_utc": stop_time,
-        "product_type": _xml_text_under_local_path(root, "imageDataInfo", "imageDataType")
-        or _xml_text_under_local_path(root, "orderInfo", "productVariant")
-        or _xml_text_by_local_names(root, ["productType", "imageDataType", "productVariant"]),
+        "product_type": _xml_text_by_local_names(root, ["productType"]),
+        "image_data_type": _xml_text_under_local_path(root, "imageDataInfo", "imageDataType")
+        or _xml_text_by_local_names(root, ["imageDataType"]),
+        "product_variant": _xml_text_under_local_path(root, "orderInfo", "productVariant")
+        or _xml_text_by_local_names(root, ["productVariant"]),
         "image_data_format": _xml_text_under_local_path(root, "imageDataInfo", "imageDataFormat")
         or _xml_text_by_local_names(root, ["imageDataFormat"]),
         "product_level": _xml_text_by_local_names(root, ["productLevel", "itemName"]),
         "product_unique_id": _xml_text_by_local_names(root, ["logicalProductID", "sceneID", "productID"]),
         "look_direction": (_xml_text_under_local_path(root, "acquisitionInfo", "lookDirection") or "").upper() or None,
+        "corner_ref_pixels": {
+            str(item.get("name")): {
+                "ref_row": item.get("ref_row"),
+                "ref_col": item.get("ref_col"),
+            }
+            for item in corners
+            if item.get("name")
+        },
         "coverage_polygon": coverage_polygon,
     }
     return coverage_polygon, {key: value for key, value in metadata.items() if value not in (None, "", [])}
@@ -492,6 +857,92 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
     return value
+
+
+def _metadata_document(
+    *,
+    document_type: str,
+    member_path: str,
+    content: bytes,
+    source_format: Optional[str],
+    satellite_family: Optional[str],
+    archive_path: str,
+    archive_mtime: Optional[float],
+    parse_status: str = "OK",
+    parse_error: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = bytes(content or b"")
+    return {
+        "document_type": document_type,
+        "member_path": member_path or document_type,
+        "content_sha256": hashlib.sha256(payload).hexdigest(),
+        "content_encoding": "gzip",
+        "content_bytes": gzip.compress(payload),
+        "content_size_bytes": len(payload),
+        "source_format": source_format,
+        "satellite_family": satellite_family,
+        "archive_path": archive_path,
+        "archive_mtime": archive_mtime,
+        "parser_version": PARSER_VERSION,
+        "parse_status": parse_status,
+        "parse_error": parse_error,
+        "extracted_at": _utcnow(),
+    }
+
+
+def _extract_s1_annotation_documents(source_path: str, *, limit: int = 16) -> List[Dict[str, Any]]:
+    docs: List[Dict[str, Any]] = []
+    stat = _stat_path(source_path)
+    if os.path.isdir(source_path):
+        annotation_root = os.path.join(source_path, "annotation")
+        if not os.path.isdir(annotation_root):
+            return docs
+        candidates: List[str] = []
+        for current_root, _, files in os.walk(annotation_root):
+            for file_name in files:
+                if file_name.lower().endswith(".xml"):
+                    candidates.append(os.path.join(current_root, file_name))
+        for path in sorted(candidates)[: max(0, limit)]:
+            try:
+                with open(path, "rb") as stream:
+                    data = stream.read()
+                docs.append(
+                    _metadata_document(
+                        document_type="S1_ANNOTATION",
+                        member_path=os.path.relpath(path, source_path).replace("\\", "/"),
+                        content=data,
+                        source_format="S1_SAFE_DIR",
+                        satellite_family="S1",
+                        archive_path=source_path,
+                        archive_mtime=stat.get("mtime_epoch"),
+                    )
+                )
+            except OSError:
+                continue
+        return docs
+
+    try:
+        with zipfile.ZipFile(source_path) as archive:
+            names = [
+                name
+                for name in archive.namelist()
+                if "/annotation/" in name.lower() and name.lower().endswith(".xml")
+            ]
+            for name in sorted(names)[: max(0, limit)]:
+                docs.append(
+                    _metadata_document(
+                        document_type="S1_ANNOTATION",
+                        member_path=name,
+                        content=archive.read(name),
+                        source_format="S1_ZIP",
+                        satellite_family="S1",
+                        archive_path=source_path,
+                        archive_mtime=stat.get("mtime_epoch"),
+                    )
+                )
+    except Exception:
+        return docs
+    return docs
 
 
 def _xml_parser() -> etree.XMLParser:
@@ -556,26 +1007,24 @@ def _s1_polygon_from_coordinates(text: Optional[str]) -> Optional[List[Tuple[flo
             lon, lat = second, first
         points.append((lon, lat))
 
-    if len(points) < 3:
-        return None
-    if points[0] != points[-1]:
-        points.append(points[0])
-    return points
+    return _ordered_closed_polygon(points)
 
 
 def _bbox_from_polygon(points: Optional[List[Tuple[float, float]]]) -> Optional[Tuple[float, float, float, float]]:
-    if not points or len(points) < 3:
+    ordered = _ordered_closed_polygon(points or [])
+    if not ordered or len(ordered) < 4:
         return None
-    lons = [float(point[0]) for point in points]
-    lats = [float(point[1]) for point in points]
+    lons = [float(point[0]) for point in ordered]
+    lats = [float(point[1]) for point in ordered]
     return min(lons), min(lats), max(lons), max(lats)
 
 
 def _centroid_from_polygon(points: Optional[List[Tuple[float, float]]]) -> Tuple[Optional[float], Optional[float]]:
-    if not points or len(points) < 3:
+    ordered = _ordered_closed_polygon(points or [])
+    if not ordered or len(ordered) < 4:
         return None, None
     try:
-        poly = Polygon(points)
+        poly = Polygon(ordered)
         if not poly.is_valid:
             poly = poly.buffer(0)
         if poly.is_empty:
@@ -648,6 +1097,7 @@ def _parse_s1_manifest_bytes(data: bytes) -> Dict[str, Any]:
 
 
 def _parse_s1_zip_manifest(path: str) -> Dict[str, Any]:
+    stat = _stat_path(path)
     with zipfile.ZipFile(path) as archive:
         manifest_name = next(
             (name for name in archive.namelist() if name.lower().endswith("/manifest.safe") or name.lower() == "manifest.safe"),
@@ -655,10 +1105,23 @@ def _parse_s1_zip_manifest(path: str) -> Dict[str, Any]:
         )
         if not manifest_name:
             return {"manifest_parse_status": "MISSING"}
+        manifest_bytes = archive.read(manifest_name)
         return {
             "manifest_parse_status": "OK",
             "manifest_path": manifest_name,
-            **_parse_s1_manifest_bytes(archive.read(manifest_name)),
+            "metadata_documents": [
+                _metadata_document(
+                    document_type="S1_MANIFEST",
+                    member_path=manifest_name,
+                    content=manifest_bytes,
+                    source_format="S1_ZIP",
+                    satellite_family="S1",
+                    archive_path=path,
+                    archive_mtime=stat.get("mtime_epoch"),
+                ),
+                *_extract_s1_annotation_documents(path),
+            ],
+            **_parse_s1_manifest_bytes(manifest_bytes),
         }
 
 
@@ -666,16 +1129,31 @@ def _parse_s1_safe_manifest(path: str) -> Dict[str, Any]:
     manifest_path = os.path.join(path, "manifest.safe")
     if not os.path.isfile(manifest_path):
         return {"manifest_parse_status": "MISSING"}
+    stat = _stat_path(path)
     with open(manifest_path, "rb") as stream:
+        manifest_bytes = stream.read()
         return {
             "manifest_parse_status": "OK",
             "manifest_path": manifest_path,
-            **_parse_s1_manifest_bytes(stream.read()),
+            "metadata_documents": [
+                _metadata_document(
+                    document_type="S1_MANIFEST",
+                    member_path="manifest.safe",
+                    content=manifest_bytes,
+                    source_format="S1_SAFE_DIR",
+                    satellite_family="S1",
+                    archive_path=path,
+                    archive_mtime=stat.get("mtime_epoch"),
+                ),
+                *_extract_s1_annotation_documents(path),
+            ],
+            **_parse_s1_manifest_bytes(manifest_bytes),
         }
 
 
 def _parse_lt1_archive_metadata(path: str) -> Dict[str, Any]:
     archive_stem = _strip_known_suffix(os.path.basename(path))
+    stat = _stat_path(path)
     xml_member, xml_data, members = _archive_read_first_matching(
         path,
         lambda name: _archive_member_base_name(name).lower().endswith(".meta.xml"),
@@ -697,6 +1175,17 @@ def _parse_lt1_archive_metadata(path: str) -> Dict[str, Any]:
         "archive_xml_member": xml_member,
         "archive_scene_name": _archive_member_scene_name(xml_member, archive_stem),
         "contained_tiff_members": tiff_members,
+        "metadata_documents": [
+            _metadata_document(
+                document_type="LT1_META",
+                member_path=xml_member,
+                content=xml_data,
+                source_format="LT1_ARCHIVE",
+                satellite_family="LT1",
+                archive_path=path,
+                archive_mtime=stat.get("mtime_epoch"),
+            )
+        ],
         "coverage_polygon": coverage_polygon,
         **xml_meta,
     }
@@ -851,6 +1340,18 @@ def _parse_source_entry(path: str, root: ManagedRootORM) -> Optional[Dict[str, A
                 coverage_polygon, parsed_xml = parse_xml_metadata(xml_path)
                 if parsed_xml:
                     xml_meta = parsed_xml
+                with open(xml_path, "rb") as stream:
+                    xml_meta["metadata_documents"] = [
+                        _metadata_document(
+                            document_type="LT1_META",
+                            member_path=os.path.relpath(xml_path, path).replace("\\", "/"),
+                            content=stream.read(),
+                            source_format="LT1_DIR",
+                            satellite_family="LT1",
+                            archive_path=path,
+                            archive_mtime=stat.get("mtime_epoch"),
+                        )
+                    ]
             except Exception as exc:
                 xml_meta = {"xml_parse_error": str(exc), "xml_path": xml_path}
         return _build_lt1_source_asset(path, root, parsed, xml_meta, coverage_polygon, stat, now)
@@ -869,7 +1370,7 @@ def _build_s1_source_asset(
     now: datetime,
 ) -> Dict[str, Any]:
     metadata = dict(name_meta.get("metadata") or {})
-    metadata.update(manifest_meta)
+    metadata.update({key: value for key, value in manifest_meta.items() if key != "metadata_documents"})
     coverage_polygon = manifest_meta.get("coverage_polygon")
     centroid_lon, centroid_lat = _centroid_from_polygon(coverage_polygon)
     bbox = _bbox_from_polygon(coverage_polygon)
@@ -886,7 +1387,7 @@ def _build_s1_source_asset(
     if manifest_pols:
         metadata["polarization_channels"] = manifest_pols
 
-    return {
+    row = {
         "asset_uid": _asset_uid("source", path),
         "logical_product_uid": name_meta.get("logical_product_uid"),
         "satellite_family": "S1",
@@ -909,7 +1410,7 @@ def _build_s1_source_asset(
         "path_kind": _path_kind(path),
         "file_name": os.path.basename(path),
         "file_stem": _strip_known_suffix(os.path.basename(path)),
-        "file_ext": os.path.splitext(path)[1].lower(),
+        "file_ext": _file_ext_for_path(path),
         "size_bytes": stat.get("size_bytes"),
         "mtime_epoch": stat.get("mtime_epoch"),
         "checksum_status": "NOT_COMPUTED",
@@ -923,6 +1424,8 @@ def _build_s1_source_asset(
         "missing_since": None,
         "updated_at": now,
     }
+    row["_metadata_documents"] = manifest_meta.get("metadata_documents") or []
+    return row
 
 
 def _build_lt1_source_asset(
@@ -941,7 +1444,7 @@ def _build_lt1_source_asset(
     parse_error: Optional[str] = None,
 ) -> Dict[str, Any]:
     metadata = dict(parsed)
-    metadata.update({key: value for key, value in xml_meta.items() if value not in (None, "")})
+    metadata.update({key: value for key, value in xml_meta.items() if key != "metadata_documents" and value not in (None, "")})
     metadata["coverage_polygon"] = coverage_polygon
     metadata["coverage_bbox"] = _bbox_from_polygon(coverage_polygon)
     centroid_lon, centroid_lat = _centroid_from_polygon(coverage_polygon)
@@ -950,13 +1453,13 @@ def _build_lt1_source_asset(
     satellite = parsed.get("satellite")
     imaging_date = parsed.get("imaging_date")
 
-    return {
+    row = {
         "asset_uid": _asset_uid("source", path),
         "logical_product_uid": _strip_known_suffix(os.path.basename(path)),
         "satellite_family": normalize_satellite_family(satellite),
         "satellite": satellite,
         "source_format": source_format,
-        "product_type": xml_meta.get("product_type") or parsed.get("product_type"),
+        "product_type": parsed.get("product_type") or xml_meta.get("product_type"),
         "product_level": xml_meta.get("product_level") or parsed.get("product_level"),
         "imaging_mode": xml_meta.get("imaging_mode") or parsed.get("imaging_mode"),
         "polarization": xml_meta.get("polarization") or parsed.get("polarization"),
@@ -973,7 +1476,7 @@ def _build_lt1_source_asset(
         "path_kind": _path_kind(path),
         "file_name": os.path.basename(path),
         "file_stem": _strip_known_suffix(os.path.basename(path)),
-        "file_ext": os.path.splitext(path)[1].lower(),
+        "file_ext": _file_ext_for_path(path),
         "size_bytes": stat.get("size_bytes"),
         "mtime_epoch": stat.get("mtime_epoch"),
         "checksum_status": "NOT_COMPUTED",
@@ -987,6 +1490,8 @@ def _build_lt1_source_asset(
         "missing_since": None,
         "updated_at": now,
     }
+    row["_metadata_documents"] = xml_meta.get("metadata_documents") or []
+    return row
 
 
 def _build_gf3_archive_asset(
@@ -1037,7 +1542,7 @@ def _build_gf3_archive_asset(
         "path_kind": _path_kind(path),
         "file_name": os.path.basename(path),
         "file_stem": stem,
-        "file_ext": os.path.splitext(path)[1].lower(),
+        "file_ext": _file_ext_for_path(path),
         "size_bytes": stat.get("size_bytes"),
         "mtime_epoch": stat.get("mtime_epoch"),
         "checksum_status": "NOT_COMPUTED",
@@ -1167,7 +1672,14 @@ def _iter_source_candidates(root_path: str) -> Iterable[str]:
                                 continue
                             stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
+                            stem_upper = _strip_known_suffix(entry.name).upper()
                             if entry.name.upper().startswith("S1") and entry.name.lower().endswith(".zip"):
+                                yield _normalize_path(entry.path)
+                                continue
+                            if stem_upper.startswith("LT1") and _has_archive_suffix(entry.name, _LT1_ARCHIVE_EXTS):
+                                yield _normalize_path(entry.path)
+                                continue
+                            if stem_upper.startswith("GF3") and _has_archive_suffix(entry.name, _GF3_ARCHIVE_EXTS):
                                 yield _normalize_path(entry.path)
                     except OSError:
                         continue
@@ -1187,16 +1699,8 @@ def _iter_s1_zip_candidates(root_path: str) -> Iterable[str]:
                             stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
                             name_upper = entry.name.upper()
-                            stem_upper = _strip_known_suffix(entry.name).upper()
                             if name_upper.startswith("S1") and entry.name.lower().endswith(".zip"):
                                 yield _normalize_path(entry.path)
-                                continue
-                            if stem_upper.startswith("LT1") and _has_archive_suffix(entry.name, _LT1_ARCHIVE_EXTS):
-                                yield _normalize_path(entry.path)
-                                continue
-                            if stem_upper.startswith("GF3") and _has_archive_suffix(entry.name, _GF3_ARCHIVE_EXTS):
-                                yield _normalize_path(entry.path)
-                                continue
                     except OSError:
                         continue
         except OSError:
@@ -1256,28 +1760,258 @@ def _collect_source_assets(root: ManagedRootORM) -> Tuple[List[Dict[str, Any]], 
     return rows, issues, entry_count
 
 
-def _collect_orbit_assets(root: ManagedRootORM) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+def _same_mtime(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    try:
+        return abs(float(left) - float(right)) <= 0.001
+    except (TypeError, ValueError):
+        return False
+
+
+def _same_size(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    try:
+        return int(left) == int(right)
+    except (TypeError, ValueError):
+        return False
+
+
+def _cached_source_asset_is_unchanged(
+    cached: Optional[Dict[str, Any]],
+    stat: Dict[str, Optional[float]],
+    root: ManagedRootORM,
+) -> bool:
+    if not cached:
+        return False
+    source_format = str(cached.get("source_format") or "").upper()
+    if source_format not in {"S1_ZIP", "LT1_ARCHIVE", "GF3_ARCHIVE"}:
+        return False
+    try:
+        if int(cached.get("root_ref_id") or 0) != int(root.id or 0):
+            return False
+    except (TypeError, ValueError):
+        return False
+    if not bool(cached.get("is_active")):
+        return False
+    if str(cached.get("parser_version") or "") != PARSER_VERSION:
+        return False
+    if str(cached.get("parse_status") or "").upper() != "OK":
+        return False
+    return _same_size(cached.get("size_bytes"), stat.get("size_bytes")) and _same_mtime(
+        cached.get("mtime_epoch"),
+        stat.get("mtime_epoch"),
+    )
+
+
+def _cached_orbit_asset_is_unchanged(
+    cached: Optional[Dict[str, Any]],
+    stat: Dict[str, Optional[float]],
+    root: ManagedRootORM,
+) -> bool:
+    if not cached:
+        return False
+    native_format = str(cached.get("native_format") or "").upper()
+    if native_format not in {"TXT", "EOF"}:
+        return False
+    try:
+        if int(cached.get("root_ref_id") or 0) != int(root.id or 0):
+            return False
+    except (TypeError, ValueError):
+        return False
+    if not bool(cached.get("is_active")):
+        return False
+    if str(cached.get("parser_version") or "") != PARSER_VERSION:
+        return False
+    if str(cached.get("parse_status") or "").upper() != "OK":
+        return False
+    return _same_size(cached.get("size_bytes"), stat.get("size_bytes")) and _same_mtime(
+        cached.get("mtime_epoch"),
+        stat.get("mtime_epoch"),
+    )
+
+
+def _collect_source_assets_incremental(
+    root: ManagedRootORM,
+    existing_by_path: Dict[str, Dict[str, Any]],
+    *,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    log_callback: Optional[Callable[[str, str], None]] = None,
+    progress_start: int = 0,
+    progress_end: int = 100,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, List[str]]:
     rows: List[Dict[str, Any]] = []
     issues: List[Dict[str, Any]] = []
+    seen_paths: List[str] = []
     entry_count = 0
-    for path in _iter_orbit_candidates(root.path):
+    skipped_unchanged = 0
+    parse_attempts = 0
+    last_progress_count = 0
+
+    def _log(level: str, message: str) -> None:
+        if log_callback:
+            log_callback(level, message)
+
+    def _progress(message: str) -> None:
+        if progress_callback:
+            progress_callback(_activity_progress(progress_start, progress_end, entry_count), message)
+
+    _log("INFO", f"Source root discovery started: {root.path}")
+    for path in _iter_source_candidates(root.path):
+        entry_count += 1
+        normalized_path = _normalize_path(path)
+        stat = _stat_path(normalized_path)
+        if _cached_source_asset_is_unchanged(existing_by_path.get(normalized_path), stat, root):
+            seen_paths.append(normalized_path)
+            skipped_unchanged += 1
+            if skipped_unchanged % ASSET_SCAN_LOG_INTERVAL == 0:
+                _log(
+                    "INFO",
+                    f"Skipped unchanged source archives: {skipped_unchanged} (candidates={entry_count})",
+                )
+            if entry_count - last_progress_count >= ASSET_SCAN_LOG_INTERVAL:
+                _progress(
+                    "Scanning source archives: "
+                    f"candidates={entry_count}, skipped={skipped_unchanged}, parsed={len(rows)}, issues={len(issues)}"
+                )
+                last_progress_count = entry_count
+            continue
+        parse_attempts += 1
+        file_name = os.path.basename(normalized_path)
+        if parse_attempts <= ASSET_SCAN_DETAILED_PARSE_LOG_LIMIT or parse_attempts % ASSET_SCAN_LOG_INTERVAL == 0:
+            _log("INFO", f"Extracting source archive metadata {parse_attempts}: {file_name}")
+        if parse_attempts <= 50 or parse_attempts % 25 == 0:
+            _progress(
+                "Extracting source archive metadata: "
+                f"{file_name} (changed/new={parse_attempts}, skipped={skipped_unchanged})"
+            )
         try:
-            row = _parse_orbit_entry(path, root)
+            row = _parse_source_entry(normalized_path, root)
         except Exception as exc:
             row = None
+            _log("WARNING", f"Source archive metadata parse failed: {file_name}: {exc}")
+            issues.append(
+                {
+                    "severity": "warning",
+                    "issue_code": "source_parse_failed",
+                    "issue_message": str(exc),
+                    "source_path": normalized_path,
+                }
+            )
+        if row is None:
+            continue
+        rows.append(row)
+        seen_paths.append(str(row["file_path"]))
+        if row.get("parse_status") in {"FAILED", "PARTIAL"}:
+            _log(
+                "WARNING",
+                f"Source archive metadata {str(row.get('parse_status')).lower()}: "
+                f"{os.path.basename(str(row.get('file_path') or normalized_path))}: {row.get('parse_error')}",
+            )
+            issues.append(
+                {
+                    "severity": "warning",
+                    "issue_code": "source_parse_partial" if row.get("parse_status") == "PARTIAL" else "source_parse_failed",
+                    "issue_message": row.get("parse_error"),
+                    "source_path": row.get("file_path"),
+                }
+            )
+        if entry_count - last_progress_count >= ASSET_SCAN_LOG_INTERVAL:
+            _progress(
+                "Scanning source archives: "
+                f"candidates={entry_count}, skipped={skipped_unchanged}, parsed={len(rows)}, issues={len(issues)}"
+            )
+            last_progress_count = entry_count
+    _log(
+        "INFO",
+        "Source root discovery finished: "
+        f"candidates={entry_count}, skipped={skipped_unchanged}, changed_or_new={len(rows)}, issues={len(issues)}",
+    )
+    _progress(
+        "Source archive discovery finished: "
+        f"candidates={entry_count}, skipped={skipped_unchanged}, changed_or_new={len(rows)}"
+    )
+    return rows, issues, entry_count, skipped_unchanged, seen_paths
+
+
+def _collect_orbit_assets_incremental(
+    root: ManagedRootORM,
+    existing_by_path: Dict[str, Dict[str, Any]],
+    *,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    log_callback: Optional[Callable[[str, str], None]] = None,
+    progress_start: int = 0,
+    progress_end: int = 100,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, List[str]]:
+    rows: List[Dict[str, Any]] = []
+    issues: List[Dict[str, Any]] = []
+    seen_paths: List[str] = []
+    entry_count = 0
+    skipped_unchanged = 0
+    parse_attempts = 0
+    last_progress_count = 0
+
+    def _log(level: str, message: str) -> None:
+        if log_callback:
+            log_callback(level, message)
+
+    def _progress(message: str) -> None:
+        if progress_callback:
+            progress_callback(_activity_progress(progress_start, progress_end, entry_count), message)
+
+    _log("INFO", f"Orbit root discovery started: {root.path}")
+    for path in _iter_orbit_candidates(root.path):
+        entry_count += 1
+        normalized_path = _normalize_path(path)
+        stat = _stat_path(normalized_path)
+        if _cached_orbit_asset_is_unchanged(existing_by_path.get(normalized_path), stat, root):
+            seen_paths.append(normalized_path)
+            skipped_unchanged += 1
+            if skipped_unchanged % ASSET_SCAN_LOG_INTERVAL == 0:
+                _log(
+                    "INFO",
+                    f"Skipped unchanged orbit assets: {skipped_unchanged} (candidates={entry_count})",
+                )
+            if entry_count - last_progress_count >= ASSET_SCAN_LOG_INTERVAL:
+                _progress(
+                    "Scanning orbit assets: "
+                    f"candidates={entry_count}, skipped={skipped_unchanged}, parsed={len(rows)}, issues={len(issues)}"
+                )
+                last_progress_count = entry_count
+            continue
+        parse_attempts += 1
+        file_name = os.path.basename(normalized_path)
+        if parse_attempts <= ASSET_SCAN_DETAILED_PARSE_LOG_LIMIT or parse_attempts % ASSET_SCAN_LOG_INTERVAL == 0:
+            _log("INFO", f"Extracting orbit asset metadata {parse_attempts}: {file_name}")
+        if parse_attempts <= 50 or parse_attempts % 25 == 0:
+            _progress(
+                "Extracting orbit asset metadata: "
+                f"{file_name} (changed/new={parse_attempts}, skipped={skipped_unchanged})"
+            )
+        try:
+            row = _parse_orbit_entry(normalized_path, root)
+        except Exception as exc:
+            row = None
+            _log("WARNING", f"Orbit asset parse failed: {file_name}: {exc}")
             issues.append(
                 {
                     "severity": "warning",
                     "issue_code": "orbit_parse_failed",
                     "issue_message": str(exc),
-                    "source_path": path,
+                    "source_path": normalized_path,
                 }
             )
         if row is None:
             continue
-        entry_count += 1
         rows.append(row)
+        seen_paths.append(str(row["file_path"]))
         if row.get("parse_status") in {"FAILED", "PARTIAL"}:
+            _log(
+                "WARNING",
+                f"Orbit asset metadata {str(row.get('parse_status')).lower()}: "
+                f"{os.path.basename(str(row.get('file_path') or normalized_path))}: {row.get('parse_error')}",
+            )
             issues.append(
                 {
                     "severity": "warning",
@@ -1286,11 +2020,27 @@ def _collect_orbit_assets(root: ManagedRootORM) -> Tuple[List[Dict[str, Any]], L
                     "source_path": row.get("file_path"),
                 }
             )
-    return rows, issues, entry_count
+        if entry_count - last_progress_count >= ASSET_SCAN_LOG_INTERVAL:
+            _progress(
+                "Scanning orbit assets: "
+                f"candidates={entry_count}, skipped={skipped_unchanged}, parsed={len(rows)}, issues={len(issues)}"
+            )
+            last_progress_count = entry_count
+    _log(
+        "INFO",
+        "Orbit root discovery finished: "
+        f"candidates={entry_count}, skipped={skipped_unchanged}, changed_or_new={len(rows)}, issues={len(issues)}",
+    )
+    _progress(
+        "Orbit asset discovery finished: "
+        f"candidates={entry_count}, skipped={skipped_unchanged}, changed_or_new={len(rows)}"
+    )
+    return rows, issues, entry_count, skipped_unchanged, seen_paths
 
 
 def _insar_source_ready(row: Dict[str, Any], coverage_polygon: Optional[List[Tuple[float, float]]]) -> Tuple[bool, Optional[str]]:
     reasons: List[str] = []
+    metadata = dict(row.get("metadata_json") or {})
     if not coverage_polygon or len(coverage_polygon) < 3:
         reasons.append("missing_footprint")
     if not row.get("imaging_date"):
@@ -1299,7 +2049,14 @@ def _insar_source_ready(row: Dict[str, Any], coverage_polygon: Optional[List[Tup
         reasons.append("missing_imaging_mode")
     if not row.get("polarization"):
         reasons.append("missing_polarization")
-    if str(row.get("product_type") or "").upper() not in {"SLC", "SSC"}:
+    complex_tokens = {
+        str(row.get("product_type") or "").strip().upper(),
+        str(metadata.get("image_data_type") or "").strip().upper(),
+        str(metadata.get("product_variant") or "").strip().upper(),
+        str(metadata.get("filename_class_token") or "").strip().upper(),
+        str(metadata.get("source_product_token") or "").strip().upper(),
+    }
+    if not complex_tokens.intersection({"COMPLEX", "SLC", "SSC"}):
         reasons.append("not_complex_source")
     if reasons:
         return False, ";".join(reasons)
@@ -1319,20 +2076,297 @@ class AssetInventoryService:
             return
         await task_service.update_task(task_id, message=message, progress=max(0, min(100, int(progress))))
 
+    def _normalize_scan_families(self, families: Optional[Sequence[str]]) -> List[str]:
+        normalized: List[str] = []
+        for item in families or []:
+            family = str(normalize_satellite_family(item) or item or "").strip().upper()
+            if family and family not in normalized:
+                normalized.append(family)
+        return normalized
+
+    def _scan_includes_type(self, inventory_types: Optional[Sequence[str]], *names: str) -> bool:
+        type_set = {str(item or "").strip().lower() for item in (inventory_types or []) if str(item or "").strip()}
+        if not type_set:
+            return True
+        return bool(type_set.intersection({str(name).strip().lower() for name in names}))
+
+    def _normalize_family_filter(self, satellite_family: Optional[str]) -> List[str]:
+        values: List[str] = []
+        for raw in re.split(r"[,;]", str(satellite_family or "")):
+            family = str(normalize_satellite_family(raw) or raw or "").strip().upper()
+            if family and family not in values:
+                values.append(family)
+        return values
+
+    def _thread_callbacks(
+        self,
+        task_id: Optional[str],
+        loop: asyncio.AbstractEventLoop,
+    ) -> Tuple[
+        Optional[Callable[[int, str], None]],
+        Optional[Callable[[str, str], None]],
+        Callable[[], Awaitable[None]],
+    ]:
+        async def _noop() -> None:
+            return None
+
+        if not task_id:
+            return None, None, _noop
+
+        pending: List[Any] = []
+
+        def _submit(coro: Any) -> None:
+            pending.append(asyncio.run_coroutine_threadsafe(coro, loop))
+
+        def _progress(progress: int, message: str) -> None:
+            _submit(
+                task_service.update_task(
+                    task_id,
+                    progress=max(0, min(100, int(progress))),
+                    message=message,
+                )
+            )
+
+        def _log(level: str, message: str) -> None:
+            _submit(task_service.add_log(task_id, level, message))
+
+        async def _drain() -> None:
+            while pending:
+                current = pending[:]
+                pending.clear()
+                await asyncio.gather(
+                    *(asyncio.wrap_future(item) for item in current),
+                    return_exceptions=True,
+                )
+
+        return _progress, _log, _drain
+
+    async def build_archive_preview_caches(
+        self,
+        db: Optional[AsyncSession] = None,
+        *,
+        families: Optional[Sequence[str]] = None,
+        limit: int = 0,
+        force: bool = False,
+        apply: bool = True,
+        task_id: Optional[str] = None,
+        progress_start: int = 84,
+        progress_end: int = 96,
+    ) -> Dict[str, Any]:
+        generated_session = db is None
+        if generated_session:
+            db = _new_session()
+        assert db is not None
+
+        family_map = {
+            "LT1": {"LT1_ARCHIVE"},
+            "S1": {"S1_ZIP"},
+        }
+        requested_families = self._normalize_scan_families(families) or ["LT1", "S1"]
+        target_families = [item for item in requested_families if item in family_map]
+        source_formats = sorted(
+            {
+                source_format
+                for family in target_families
+                for source_format in family_map.get(family, set())
+            }
+        )
+        summary: Dict[str, Any] = {
+            "records_seen": 0,
+            "candidate_count": 0,
+            "ready": 0,
+            "cached": 0,
+            "skipped_ready": 0,
+            "failed": 0,
+            "missing_source": 0,
+            "raw_cached": 0,
+            "raw_skipped": 0,
+            "raw_failed": 0,
+            "families": target_families,
+        }
+        if not target_families or not source_formats:
+            await self._progress(task_id, "No LT1/S1 archive previews to build for selected families.", progress_end)
+            return summary
+
+        try:
+            stmt = (
+                select(RadarDataORM)
+                .where(RadarDataORM.satellite_family.in_(target_families))
+                .where(RadarDataORM.source_format.in_(source_formats))
+                .order_by(RadarDataORM.satellite_family.asc(), RadarDataORM.id.asc())
+            )
+            result = await db.execute(stmt)
+            records = list(result.scalars().all())
+            summary["records_seen"] = len(records)
+            candidates: List[RadarDataORM] = []
+            for record in records:
+                unique_id = record.unique_id or record.file_path
+                raw_cache_path = DataService.get_radar_raw_cache_path(unique_id, record.file_path)
+                geo_cache_path = DataService.get_radar_geo_cache_path(unique_id, record.file_path)
+                ready = (
+                    (record.preview_cache_status or "NONE") == "READY"
+                    and (record.preview_cache_version or "") == settings.RADAR_GEO_CACHE_VERSION
+                    and bool(record.preview_cache_path or geo_cache_path)
+                    and os.path.exists(record.preview_cache_path or geo_cache_path)
+                    and os.path.exists(raw_cache_path)
+                )
+                if ready and not force:
+                    summary["skipped_ready"] += 1
+                    continue
+                candidates.append(record)
+
+            if limit and limit > 0:
+                candidates = candidates[: int(limit)]
+            summary["candidate_count"] = len(candidates)
+            if not apply:
+                return summary
+            if not candidates:
+                await self._progress(
+                    task_id,
+                    f"Archive preview cache already ready: skipped={summary['skipped_ready']}",
+                    progress_end,
+                )
+                return summary
+
+            await self._progress(
+                task_id,
+                f"Building archive preview cache: candidates={len(candidates)}, skipped_ready={summary['skipped_ready']}",
+                progress_start,
+            )
+            thumb_size = (settings.RADAR_THUMBNAIL_MAX_SIZE, settings.RADAR_THUMBNAIL_MAX_SIZE)
+            total = len(candidates)
+            for index, record in enumerate(candidates, start=1):
+                unique_id = record.unique_id or record.file_path
+                raw_cache_path = DataService.get_radar_raw_cache_path(unique_id, record.file_path)
+                geo_cache_path = DataService.get_radar_geo_cache_path(unique_id, record.file_path)
+                product_name = os.path.basename(str(record.file_path or ""))
+                preview_source = await asyncio.to_thread(DataService.find_radar_preview_source, record.file_path)
+
+                if not preview_source:
+                    record.preview_cache_status = "NONE"
+                    record.preview_cache_path = None
+                    record.preview_cache_version = settings.RADAR_GEO_CACHE_VERSION
+                    record.preview_cache_updated_at = _utcnow()
+                    record.preview_cache_error = "preview_source_not_found"
+                    summary["missing_source"] += 1
+                    if task_id:
+                        await task_service.add_log(task_id, "WARNING", f"Preview source missing: {product_name}")
+                    db.add(record)
+                else:
+                    coverage_polygon = DataService._normalize_coverage_polygon(record.coverage_polygon)
+                    try:
+                        bbox = (
+                            float(record.min_lon),
+                            float(record.min_lat),
+                            float(record.max_lon),
+                            float(record.max_lat),
+                        )
+                        if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+                            bbox = None
+                    except (TypeError, ValueError):
+                        bbox = None
+
+                    if not coverage_polygon or not bbox:
+                        record.preview_cache_status = "FAILED"
+                        record.preview_cache_path = None
+                        record.preview_cache_version = settings.RADAR_GEO_CACHE_VERSION
+                        record.preview_cache_updated_at = _utcnow()
+                        record.preview_cache_error = "invalid_coverage_polygon" if not coverage_polygon else "invalid_bbox"
+                        summary["failed"] += 1
+                        if task_id:
+                            await task_service.add_log(task_id, "ERROR", f"Preview geometry invalid: {product_name}: {record.preview_cache_error}")
+                        db.add(record)
+                    else:
+                        source_corner_mapping = await asyncio.to_thread(
+                            DataService.get_radar_source_corner_mapping,
+                            record.file_path,
+                        )
+                        ok_geo, geo_error = await asyncio.to_thread(
+                            image_service.create_geocorrected_radar_cached_image,
+                            preview_source,
+                            geo_cache_path,
+                            coverage_polygon,
+                            bbox,
+                            source_corner_mapping,
+                            thumb_size,
+                            settings.RADAR_GEO_CACHE_QUALITY,
+                        )
+                        ok_raw = await asyncio.to_thread(
+                            image_service.create_radar_cached_image,
+                            preview_source,
+                            raw_cache_path,
+                            thumb_size,
+                        )
+                        if ok_raw:
+                            summary["raw_cached"] += 1
+                        else:
+                            summary["raw_failed"] += 1
+
+                        if ok_geo and os.path.exists(geo_cache_path):
+                            record.preview_cache_status = "READY"
+                            record.preview_cache_path = geo_cache_path
+                            record.preview_cache_error = None
+                            summary["ready"] += 1
+                            summary["cached"] += 1
+                            if task_id:
+                                await task_service.add_log(task_id, "INFO", f"Preview cache ready: {index}/{total} {product_name}")
+                        else:
+                            record.preview_cache_status = "FAILED"
+                            record.preview_cache_path = None
+                            record.preview_cache_error = geo_error or ("raw_cache_ready_only" if ok_raw else "preview_cache_build_failed")
+                            summary["failed"] += 1
+                            if task_id:
+                                await task_service.add_log(task_id, "ERROR", f"Preview cache failed: {product_name}: {record.preview_cache_error}")
+                        record.preview_cache_version = settings.RADAR_GEO_CACHE_VERSION
+                        record.preview_cache_updated_at = _utcnow()
+                        db.add(record)
+
+                progress = progress_start + int(index / max(1, total) * max(1, progress_end - progress_start))
+                await self._progress(
+                    task_id,
+                    f"Building archive preview cache ({index}/{total}): ready={summary['ready']}, failed={summary['failed']}, missing={summary['missing_source']}",
+                    min(progress_end, progress),
+                )
+                await db.commit()
+
+            await self._progress(
+                task_id,
+                (
+                    "Archive preview cache completed: "
+                    f"ready={summary['ready']}, skipped={summary['skipped_ready']}, "
+                    f"failed={summary['failed']}, missing={summary['missing_source']}"
+                ),
+                progress_end,
+            )
+            return summary
+        except Exception:
+            if db is not None:
+                await db.rollback()
+            raise
+        finally:
+            if generated_session and db is not None:
+                await db.close()
+
     async def _get_scan_roots(
         self,
         db: AsyncSession,
         *,
         inventory_types: Optional[Sequence[str]] = None,
         root_ids: Optional[Sequence[int]] = None,
+        families: Optional[Sequence[str]] = None,
     ) -> List[ManagedRootORM]:
         type_set = {str(item or "").strip().lower() for item in (inventory_types or []) if str(item or "").strip()}
+        family_set = {
+            str(normalize_satellite_family(item) or item or "").strip().upper()
+            for item in (families or [])
+            if str(item or "").strip()
+        }
+        family_set.discard("")
         roles: List[str] = []
         if not type_set or "source_product" in type_set or "source" in type_set:
             roles.extend(
                 [
                     "source_product_pool",
-                    "source_pool_gf3_archive",
                 ]
             )
         if not type_set or "orbit_asset" in type_set or "orbit" in type_set:
@@ -1346,7 +2380,14 @@ class AssetInventoryService:
         if root_ids:
             stmt = stmt.where(ManagedRootORM.id.in_([int(item) for item in root_ids]))
         result = await db.execute(stmt)
-        return result.scalars().all()
+        roots = result.scalars().all()
+        if family_set:
+            roots = [
+                root
+                for root in roots
+                if family_set.intersection(_root_supported_families(root))
+            ]
+        return roots
 
     async def scan_configured_roots(
         self,
@@ -1354,7 +2395,9 @@ class AssetInventoryService:
         *,
         inventory_types: Optional[Sequence[str]] = None,
         root_ids: Optional[Sequence[int]] = None,
+        families: Optional[Sequence[str]] = None,
         bind_orbits: bool = True,
+        build_previews: bool = True,
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         generated_session = db is None
@@ -1364,7 +2407,12 @@ class AssetInventoryService:
 
         try:
             await self._progress(task_id, "Preparing source/orbit asset scan...", 2)
-            roots = await self._get_scan_roots(db, inventory_types=inventory_types, root_ids=root_ids)
+            roots = await self._get_scan_roots(
+                db,
+                inventory_types=inventory_types,
+                root_ids=root_ids,
+                families=families,
+            )
             results: List[Dict[str, Any]] = []
             totals = {
                 "source_roots": 0,
@@ -1377,18 +2425,36 @@ class AssetInventoryService:
 
             total_roots = len(roots)
             for index, root in enumerate(roots, start=1):
-                progress = 5 + int((index - 1) / max(1, total_roots) * 75)
+                progress = 5 + int((index - 1) / max(1, total_roots) * 78)
+                next_progress = 5 + int(index / max(1, total_roots) * 78)
                 await self._progress(task_id, f"Scanning {root.display_name}: {root.path}", progress)
-                if root.root_role in {"source_product_pool", "source_pool_gf3_archive"}:
-                    result = await self.scan_source_root(db, root)
+                if root.root_role == "source_product_pool":
+                    result = await self.scan_source_root(
+                        db,
+                        root,
+                        task_id=task_id,
+                        progress_start=progress,
+                        progress_end=next_progress,
+                    )
                     totals["source_roots"] += 1
                     totals["source_assets"] += int(result.get("asset_count") or 0)
                 elif root.root_role == "orbit_asset_pool":
-                    result = await self.scan_orbit_root(db, root)
+                    result = await self.scan_orbit_root(
+                        db,
+                        root,
+                        task_id=task_id,
+                        progress_start=progress,
+                        progress_end=next_progress,
+                    )
                     totals["orbit_roots"] += 1
                     totals["orbit_assets"] += int(result.get("asset_count") or 0)
                 else:
                     continue
+                await self._progress(
+                    task_id,
+                    f"Finished {root.display_name}: assets={result.get('asset_count', 0)}, issues={result.get('issue_count', 0)}",
+                    max(progress, next_progress - 1),
+                )
                 totals["issues"] += int(result.get("issue_count") or 0)
                 if result.get("status") == "INACCESSIBLE":
                     totals["inaccessible_roots"] += 1
@@ -1397,8 +2463,24 @@ class AssetInventoryService:
 
             binding_summary: Dict[str, Any] = {}
             if bind_orbits:
-                await self._progress(task_id, "Binding scenes to precise orbit assets...", 88)
+                await self._progress(task_id, "Binding scenes to precise orbit assets...", 84)
                 binding_summary = await self.bind_scene_orbits(db)
+                await db.commit()
+
+            preview_summary: Dict[str, Any] = {}
+            should_build_previews = (
+                build_previews
+                and totals["source_roots"] > 0
+                and self._scan_includes_type(inventory_types, "source_product", "source")
+            )
+            if should_build_previews:
+                preview_summary = await self.build_archive_preview_caches(
+                    db,
+                    families=families,
+                    task_id=task_id,
+                    progress_start=88,
+                    progress_end=98,
+                )
                 await db.commit()
 
             summary = {
@@ -1406,6 +2488,7 @@ class AssetInventoryService:
                 "root_count": total_roots,
                 **totals,
                 "binding": binding_summary,
+                "preview_cache": preview_summary,
                 "results": results,
             }
             await self._progress(task_id, "Asset inventory scan completed", 100)
@@ -1418,7 +2501,206 @@ class AssetInventoryService:
             if generated_session and db is not None:
                 await db.close()
 
-    async def scan_source_root(self, db: AsyncSession, root: ManagedRootORM) -> Dict[str, Any]:
+    async def audit_source_archive_integrity(
+        self,
+        db: Optional[AsyncSession] = None,
+        *,
+        families: Optional[Sequence[str]] = None,
+        source_formats: Optional[Sequence[str]] = None,
+        asset_ids: Optional[Sequence[int]] = None,
+        force: bool = False,
+        limit: Optional[int] = None,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        generated_session = db is None
+        if generated_session:
+            db = _new_session()
+        assert db is not None
+
+        safe_limit: Optional[int] = None
+        if limit is not None:
+            try:
+                parsed_limit = int(limit)
+                safe_limit = parsed_limit if parsed_limit > 0 else None
+            except (TypeError, ValueError):
+                safe_limit = None
+
+        family_filter = self._normalize_scan_families(families)
+        format_filter = [
+            str(item or "").strip().upper()
+            for item in (source_formats or [])
+            if str(item or "").strip()
+        ]
+        if not format_filter:
+            format_filter = ["LT1_ARCHIVE", "S1_ZIP"]
+        format_filter = [item for item in format_filter if item in {"LT1_ARCHIVE", "S1_ZIP", "GF3_ARCHIVE"}]
+        if not format_filter:
+            format_filter = ["LT1_ARCHIVE", "S1_ZIP"]
+
+        try:
+            await self._progress(task_id, "Preparing source archive integrity audit...", 2)
+            filters = [
+                SourceProductAssetORM.is_active == True,  # noqa: E712
+                SourceProductAssetORM.source_format.in_(format_filter),
+            ]
+            if family_filter:
+                filters.append(SourceProductAssetORM.satellite_family.in_(family_filter))
+            if asset_ids:
+                filters.append(SourceProductAssetORM.id.in_([int(item) for item in asset_ids]))
+            stmt = (
+                select(SourceProductAssetORM)
+                .where(*filters)
+                .order_by(
+                    SourceProductAssetORM.satellite_family.asc().nullslast(),
+                    SourceProductAssetORM.imaging_date.asc().nullslast(),
+                    SourceProductAssetORM.id.asc(),
+                )
+            )
+            if safe_limit:
+                stmt = stmt.limit(safe_limit)
+            rows = (await db.execute(stmt)).scalars().all()
+            total = len(rows)
+            summary: Dict[str, Any] = {
+                "message": "Source archive integrity audit completed",
+                "total": total,
+                "checked": 0,
+                "skipped": 0,
+                "ok": 0,
+                "failed": 0,
+                "unsupported": 0,
+                "missing": 0,
+                "force": bool(force),
+                "families": family_filter,
+                "source_formats": format_filter,
+                "version": ARCHIVE_INTEGRITY_VERSION,
+            }
+            if total <= 0:
+                await self._progress(task_id, "No source archives matched integrity audit filters.", 100)
+                return summary
+            if task_id:
+                await task_service.add_log(
+                    task_id,
+                    "INFO",
+                    (
+                        "Source archive integrity audit candidates: "
+                        f"total={total}, families={family_filter or 'ALL'}, formats={format_filter}, force={bool(force)}"
+                    ),
+                )
+
+            for index, asset in enumerate(rows, start=1):
+                file_path = _normalize_path(asset.file_path or "")
+                file_name = os.path.basename(file_path) or str(asset.logical_product_uid or asset.id)
+                progress = 5 + int((index - 1) / max(1, total) * 90)
+                stat = _stat_path(file_path)
+                unchanged = (
+                    _same_size(asset.size_bytes, stat.get("size_bytes"))
+                    and _same_mtime(asset.mtime_epoch, stat.get("mtime_epoch"))
+                )
+                previous_status = str(asset.archive_integrity_status or "NOT_CHECKED").upper()
+                previous_version = str(asset.archive_integrity_version or "")
+                can_skip = (
+                    not force
+                    and unchanged
+                    and previous_version == ARCHIVE_INTEGRITY_VERSION
+                    and previous_status in {"OK", "FAILED", "UNSUPPORTED"}
+                )
+                if can_skip:
+                    summary["skipped"] += 1
+                    if previous_status == "OK":
+                        summary["ok"] += 1
+                    elif previous_status == "FAILED":
+                        summary["failed"] += 1
+                    elif previous_status == "UNSUPPORTED":
+                        summary["unsupported"] += 1
+                    if index <= 5 or index % ARCHIVE_INTEGRITY_LOG_INTERVAL == 0 or index == total:
+                        await self._progress(
+                            task_id,
+                            f"Skipping unchanged archive integrity {index}/{total}: {file_name}",
+                            5 + int(index / max(1, total) * 90),
+                        )
+                    if task_id and (summary["skipped"] <= 5 or summary["skipped"] % ARCHIVE_INTEGRITY_LOG_INTERVAL == 0):
+                        await task_service.add_log(
+                            task_id,
+                            "INFO",
+                            f"Skipped unchanged archive integrity: {summary['skipped']} skipped, {file_name}, status={previous_status}",
+                        )
+                    continue
+
+                await self._progress(
+                    task_id,
+                    f"Checking archive integrity {index}/{total}: {file_name}",
+                    progress,
+                )
+                if task_id:
+                    await task_service.add_log(
+                        task_id,
+                        "INFO",
+                        f"Checking archive integrity {index}/{total}: {file_path}",
+                    )
+                result = await asyncio.to_thread(_check_archive_integrity, file_path, asset.source_format)
+                checked_at = _utcnow()
+                status = str(result.get("status") or "FAILED").upper()
+                asset.size_bytes = result.get("size_bytes")
+                asset.mtime_epoch = result.get("mtime_epoch")
+                asset.archive_integrity_status = status
+                asset.archive_integrity_method = result.get("method")
+                asset.archive_integrity_checked_at = checked_at
+                asset.archive_integrity_error = result.get("error")
+                asset.archive_integrity_version = ARCHIVE_INTEGRITY_VERSION
+                asset.archive_integrity_member_count = result.get("member_count")
+                asset.updated_at = checked_at
+                db.add(asset)
+                summary["checked"] += 1
+                if status == "OK":
+                    summary["ok"] += 1
+                    await self._resolve_archive_integrity_issue(db, asset, now=checked_at)
+                elif status == "UNSUPPORTED":
+                    summary["unsupported"] += 1
+                    await self._resolve_archive_integrity_issue(db, asset, now=checked_at)
+                else:
+                    summary["failed"] += 1
+                    if str(result.get("error") or "").lower().startswith("archive file is missing"):
+                        summary["missing"] += 1
+                    await self._record_archive_integrity_issue(db, asset, result, now=checked_at)
+                await db.commit()
+                if task_id:
+                    level = "INFO" if status == "OK" else "WARNING" if status == "UNSUPPORTED" else "ERROR"
+                    duration = result.get("duration_seconds")
+                    detail = (
+                        f"Archive integrity {status}: {file_name}, "
+                        f"members={result.get('member_count')}, duration={duration}s"
+                    )
+                    if result.get("error"):
+                        detail += f", error={result.get('error')}"
+                    await task_service.add_log(task_id, level, detail)
+
+            await self._progress(
+                task_id,
+                (
+                    "Source archive integrity audit completed: "
+                    f"checked={summary['checked']}, skipped={summary['skipped']}, "
+                    f"ok={summary['ok']}, failed={summary['failed']}, unsupported={summary['unsupported']}"
+                ),
+                100,
+            )
+            return summary
+        except Exception:
+            if db is not None:
+                await db.rollback()
+            raise
+        finally:
+            if generated_session and db is not None:
+                await db.close()
+
+    async def scan_source_root(
+        self,
+        db: AsyncSession,
+        root: ManagedRootORM,
+        *,
+        task_id: Optional[str] = None,
+        progress_start: int = 0,
+        progress_end: int = 100,
+    ) -> Dict[str, Any]:
         started_at = _utcnow()
         state = await self._ensure_state(db, root, "source_product", started_at)
         if not os.path.isdir(root.path):
@@ -1447,10 +2729,55 @@ class AssetInventoryService:
             )
             return {"root_id": root.id, "inventory_type": "source_product", "status": "INACCESSIBLE", "asset_count": 0, "issue_count": 1}
 
-        rows, issues, entry_count = await asyncio.to_thread(_collect_source_assets, root)
-        seen_paths = [row["file_path"] for row in rows]
+        existing_result = await db.execute(
+            select(SourceProductAssetORM).where(SourceProductAssetORM.root_ref_id == root.id)
+        )
+        existing_by_path = {
+            str(asset.file_path): {
+                "root_ref_id": asset.root_ref_id,
+                "source_format": asset.source_format,
+                "size_bytes": asset.size_bytes,
+                "mtime_epoch": asset.mtime_epoch,
+                "parser_version": asset.parser_version,
+                "parse_status": asset.parse_status,
+                "is_active": bool(asset.is_active),
+            }
+            for asset in existing_result.scalars().all()
+            if asset.file_path
+        }
+
+        loop = asyncio.get_running_loop()
+        progress_callback, log_callback, drain_thread_events = self._thread_callbacks(task_id, loop)
+        rows, issues, entry_count, skipped_unchanged, seen_paths = await asyncio.to_thread(
+            _collect_source_assets_incremental,
+            root,
+            existing_by_path,
+            progress_callback=progress_callback,
+            log_callback=log_callback,
+            progress_start=progress_start,
+            progress_end=max(progress_start + 1, progress_end - 8),
+        )
+        await drain_thread_events()
+        changed_paths = [row["file_path"] for row in rows]
         now = _utcnow()
-        for row in rows:
+        write_start = max(progress_start, progress_end - 7)
+        write_end = max(write_start, progress_end - 3)
+        await self._progress(
+            task_id,
+            f"Writing source asset index: changed_or_new={len(rows)}, skipped={skipped_unchanged}",
+            write_start,
+        )
+        db_rows = [
+            {key: value for key, value in row.items() if not str(key).startswith("_")}
+            for row in rows
+        ]
+        if task_id:
+            await task_service.add_log(
+                task_id,
+                "INFO",
+                f"Source asset DB upsert started: changed_or_new={len(rows)}, skipped={skipped_unchanged}, seen={len(seen_paths)}",
+            )
+        for index, row in enumerate(db_rows, start=1):
             stmt = pg_insert(SourceProductAssetORM).values(row)
             excluded = stmt.excluded
             stmt = stmt.on_conflict_do_update(
@@ -1481,6 +2808,12 @@ class AssetInventoryService:
                     "size_bytes": excluded.size_bytes,
                     "mtime_epoch": excluded.mtime_epoch,
                     "checksum_status": excluded.checksum_status,
+                    "archive_integrity_status": "NOT_CHECKED",
+                    "archive_integrity_method": None,
+                    "archive_integrity_checked_at": None,
+                    "archive_integrity_error": None,
+                    "archive_integrity_version": None,
+                    "archive_integrity_member_count": None,
                     "parser_name": excluded.parser_name,
                     "parser_version": excluded.parser_version,
                     "parse_status": excluded.parse_status,
@@ -1493,16 +2826,36 @@ class AssetInventoryService:
                 },
             )
             await db.execute(stmt)
+            if index % ASSET_SCAN_LOG_INTERVAL == 0 or index == len(rows):
+                progress_value = write_start
+                if rows and write_end > write_start:
+                    progress_value = write_start + int(index / max(1, len(rows)) * (write_end - write_start))
+                await self._progress(
+                    task_id,
+                    f"Writing source asset index: {index}/{len(rows)} changed_or_new, skipped={skipped_unchanged}",
+                    progress_value,
+                )
         await db.flush()
 
         asset_ids_by_path: Dict[str, int] = {}
-        if seen_paths:
+        if changed_paths:
+            await self._progress(
+                task_id,
+                f"Updating radar scene records for changed source assets: {len(changed_paths)}",
+                max(write_end, progress_end - 2),
+            )
             result = await db.execute(
-                select(SourceProductAssetORM.file_path, SourceProductAssetORM.id).where(SourceProductAssetORM.file_path.in_(seen_paths))
+                select(SourceProductAssetORM.file_path, SourceProductAssetORM.id).where(
+                    SourceProductAssetORM.file_path.in_(changed_paths)
+                )
             )
             asset_ids_by_path = {str(path): int(asset_id) for path, asset_id in result.all()}
+            await self._upsert_metadata_documents_for_source_assets(db, rows, asset_ids_by_path)
             await self._upsert_radar_records_for_source_assets(db, rows, asset_ids_by_path)
+        elif task_id:
+            await task_service.add_log(task_id, "INFO", "No changed source assets; radar scene record update skipped.")
 
+        await self._progress(task_id, "Marking missing source assets and refreshing scan issues...", max(progress_end - 2, progress_start))
         await self._mark_missing_source_assets(db, root, seen_paths, now)
         await self._replace_root_issues(db, root, "source_product", issues)
         await self._finish_state(
@@ -1511,21 +2864,39 @@ class AssetInventoryService:
             status="OK" if not any(item.get("severity") == "error" for item in issues) else "WARNING",
             started_at=started_at,
             entry_count=entry_count,
-            asset_count=len(rows),
+            asset_count=len(seen_paths),
             issue_count=len(issues),
             error=None,
         )
+        if task_id:
+            await task_service.add_log(
+                task_id,
+                "INFO",
+                "Source root scan summary: "
+                f"path={root.path}, candidates={entry_count}, active={len(seen_paths)}, "
+                f"changed_or_new={len(rows)}, skipped={skipped_unchanged}, issues={len(issues)}",
+            )
         return {
             "root_id": root.id,
             "root_path": root.path,
             "inventory_type": "source_product",
             "status": state.status,
             "entry_count": entry_count,
-            "asset_count": len(rows),
+            "asset_count": len(seen_paths),
+            "changed_asset_count": len(rows),
+            "unchanged_asset_count": skipped_unchanged,
             "issue_count": len(issues),
         }
 
-    async def scan_orbit_root(self, db: AsyncSession, root: ManagedRootORM) -> Dict[str, Any]:
+    async def scan_orbit_root(
+        self,
+        db: AsyncSession,
+        root: ManagedRootORM,
+        *,
+        task_id: Optional[str] = None,
+        progress_start: int = 0,
+        progress_end: int = 100,
+    ) -> Dict[str, Any]:
         started_at = _utcnow()
         state = await self._ensure_state(db, root, "orbit_asset", started_at)
         if not os.path.isdir(root.path):
@@ -1554,10 +2925,50 @@ class AssetInventoryService:
             )
             return {"root_id": root.id, "inventory_type": "orbit_asset", "status": "INACCESSIBLE", "asset_count": 0, "issue_count": 1}
 
-        rows, issues, entry_count = await asyncio.to_thread(_collect_orbit_assets, root)
-        seen_paths = [row["file_path"] for row in rows]
+        existing_result = await db.execute(
+            select(OrbitAssetORM).where(OrbitAssetORM.root_ref_id == root.id)
+        )
+        existing_by_path = {
+            str(asset.file_path): {
+                "root_ref_id": asset.root_ref_id,
+                "native_format": asset.native_format,
+                "size_bytes": asset.size_bytes,
+                "mtime_epoch": asset.mtime_epoch,
+                "parser_version": asset.parser_version,
+                "parse_status": asset.parse_status,
+                "is_active": bool(asset.is_active),
+            }
+            for asset in existing_result.scalars().all()
+            if asset.file_path
+        }
+
+        loop = asyncio.get_running_loop()
+        progress_callback, log_callback, drain_thread_events = self._thread_callbacks(task_id, loop)
+        rows, issues, entry_count, skipped_unchanged, seen_paths = await asyncio.to_thread(
+            _collect_orbit_assets_incremental,
+            root,
+            existing_by_path,
+            progress_callback=progress_callback,
+            log_callback=log_callback,
+            progress_start=progress_start,
+            progress_end=max(progress_start + 1, progress_end - 6),
+        )
+        await drain_thread_events()
         now = _utcnow()
-        for row in rows:
+        write_start = max(progress_start, progress_end - 5)
+        write_end = max(write_start, progress_end - 2)
+        await self._progress(
+            task_id,
+            f"Writing orbit asset index: changed_or_new={len(rows)}, skipped={skipped_unchanged}",
+            write_start,
+        )
+        if task_id:
+            await task_service.add_log(
+                task_id,
+                "INFO",
+                f"Orbit asset DB upsert started: changed_or_new={len(rows)}, skipped={skipped_unchanged}, seen={len(seen_paths)}, issues={len(issues)}",
+            )
+        for index, row in enumerate(rows, start=1):
             stmt = pg_insert(OrbitAssetORM).values(row)
             excluded = stmt.excluded
             stmt = stmt.on_conflict_do_update(
@@ -1593,7 +3004,70 @@ class AssetInventoryService:
                 },
             )
             await db.execute(stmt)
+            if index % ASSET_SCAN_LOG_INTERVAL == 0 or index == len(rows):
+                progress_value = write_start
+                if rows and write_end > write_start:
+                    progress_value = write_start + int(index / max(1, len(rows)) * (write_end - write_start))
+                await self._progress(
+                    task_id,
+                    f"Writing orbit asset index: {index}/{len(rows)} changed_or_new, skipped={skipped_unchanged}",
+                    progress_value,
+                )
+        await db.flush()
 
+        derivative_summary: Dict[str, Any] = {}
+        has_lt1_seen = any(
+            str(existing_by_path.get(path, {}).get("native_format") or "").upper() == "TXT"
+            for path in seen_paths
+        ) or any(row.get("satellite_family") == "LT1" for row in rows)
+        if has_lt1_seen and settings.ORBIT_POOL_ENVI:
+            await self._progress(task_id, "Syncing LT-1 TXT orbit production pool...", max(progress_end - 3, progress_start))
+            isce2_pool = settings.ORBIT_POOL_ISCE2 if settings.ISCE2_ENABLED else ""
+            try:
+                derivative_summary = await asyncio.to_thread(
+                    sync_orbit_pools,
+                    root.path,
+                    settings.ORBIT_POOL_ENVI,
+                    isce2_pool,
+                    settings.ORBIT_POOL_LANDSAR,
+                    bool(settings.ISCE2_ENABLED),
+                )
+            except Exception as exc:
+                derivative_summary = {"error": str(exc)}
+                issues.append(
+                    {
+                        "severity": "warning",
+                        "issue_code": "lt1_orbit_pool_sync_failed",
+                        "issue_message": str(exc),
+                        "source_path": root.path,
+                    }
+                )
+
+            derivative_summary["db_derivatives"] = await self._record_lt1_orbit_pool_derivatives_for_paths(db, seen_paths, now=now)
+            if task_id:
+                envi_summary = derivative_summary.get("envi") or {}
+                isce2_summary = derivative_summary.get("isce2") or {}
+                db_derivatives = derivative_summary.get("db_derivatives") or {}
+                await task_service.add_log(
+                    task_id,
+                    "INFO" if not derivative_summary.get("error") else "WARN",
+                    (
+                        "LT-1 orbit production pool sync: "
+                        f"txt copied={len(envi_summary.get('copied', []) or [])}, "
+                        f"updated={len(envi_summary.get('updated', []) or [])}, "
+                        f"skipped={len(envi_summary.get('skipped', []) or [])}; "
+                        + (
+                            f"isce2 converted={len(isce2_summary.get('converted', []) or [])}, "
+                            f"reconverted={len(isce2_summary.get('reconverted', []) or [])}; "
+                            if settings.ISCE2_ENABLED
+                            else "isce2 disabled; "
+                        )
+                        +
+                        f"derivatives recorded={int(db_derivatives.get('recorded') or 0)}"
+                    ),
+                )
+
+        await self._progress(task_id, "Marking missing orbit assets and refreshing scan issues...", max(progress_end - 2, progress_start))
         await self._mark_missing_orbit_assets(db, root, seen_paths, now)
         await self._replace_root_issues(db, root, "orbit_asset", issues)
         await self._finish_state(
@@ -1602,18 +3076,29 @@ class AssetInventoryService:
             status="OK" if not any(item.get("severity") == "error" for item in issues) else "WARNING",
             started_at=started_at,
             entry_count=entry_count,
-            asset_count=len(rows),
+            asset_count=len(seen_paths),
             issue_count=len(issues),
             error=None,
         )
+        if task_id:
+            await task_service.add_log(
+                task_id,
+                "INFO",
+                "Orbit root scan summary: "
+                f"path={root.path}, candidates={entry_count}, active={len(seen_paths)}, "
+                f"changed_or_new={len(rows)}, skipped={skipped_unchanged}, issues={len(issues)}",
+            )
         return {
             "root_id": root.id,
             "root_path": root.path,
             "inventory_type": "orbit_asset",
             "status": state.status,
             "entry_count": entry_count,
-            "asset_count": len(rows),
+            "asset_count": len(seen_paths),
+            "changed_asset_count": len(rows),
+            "unchanged_asset_count": skipped_unchanged,
             "issue_count": len(issues),
+            "derivative_summary": derivative_summary,
         }
 
     async def _find_source_asset_root(
@@ -1639,7 +3124,7 @@ class AssetInventoryService:
         db: AsyncSession,
         root_path: str,
         *,
-        source_ref: str = "SENTINEL1_STORAGE_DIRS",
+        source_ref: str = "TASK_POOL_ROOT",
     ) -> ManagedRootORM:
         from .root_registry_service import root_registry_service
 
@@ -1653,21 +3138,23 @@ class AssetInventoryService:
             return root
 
         normalized = _normalize_path(root_path)
-        root_code = f"source_product_pool__sentinel1_storage_{hashlib.sha1(normalized.encode('utf-8')).hexdigest()[:12]}"
+        source_ref_text = str(source_ref or "TASK_POOL_ROOT").strip() or "TASK_POOL_ROOT"
+        source_ref_slug = re.sub(r"[^a-z0-9]+", "_", source_ref_text.lower()).strip("_") or "task_pool_root"
+        root_code = f"source_product_pool__{source_ref_slug}_{hashlib.sha1(normalized.encode('utf-8')).hexdigest()[:12]}"
         root = ManagedRootORM(
             root_code=root_code,
             root_role="source_product_pool",
-            display_name="Sentinel-1 Storage Pool",
+            display_name="Task Pool Materialized Source Pool" if source_ref_text == "TASK_POOL_ROOT" else "Source Product Pool",
             path=normalized,
             path_kind=_path_kind(normalized),
             source_kind="env",
-            source_ref=source_ref,
+            source_ref=source_ref_text,
             scan_mode="file_pool",
             enabled=True,
             exists_flag=os.path.exists(normalized),
             metadata_json={
-                "env_var": source_ref,
-                "created_by": "sentinel1_unpack",
+                "env_var": source_ref_text,
+                "created_by": "source_materialize",
             },
         )
         db.add(root)
@@ -1700,7 +3187,8 @@ class AssetInventoryService:
             }
 
         now = _utcnow()
-        stmt = pg_insert(SourceProductAssetORM).values(row)
+        db_row = {key: value for key, value in row.items() if not str(key).startswith("_")}
+        stmt = pg_insert(SourceProductAssetORM).values(db_row)
         excluded = stmt.excluded
         stmt = stmt.on_conflict_do_update(
             index_elements=["file_path"],
@@ -1730,6 +3218,12 @@ class AssetInventoryService:
                 "size_bytes": excluded.size_bytes,
                 "mtime_epoch": excluded.mtime_epoch,
                 "checksum_status": excluded.checksum_status,
+                "archive_integrity_status": "NOT_CHECKED",
+                "archive_integrity_method": None,
+                "archive_integrity_checked_at": None,
+                "archive_integrity_error": None,
+                "archive_integrity_version": None,
+                "archive_integrity_member_count": None,
                 "parser_name": excluded.parser_name,
                 "parser_version": excluded.parser_version,
                 "parse_status": excluded.parse_status,
@@ -1750,6 +3244,7 @@ class AssetInventoryService:
         asset_id = result.scalar_one_or_none()
         radar_data_id = None
         if asset_id is not None:
+            await self._upsert_metadata_documents_for_source_assets(db, [row], {path: int(asset_id)})
             await self._upsert_radar_records_for_source_assets(db, [row], {path: int(asset_id)})
             radar_result = await db.execute(
                 select(RadarDataORM.id).where(RadarDataORM.file_path == path)
@@ -1781,23 +3276,21 @@ class AssetInventoryService:
         log_callback: Optional[Callable[[str, str], None]] = None,
     ) -> Dict[str, Any]:
         archive = _normalize_path(archive_path)
+        _ensure_local_runtime_path(archive, "Sentinel-1 archive source")
         if not os.path.isfile(archive):
             raise FileNotFoundError(archive)
         if not archive.lower().endswith(".zip"):
             raise ValueError("Only Sentinel-1 ZIP archives can be unpacked.")
 
-        target_dir = _target_root_for_s1_archive(archive, target_root)
+        target_dir = _ensure_local_runtime_path(
+            _target_root_for_s1_archive(archive, target_root),
+            "Sentinel-1 unpack target_root",
+        )
         os.makedirs(target_dir, exist_ok=True)
         tmp_suffix_text = str(tmp_suffix or os.getenv("UNPACK_TMP_SUFFIX") or ".unpack_tmp").strip() or ".unpack_tmp"
         min_free_gb = min_disk_space_gb
         if min_free_gb is None:
             min_free_gb = _parse_float(os.getenv("UNPACK_MIN_DISK_SPACE_GB"), 50.0)
-        should_delete_archive = (
-            bool(delete_archive)
-            if delete_archive is not None
-            else _parse_bool(os.getenv("UNPACK_DELETE_ARCHIVE"), False)
-        )
-
         def _log(level: str, message: str) -> None:
             if log_callback:
                 log_callback(level, message)
@@ -1805,6 +3298,9 @@ class AssetInventoryService:
         def _progress(progress: int, message: str) -> None:
             if progress_callback:
                 progress_callback(progress, message)
+
+        if delete_archive:
+            _log("WARNING", "Ignoring delete_archive=true; Sentinel-1 ZIP archives are the source of record.")
 
         _progress(3, "Reading Sentinel-1 ZIP manifest...")
         with zipfile.ZipFile(archive) as zip_obj:
@@ -1897,10 +3393,6 @@ class AssetInventoryService:
                     except OSError:
                         pass
 
-        if should_delete_archive:
-            os.remove(archive)
-            _log("INFO", f"Deleted Sentinel-1 ZIP after unpack: {archive}")
-
         _progress(92, "Sentinel-1 SAFE extracted.")
         return {
             "status": "EXTRACTED",
@@ -1922,8 +3414,11 @@ class AssetInventoryService:
         source_path = _normalize_path(str(asset.archive_path or asset.file_path or ""))
         if not source_path:
             raise ValueError("Source asset path is empty.")
+        _ensure_local_runtime_path(source_path, "Source asset path")
         if source_format == "S1_ZIP":
-            return self.unpack_sentinel1_archive(source_path, target_root=target_root, overwrite=overwrite)
+            requested_root = _normalize_path(target_root or "") or _task_pool_materialize_root(source_format)
+            requested_root = _ensure_local_runtime_path(requested_root, "Source materialize target_root")
+            return self.unpack_sentinel1_archive(source_path, target_root=requested_root, overwrite=overwrite)
         if source_format not in {"LT1_ARCHIVE", "GF3_ARCHIVE"}:
             if os.path.isdir(source_path):
                 return {
@@ -1937,7 +3432,8 @@ class AssetInventoryService:
 
         requested_root = _normalize_path(target_root or "")
         if not requested_root:
-            requested_root = _normalize_path(os.path.join(settings.PYINT_WORK_ROOT, "source_materialized", source_format.lower()))
+            requested_root = _task_pool_materialize_root(source_format)
+        requested_root = _ensure_local_runtime_path(requested_root, "Source materialize target_root")
         scene_name = _strip_known_suffix(os.path.basename(source_path))
         target_dir = os.path.join(requested_root, scene_name)
         result = _extract_archive_to_dir(source_path, target_dir, overwrite=overwrite)
@@ -1960,7 +3456,10 @@ class AssetInventoryService:
                 raise ValueError("Only Sentinel-1 ZIP assets can be unpacked.")
 
             archive_path = asset.file_path
-            target_root = payload.get("target_root") or None
+            target_root = _ensure_local_runtime_path(
+                payload.get("target_root") or _task_pool_materialize_root("S1_ZIP"),
+                "Sentinel-1 unpack target_root",
+            )
             overwrite = bool(payload.get("overwrite", False))
             min_disk_space_gb = payload.get("min_disk_space_gb")
             delete_archive = payload.get("delete_archive") if "delete_archive" in payload else None
@@ -1993,7 +3492,12 @@ class AssetInventoryService:
             )
 
             if result.get("target_root"):
-                await self.ensure_source_root_for_path(db, str(result["target_root"]))
+                target_root_text = str(result["target_root"])
+                await self.ensure_source_root_for_path(
+                    db,
+                    target_root_text,
+                    source_ref=_source_ref_for_materialized_root(target_root_text),
+                )
                 await db.commit()
 
             metadata = dict(asset.metadata_json or {})
@@ -2028,7 +3532,10 @@ class AssetInventoryService:
         overwrite = bool(payload.get("overwrite", False))
         min_disk_space_gb = payload.get("min_disk_space_gb")
         delete_archive = payload.get("delete_archive") if "delete_archive" in payload else None
-        target_root = payload.get("target_root") or None
+        target_root = _ensure_local_runtime_path(
+            payload.get("target_root") or _task_pool_materialize_root("S1_ZIP"),
+            "Sentinel-1 batch unpack target_root",
+        )
         scan_before_unpack = bool(payload.get("scan_before_unpack", True))
 
         await task_service.start_task(task_id, message="Sentinel-1 batch unpack started")
@@ -2111,7 +3618,12 @@ class AssetInventoryService:
                         log_callback=_log,
                     )
                     if result.get("target_root"):
-                        await self.ensure_source_root_for_path(db, str(result["target_root"]))
+                        target_root_text = str(result["target_root"])
+                        await self.ensure_source_root_for_path(
+                            db,
+                            target_root_text,
+                            source_ref=_source_ref_for_materialized_root(target_root_text),
+                        )
                         await db.commit()
 
                     scan_summary: Dict[str, Any] = {}
@@ -2235,6 +3747,62 @@ class AssetInventoryService:
                 )
             )
 
+    async def _resolve_archive_integrity_issue(
+        self,
+        db: AsyncSession,
+        asset: SourceProductAssetORM,
+        *,
+        now: datetime,
+    ) -> None:
+        if asset.id is None:
+            return
+        await db.execute(
+            update(AssetInventoryIssueORM)
+            .where(
+                AssetInventoryIssueORM.asset_ref_id == int(asset.id),
+                AssetInventoryIssueORM.inventory_type == "source_product",
+                AssetInventoryIssueORM.issue_code == "source_archive_integrity_failed",
+                AssetInventoryIssueORM.status == "OPEN",
+            )
+            .values(status="RESOLVED", resolved_at=now, last_seen_at=now)
+        )
+
+    async def _record_archive_integrity_issue(
+        self,
+        db: AsyncSession,
+        asset: SourceProductAssetORM,
+        result: Dict[str, Any],
+        *,
+        now: datetime,
+    ) -> None:
+        if asset.id is None:
+            return
+        await self._resolve_archive_integrity_issue(db, asset, now=now)
+        db.add(
+            AssetInventoryIssueORM(
+                root_ref_id=asset.root_ref_id,
+                inventory_type="source_product",
+                asset_ref_id=int(asset.id),
+                severity="error",
+                issue_code="source_archive_integrity_failed",
+                issue_message=result.get("error") or "Source archive integrity check failed.",
+                source_path=asset.file_path,
+                status="OPEN",
+                first_seen_at=now,
+                last_seen_at=now,
+                metadata_json={
+                    "asset_uid": asset.asset_uid,
+                    "logical_product_uid": asset.logical_product_uid,
+                    "satellite_family": asset.satellite_family,
+                    "source_format": asset.source_format,
+                    "method": result.get("method"),
+                    "member_count": result.get("member_count"),
+                    "duration_seconds": result.get("duration_seconds"),
+                    "version": ARCHIVE_INTEGRITY_VERSION,
+                },
+            )
+        )
+
     async def _mark_missing_source_assets(
         self,
         db: AsyncSession,
@@ -2259,6 +3827,110 @@ class AssetInventoryService:
             stmt = stmt.where(OrbitAssetORM.file_path.notin_(list(seen_paths)))
         await db.execute(stmt.values(is_active=False, missing_since=now, updated_at=now))
 
+    async def _record_lt1_orbit_pool_derivatives(
+        self,
+        db: AsyncSession,
+        rows: Sequence[Dict[str, Any]],
+        *,
+        now: datetime,
+    ) -> Dict[str, Any]:
+        lt1_rows = [row for row in rows if row.get("satellite_family") == "LT1"]
+        if not lt1_rows or not settings.ORBIT_POOL_ENVI:
+            return {"recorded": 0, "missing": 0}
+
+        paths = [str(row.get("file_path") or "") for row in lt1_rows if row.get("file_path")]
+        result = await db.execute(select(OrbitAssetORM).where(OrbitAssetORM.file_path.in_(paths)))
+        assets_by_path = {str(asset.file_path): asset for asset in result.scalars().all()}
+
+        recorded = 0
+        missing = 0
+        for row in lt1_rows:
+            asset = assets_by_path.get(str(row.get("file_path") or ""))
+            if not asset or not asset.id:
+                continue
+            satellite = str(row.get("satellite") or "").upper()
+            file_name = str(row.get("file_name") or "").strip()
+            pool_path = _normalize_path(os.path.join(settings.ORBIT_POOL_ENVI, satellite, file_name))
+            if not os.path.isfile(pool_path):
+                missing += 1
+                continue
+            stat = _stat_path(pool_path)
+            stmt = pg_insert(OrbitAssetDerivativeORM).values(
+                orbit_asset_id=int(asset.id),
+                engine_code="lt1_txt_pool",
+                derivative_format="LT1_TXT",
+                derivative_role="production_orbit_txt",
+                pool_path=pool_path,
+                size_bytes=stat.get("size_bytes"),
+                mtime_epoch=stat.get("mtime_epoch"),
+                checksum_sha256=None,
+                generation_status="READY",
+                generation_error=None,
+                generated_at=now,
+                metadata_json=_json_safe(
+                    {
+                        "pool_root": settings.ORBIT_POOL_ENVI,
+                        "layout": "satellite_split",
+                        "consumers": ["ENVI/SARscape", "Gamma/PyINT D-InSAR", "Gamma SBAS"],
+                    }
+                ),
+                created_at=now,
+                updated_at=now,
+            )
+            excluded = stmt.excluded
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["orbit_asset_id", "engine_code", "derivative_format", "pool_path"],
+                set_={
+                    "derivative_role": excluded.derivative_role,
+                    "size_bytes": excluded.size_bytes,
+                    "mtime_epoch": excluded.mtime_epoch,
+                    "generation_status": "READY",
+                    "generation_error": None,
+                    "generated_at": now,
+                    "metadata_json": excluded.metadata_json,
+                    "updated_at": now,
+                },
+            )
+            await db.execute(stmt)
+            recorded += 1
+        return {"recorded": recorded, "missing": missing, "pool_root": settings.ORBIT_POOL_ENVI}
+
+    async def _record_lt1_orbit_pool_derivatives_for_paths(
+        self,
+        db: AsyncSession,
+        paths: Sequence[str],
+        *,
+        now: datetime,
+    ) -> Dict[str, Any]:
+        unique_paths = []
+        seen = set()
+        for path in paths:
+            normalized = _normalize_path(str(path or ""))
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_paths.append(normalized)
+        if not unique_paths or not settings.ORBIT_POOL_ENVI:
+            return {"recorded": 0, "missing": 0}
+
+        result = await db.execute(
+            select(OrbitAssetORM).where(
+                OrbitAssetORM.file_path.in_(unique_paths),
+                OrbitAssetORM.satellite_family == "LT1",
+                OrbitAssetORM.is_active == True,  # noqa: E712
+            )
+        )
+        rows = [
+            {
+                "satellite_family": asset.satellite_family,
+                "satellite": asset.satellite,
+                "file_name": asset.file_name,
+                "file_path": asset.file_path,
+            }
+            for asset in result.scalars().all()
+        ]
+        return await self._record_lt1_orbit_pool_derivatives(db, rows, now=now)
+
     async def _upsert_radar_records_for_source_assets(
         self,
         db: AsyncSession,
@@ -2266,11 +3938,14 @@ class AssetInventoryService:
         asset_ids_by_path: Dict[str, int],
     ) -> None:
         dirty_scene_ids: List[int] = []
+        profile_inputs: List[Tuple[Dict[str, Any], int, int]] = []
         for row in rows:
             metadata = dict(row.get("metadata_json") or {})
-            coverage_polygon = metadata.get("coverage_polygon")
+            coverage_polygon = _ordered_closed_polygon(metadata.get("coverage_polygon") or [])
             if not coverage_polygon or len(coverage_polygon) < 3:
                 continue
+            metadata["coverage_polygon"] = coverage_polygon
+            metadata["coverage_bbox"] = _bbox_from_polygon(coverage_polygon)
             family = normalize_satellite_family(row.get("satellite_family") or row.get("satellite"))
             if family not in {"S1", "LT1"}:
                 continue
@@ -2289,8 +3964,6 @@ class AssetInventoryService:
 
             asset_id = asset_ids_by_path.get(str(row.get("file_path")))
             if not asset_id:
-                continue
-            if await self._s1_zip_has_unpacked_safe(db, row):
                 continue
             archive_asset_id = await self._resolve_archive_asset_id_for_source_row(db, row, asset_id)
             center_lon, center_lat = _centroid_from_polygon(coverage_polygon)
@@ -2352,15 +4025,18 @@ class AssetInventoryService:
             )
             existing = result.scalar_one_or_none()
             if existing is None:
-                db.add(
-                    RadarDataORM(
-                        unique_id=f"asset:{row.get('asset_uid')}",
-                        has_orbit_data=False,
-                        orbit_binding_status="UNBOUND",
-                        is_envi_processed=False,
-                        **radar_values,
-                    )
+                scene = RadarDataORM(
+                    unique_id=f"asset:{row.get('asset_uid')}",
+                    has_orbit_data=False,
+                    orbit_binding_status="UNBOUND",
+                    is_envi_processed=False,
+                    **radar_values,
                 )
+                db.add(scene)
+                await db.flush()
+                if scene.id is not None:
+                    dirty_scene_ids.append(int(scene.id))
+                    profile_inputs.append((row, asset_id, int(scene.id)))
             else:
                 before_orbit_id = existing.selected_orbit_asset_id
                 for key, value in radar_values.items():
@@ -2368,12 +4044,198 @@ class AssetInventoryService:
                 if not existing.orbit_binding_status:
                     existing.orbit_binding_status = "UNBOUND"
                 db.add(existing)
+                if existing.id is not None:
+                    profile_inputs.append((row, asset_id, int(existing.id)))
                 if existing.id is not None and before_orbit_id != existing.selected_orbit_asset_id:
                     dirty_scene_ids.append(int(existing.id))
 
         await db.flush()
+        if profile_inputs:
+            await self._upsert_geometry_profiles(db, profile_inputs)
+            await self._attach_radar_ids_to_metadata_documents(db, profile_inputs)
+            for _, _, radar_id in profile_inputs:
+                if radar_id not in dirty_scene_ids:
+                    dirty_scene_ids.append(radar_id)
         if dirty_scene_ids:
             await pairing_state_service.mark_scenes_dirty(db, scene_ids=dirty_scene_ids, reason="asset_inventory_source_update", commit=False)
+
+    async def _upsert_metadata_documents_for_source_assets(
+        self,
+        db: AsyncSession,
+        rows: Sequence[Dict[str, Any]],
+        asset_ids_by_path: Dict[str, int],
+    ) -> None:
+        now = _utcnow()
+        for row in rows:
+            asset_id = asset_ids_by_path.get(str(row.get("file_path")))
+            if not asset_id:
+                continue
+            for doc in row.get("_metadata_documents") or []:
+                values = {
+                    "source_asset_id": int(asset_id),
+                    "satellite_family": doc.get("satellite_family") or row.get("satellite_family"),
+                    "source_format": doc.get("source_format") or row.get("source_format"),
+                    "document_type": doc.get("document_type") or "UNKNOWN",
+                    "member_path": doc.get("member_path") or "",
+                    "content_sha256": doc.get("content_sha256") or "",
+                    "content_encoding": doc.get("content_encoding") or "gzip",
+                    "content_bytes": doc.get("content_bytes") or b"",
+                    "content_size_bytes": doc.get("content_size_bytes"),
+                    "archive_path": doc.get("archive_path") or row.get("archive_path") or row.get("file_path"),
+                    "archive_mtime": doc.get("archive_mtime") if doc.get("archive_mtime") is not None else row.get("mtime_epoch"),
+                    "parser_version": doc.get("parser_version") or PARSER_VERSION,
+                    "parse_status": doc.get("parse_status") or "OK",
+                    "parse_error": doc.get("parse_error"),
+                    "extracted_at": doc.get("extracted_at") or now,
+                    "updated_at": now,
+                }
+                stmt = pg_insert(SourceMetadataDocumentORM).values(values)
+                excluded = stmt.excluded
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_source_metadata_document_member",
+                    set_={
+                        "radar_data_id": excluded.radar_data_id,
+                        "satellite_family": excluded.satellite_family,
+                        "source_format": excluded.source_format,
+                        "content_sha256": excluded.content_sha256,
+                        "content_encoding": excluded.content_encoding,
+                        "content_bytes": excluded.content_bytes,
+                        "content_size_bytes": excluded.content_size_bytes,
+                        "archive_path": excluded.archive_path,
+                        "archive_mtime": excluded.archive_mtime,
+                        "parser_version": excluded.parser_version,
+                        "parse_status": excluded.parse_status,
+                        "parse_error": excluded.parse_error,
+                        "extracted_at": excluded.extracted_at,
+                        "updated_at": now,
+                    },
+                )
+                await db.execute(stmt)
+        await db.flush()
+
+    async def _attach_radar_ids_to_metadata_documents(
+        self,
+        db: AsyncSession,
+        profile_inputs: Sequence[Tuple[Dict[str, Any], int, int]],
+    ) -> None:
+        for row, asset_id, radar_id in profile_inputs:
+            await db.execute(
+                update(SourceMetadataDocumentORM)
+                .where(SourceMetadataDocumentORM.source_asset_id == int(asset_id))
+                .values(
+                    radar_data_id=int(radar_id),
+                    satellite_family=row.get("satellite_family"),
+                    source_format=row.get("source_format"),
+                    updated_at=_utcnow(),
+                )
+            )
+
+    async def _upsert_geometry_profiles(
+        self,
+        db: AsyncSession,
+        profile_inputs: Sequence[Tuple[Dict[str, Any], int, int]],
+    ) -> None:
+        now = _utcnow()
+        for row, asset_id, radar_id in profile_inputs:
+            metadata = dict(row.get("metadata_json") or {})
+            footprint = _ordered_closed_polygon(metadata.get("coverage_polygon") or [])
+            footprint_geom = None
+            if footprint and len(footprint) >= 4:
+                try:
+                    poly = Polygon(footprint)
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)
+                    if not poly.is_empty:
+                        footprint_geom = from_shape(poly, srid=4326)
+                except Exception:
+                    footprint_geom = None
+
+            reasons: List[str] = []
+            for key, reason in (
+                ("satellite_family", "missing_satellite_family"),
+                ("imaging_mode", "missing_imaging_mode"),
+                ("polarization", "missing_polarization"),
+                ("orbit_direction", "missing_orbit_direction"),
+            ):
+                if not row.get(key):
+                    reasons.append(reason)
+            if not footprint:
+                reasons.append("missing_footprint")
+            family = normalize_satellite_family(row.get("satellite_family") or row.get("satellite"))
+            relative_orbit = row.get("relative_orbit")
+            if family == "S1" and not relative_orbit:
+                reasons.append("missing_relative_orbit")
+
+            metadata_quality = "READY" if not reasons else ("PARTIAL" if footprint else "INCOMPLETE")
+            production_readiness = "READY" if metadata_quality == "READY" else "CANDIDATE"
+            values = {
+                "source_asset_id": int(asset_id),
+                "radar_data_id": int(radar_id),
+                "satellite_family": family,
+                "satellite": row.get("satellite"),
+                "source_format": row.get("source_format"),
+                "imaging_mode": row.get("imaging_mode"),
+                "polarization": row.get("polarization"),
+                "orbit_direction": row.get("orbit_direction"),
+                "look_direction": metadata.get("look_direction"),
+                "absolute_orbit": row.get("absolute_orbit"),
+                "relative_orbit": relative_orbit,
+                "acquisition_start_time_utc": row.get("acquisition_start_time_utc"),
+                "acquisition_stop_time_utc": row.get("acquisition_stop_time_utc"),
+                "scene_center_lon": metadata.get("scene_center_lon"),
+                "scene_center_lat": metadata.get("scene_center_lat"),
+                "footprint_geom": footprint_geom,
+                "footprint_polygon": _json_safe(footprint),
+                "swath_summary_json": metadata.get("swath_summary"),
+                "burst_summary_json": metadata.get("burst_summary"),
+                "incidence_angle_min": metadata.get("incidence_angle_min"),
+                "incidence_angle_max": metadata.get("incidence_angle_max"),
+                "doppler_summary_json": metadata.get("doppler_summary"),
+                "state_vector_summary_json": metadata.get("state_vector_summary"),
+                "metadata_quality": metadata_quality,
+                "production_readiness": production_readiness,
+                "readiness_reasons_json": reasons,
+                "parser_version": PARSER_VERSION,
+                "parsed_at": now,
+                "updated_at": now,
+            }
+            stmt = pg_insert(SARSceneGeometryProfileORM).values(values)
+            excluded = stmt.excluded
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["source_asset_id"],
+                set_={
+                    "radar_data_id": excluded.radar_data_id,
+                    "satellite_family": excluded.satellite_family,
+                    "satellite": excluded.satellite,
+                    "source_format": excluded.source_format,
+                    "imaging_mode": excluded.imaging_mode,
+                    "polarization": excluded.polarization,
+                    "orbit_direction": excluded.orbit_direction,
+                    "look_direction": excluded.look_direction,
+                    "absolute_orbit": excluded.absolute_orbit,
+                    "relative_orbit": excluded.relative_orbit,
+                    "acquisition_start_time_utc": excluded.acquisition_start_time_utc,
+                    "acquisition_stop_time_utc": excluded.acquisition_stop_time_utc,
+                    "scene_center_lon": excluded.scene_center_lon,
+                    "scene_center_lat": excluded.scene_center_lat,
+                    "footprint_geom": excluded.footprint_geom,
+                    "footprint_polygon": excluded.footprint_polygon,
+                    "swath_summary_json": excluded.swath_summary_json,
+                    "burst_summary_json": excluded.burst_summary_json,
+                    "incidence_angle_min": excluded.incidence_angle_min,
+                    "incidence_angle_max": excluded.incidence_angle_max,
+                    "doppler_summary_json": excluded.doppler_summary_json,
+                    "state_vector_summary_json": excluded.state_vector_summary_json,
+                    "metadata_quality": excluded.metadata_quality,
+                    "production_readiness": excluded.production_readiness,
+                    "readiness_reasons_json": excluded.readiness_reasons_json,
+                    "parser_version": excluded.parser_version,
+                    "parsed_at": excluded.parsed_at,
+                    "updated_at": now,
+                },
+            )
+            await db.execute(stmt)
+        await db.flush()
 
     async def _s1_zip_has_unpacked_safe(self, db: AsyncSession, row: Dict[str, Any]) -> bool:
         if row.get("source_format") != "S1_ZIP":
@@ -2421,28 +4283,47 @@ class AssetInventoryService:
         archive_asset_id: Optional[int],
     ):
         logical_uid = str(row.get("logical_product_uid") or "").strip()
+        file_path_match = RadarDataORM.file_path == row.get("file_path")
+        unique_id_match = RadarDataORM.unique_id == f"asset:{row.get('asset_uid')}"
         clauses = [
-            RadarDataORM.file_path == row.get("file_path"),
-            RadarDataORM.unique_id == f"asset:{row.get('asset_uid')}",
+            file_path_match,
+            unique_id_match,
+        ]
+        priority = [
+            (file_path_match, 0),
+            (unique_id_match, 1),
         ]
         if archive_asset_id is not None:
-            clauses.append(RadarDataORM.source_archive_asset_id == int(archive_asset_id))
+            archive_match = RadarDataORM.source_archive_asset_id == int(archive_asset_id)
+            clauses.append(archive_match)
+            priority.append((archive_match, 2))
         if row.get("source_format") == "S1_SAFE_DIR" and logical_uid:
-            clauses.append(
-                and_(
-                    RadarDataORM.satellite_family == "S1",
-                    RadarDataORM.product_unique_id == logical_uid,
-                )
+            logical_match = and_(
+                RadarDataORM.satellite_family == "S1",
+                RadarDataORM.product_unique_id == logical_uid,
             )
+            clauses.append(logical_match)
+            priority.append((logical_match, 3))
         elif row.get("source_format") == "S1_ZIP" and logical_uid:
-            clauses.append(
-                and_(
-                    RadarDataORM.satellite_family == "S1",
-                    RadarDataORM.product_unique_id == logical_uid,
-                    RadarDataORM.source_archive_asset_id == int(asset_id),
-                )
+            logical_match = and_(
+                RadarDataORM.satellite_family == "S1",
+                RadarDataORM.product_unique_id == logical_uid,
             )
-        return select(RadarDataORM).where(or_(*clauses))
+            clauses.append(logical_match)
+            priority.append((logical_match, 3))
+        elif row.get("source_format") == "LT1_ARCHIVE" and logical_uid:
+            logical_match = and_(
+                RadarDataORM.satellite_family == "LT1",
+                RadarDataORM.product_unique_id == logical_uid,
+            )
+            clauses.append(logical_match)
+            priority.append((logical_match, 3))
+        return (
+            select(RadarDataORM)
+            .where(or_(*clauses))
+            .order_by(case(*priority, else_=9), RadarDataORM.id.asc())
+            .limit(1)
+        )
 
     async def bind_scene_orbits(
         self,
@@ -2628,13 +4509,23 @@ class AssetInventoryService:
         return []
 
     async def get_status(self, db: AsyncSession) -> Dict[str, Any]:
-        state_rows = (
+        root_rows = (
             await db.execute(
-                select(AssetInventoryStateORM)
-                .join(ManagedRootORM, AssetInventoryStateORM.root_ref_id == ManagedRootORM.id)
-                .order_by(AssetInventoryStateORM.inventory_type.asc(), AssetInventoryStateORM.root_path.asc())
+                select(ManagedRootORM)
+                .where(ManagedRootORM.enabled == True)  # noqa: E712
+                .where(ManagedRootORM.root_role.in_(["source_product_pool", "orbit_asset_pool"]))
+                .order_by(ManagedRootORM.root_role.asc(), ManagedRootORM.path.asc())
             )
         ).scalars().all()
+        state_rows = (
+            await db.execute(
+                select(AssetInventoryStateORM, ManagedRootORM)
+                .join(ManagedRootORM, AssetInventoryStateORM.root_ref_id == ManagedRootORM.id)
+                .where(ManagedRootORM.enabled == True)  # noqa: E712
+                .where(ManagedRootORM.root_role.in_(["source_product_pool", "orbit_asset_pool"]))
+                .order_by(AssetInventoryStateORM.inventory_type.asc(), AssetInventoryStateORM.root_path.asc())
+            )
+        ).all()
         source_count = int(
             (
                 await db.execute(
@@ -2648,16 +4539,54 @@ class AssetInventoryService:
         orbit_count = int((await db.execute(select(func.count(OrbitAssetORM.id)).where(OrbitAssetORM.is_active == True))).scalar_one() or 0)  # noqa: E712
         binding_count = int((await db.execute(select(func.count(SceneOrbitBindingORM.id)).where(SceneOrbitBindingORM.selection_status == "SELECTED"))).scalar_one() or 0)
         open_issue_count = int((await db.execute(select(func.count(AssetInventoryIssueORM.id)).where(AssetInventoryIssueORM.status == "OPEN"))).scalar_one() or 0)
+        integrity_rows = (
+            await db.execute(
+                select(SourceProductAssetORM.archive_integrity_status, func.count(SourceProductAssetORM.id))
+                .where(
+                    SourceProductAssetORM.is_active == True,  # noqa: E712
+                    SourceProductAssetORM.source_format.in_(["LT1_ARCHIVE", "S1_ZIP"]),
+                )
+                .group_by(SourceProductAssetORM.archive_integrity_status)
+            )
+        ).all()
+        archive_integrity_counts = {
+            str(status or "NOT_CHECKED").upper(): int(count or 0)
+            for status, count in integrity_rows
+        }
 
         return {
             "source_asset_count": source_count,
             "orbit_asset_count": orbit_count,
             "selected_binding_count": binding_count,
             "open_issue_count": open_issue_count,
+            "archive_integrity_counts": archive_integrity_counts,
+            "roots": [
+                {
+                    "id": row.id,
+                    "root_code": row.root_code,
+                    "root_role": row.root_role,
+                    "display_name": row.display_name,
+                    "root_path": row.path,
+                    "path_kind": row.path_kind,
+                    "source_ref": row.source_ref,
+                    "scan_mode": row.scan_mode,
+                    "enabled": bool(row.enabled),
+                    "exists_flag": bool(row.exists_flag),
+                    "supported_families": _root_supported_families(row),
+                }
+                for row in root_rows
+            ],
             "states": [
                 {
                     "id": row.id,
                     "root_ref_id": row.root_ref_id,
+                    "root_role": root.root_role,
+                    "root_code": root.root_code,
+                    "display_name": root.display_name,
+                    "source_ref": root.source_ref,
+                    "enabled": bool(root.enabled),
+                    "exists_flag": bool(root.exists_flag),
+                    "supported_families": _root_supported_families(root),
                     "inventory_type": row.inventory_type,
                     "root_path": row.root_path,
                     "scan_mode": row.scan_mode,
@@ -2671,7 +4600,7 @@ class AssetInventoryService:
                     "needs_rescan": bool(row.needs_rescan),
                     "last_error": row.last_error,
                 }
-                for row in state_rows
+                for row, root in state_rows
             ],
         }
 
@@ -2692,8 +4621,9 @@ class AssetInventoryService:
         filters = []
         if not include_inactive:
             filters.append(SourceProductAssetORM.is_active == True)  # noqa: E712
-        if satellite_family:
-            filters.append(SourceProductAssetORM.satellite_family == satellite_family.upper())
+        family_filter = self._normalize_family_filter(satellite_family)
+        if family_filter:
+            filters.append(SourceProductAssetORM.satellite_family.in_(family_filter))
         if satellite:
             filters.append(SourceProductAssetORM.satellite == satellite.upper())
         if source_format:
@@ -2738,8 +4668,9 @@ class AssetInventoryService:
         filters = []
         if not include_inactive:
             filters.append(OrbitAssetORM.is_active == True)  # noqa: E712
-        if satellite_family:
-            filters.append(OrbitAssetORM.satellite_family == satellite_family.upper())
+        family_filter = self._normalize_family_filter(satellite_family)
+        if family_filter:
+            filters.append(OrbitAssetORM.satellite_family.in_(family_filter))
         if satellite:
             filters.append(OrbitAssetORM.satellite == satellite.upper())
         if orbit_type:
@@ -2851,6 +4782,12 @@ class AssetInventoryService:
             "size_bytes": row.size_bytes,
             "mtime_epoch": row.mtime_epoch,
             "checksum_status": row.checksum_status,
+            "archive_integrity_status": row.archive_integrity_status,
+            "archive_integrity_method": row.archive_integrity_method,
+            "archive_integrity_checked_at": row.archive_integrity_checked_at,
+            "archive_integrity_error": row.archive_integrity_error,
+            "archive_integrity_version": row.archive_integrity_version,
+            "archive_integrity_member_count": row.archive_integrity_member_count,
             "parser_name": row.parser_name,
             "parser_version": row.parser_version,
             "parse_status": row.parse_status,

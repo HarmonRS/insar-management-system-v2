@@ -8,7 +8,7 @@ import UnifiedDatePicker from '../components/UnifiedDatePicker';
 import { PAGE_SIZE_OPTIONS, SATELLITE_GROUPS } from '../config/appConstants';
 import { getPageHintText } from '../utils/appUiHelpers';
 
-const RADAR_ROW_HEIGHT = 48;
+const RADAR_ROW_HEIGHT = 72;
 
 export default function RadarDataPanel({
     radarCurrentPage,

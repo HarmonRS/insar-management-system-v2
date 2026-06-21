@@ -16,6 +16,8 @@ import json
 import asyncio
 import hashlib
 import re
+import tarfile
+import zipfile
 from typing import List, Dict, Optional, Tuple, Any
 from datetime import datetime
 from shapely.geometry import Point, Polygon, shape, mapping
@@ -240,6 +242,8 @@ def _chunked(items: List[Any], size: int):
 _RADAR_PREVIEW_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
 _RADAR_PREVIEW_KEYWORDS = ("quicklook", "quick-look", "preview", "browse", "thumbnail", "thumb", "overview")
 _RADAR_CACHE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_RADAR_ARCHIVE_SUFFIXES = (".zip", ".tar", ".tgz", ".tar.gz")
+_RADAR_ARCHIVE_PREVIEW_MAX_BYTES = 256 * 1024 * 1024
 
 
 def _sanitize_cache_name(name: str) -> str:
@@ -263,6 +267,208 @@ def _build_radar_geo_cache_filename(unique_id: str, file_path: str, cache_versio
     base = _sanitize_cache_name(os.path.basename(file_path))
     safe_version = _sanitize_cache_name(cache_version or "v")
     return f"RGID_{safe_version}_{digest}_{base}.webp"
+
+
+def _has_radar_archive_suffix(path: str) -> bool:
+    return str(path or "").lower().endswith(_RADAR_ARCHIVE_SUFFIXES)
+
+
+def _archive_product_stem(path: str) -> str:
+    base = os.path.basename(str(path or ""))
+    lower_base = base.lower()
+    for suffix in (".tar.gz", ".tgz", ".tar", ".zip"):
+        if lower_base.endswith(suffix):
+            return base[: -len(suffix)]
+    return os.path.splitext(base)[0]
+
+
+def _radar_archive_expected_preview_rank(archive_path: str, member_name: str) -> Optional[int]:
+    product_stem = _archive_product_stem(archive_path)
+    if not product_stem:
+        return None
+
+    member = str(member_name or "").replace("\\", "/").strip("/")
+    member_lower = member.lower()
+    product_lower = product_stem.lower()
+    expected_names = [
+        f"{product_lower}/{product_lower}.browse.jpg",
+        f"{product_lower}/{product_lower}.browse.jpeg",
+        f"{product_lower}/{product_lower}.browse.png",
+        f"{product_lower}/{product_lower}.quicklook.jpg",
+        f"{product_lower}/{product_lower}.quicklook.png",
+        f"{product_lower}/{product_lower}.quick-look.png",
+        f"{product_lower}/{product_lower}.thumb.jpg",
+        f"{product_lower}/{product_lower}.thumb.jpeg",
+        f"{product_lower}/{product_lower}.thumb.png",
+        f"{product_lower}/preview/quick-look.png",
+        f"{product_lower}.browse.jpg",
+        f"{product_lower}.browse.jpeg",
+        f"{product_lower}.browse.png",
+        f"{product_lower}.thumb.jpg",
+        f"{product_lower}.thumb.jpeg",
+        f"{product_lower}.thumb.png",
+    ]
+    try:
+        return expected_names.index(member_lower)
+    except ValueError:
+        return None
+
+
+def _radar_archive_preview_score(member_name: str, size_bytes: int = 0) -> Optional[Tuple[int, int, int, int, str]]:
+    lower_name = str(member_name or "").replace("\\", "/").lower()
+    base_name = os.path.basename(lower_name)
+    if not base_name.endswith(_RADAR_PREVIEW_EXTENSIONS):
+        return None
+    if size_bytes and size_bytes > _RADAR_ARCHIVE_PREVIEW_MAX_BYTES:
+        return None
+
+    has_keyword = any(key in lower_name for key in _RADAR_PREVIEW_KEYWORDS)
+    if base_name.endswith((".tif", ".tiff")) and not has_keyword:
+        return None
+
+    keyword_score = 0 if has_keyword else 2
+    if base_name == "quick-look.png":
+        keyword_score = -4
+    elif base_name == "quicklook.png":
+        keyword_score = -3
+    elif base_name.startswith("quick-look.") or base_name.startswith("quicklook."):
+        keyword_score = min(keyword_score, -2)
+    if "/preview/" in lower_name:
+        keyword_score -= 1
+    if "/icons/" in lower_name:
+        keyword_score += 2
+    if base_name.endswith((".jpg", ".jpeg", ".png", ".webp")):
+        ext_score = 0
+    elif base_name.endswith(".bmp"):
+        ext_score = 1
+    else:
+        ext_score = 2
+    depth = lower_name.count("/")
+    size_score = -int(size_bytes or 0)
+    return (keyword_score, depth, ext_score, size_score, member_name)
+
+
+def _radar_archive_preview_cache_path(archive_path: str, member_name: str) -> str:
+    digest = hashlib.sha1(
+        f"{archive_path}|{member_name}".encode("utf-8", errors="ignore")
+    ).hexdigest()[:16]
+    raw_base = os.path.basename(str(member_name or "preview"))
+    base = _sanitize_cache_name(raw_base)
+    _, ext = os.path.splitext(raw_base)
+    ext = _RADAR_CACHE_NAME_RE.sub("", ext.lower())[:12]
+    if ext and not base.lower().endswith(ext):
+        base = f"{base[:max(1, 48 - len(ext))]}{ext}"
+    return os.path.join(settings.CACHE_DIR, "radar_archive_preview_sources", f"APS_{digest}_{base}")
+
+
+def _write_archive_preview_cache(target_path: str, source_obj: Any, archive_mtime: float) -> Optional[str]:
+    try:
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        if os.path.exists(target_path) and _safe_mtime(target_path) >= archive_mtime:
+            return target_path
+        tmp_path = f"{target_path}.tmp"
+        with open(tmp_path, "wb") as target:
+            while True:
+                chunk = source_obj.read(1024 * 1024)
+                if not chunk:
+                    break
+                target.write(chunk)
+        os.replace(tmp_path, target_path)
+        if archive_mtime:
+            os.utime(target_path, (archive_mtime, archive_mtime))
+        return target_path
+    except Exception:
+        try:
+            if "tmp_path" in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return None
+
+
+def _find_radar_archive_preview_source(archive_path: str) -> Optional[str]:
+    if not archive_path or not os.path.isfile(archive_path) or not _has_radar_archive_suffix(archive_path):
+        return None
+
+    archive_mtime = _safe_mtime(archive_path)
+    lower_path = archive_path.lower()
+    try:
+        if lower_path.endswith(".zip"):
+            with zipfile.ZipFile(archive_path) as archive:
+                candidates = []
+                info_by_name = {}
+                for info in archive.infolist():
+                    if info.is_dir():
+                        continue
+                    score = _radar_archive_preview_score(info.filename, int(info.file_size or 0))
+                    if score is None:
+                        continue
+                    candidates.append(score)
+                    info_by_name[info.filename] = info
+                if not candidates:
+                    return None
+                candidates.sort()
+                member_name = candidates[0][-1]
+                target_path = _radar_archive_preview_cache_path(archive_path, member_name)
+                with archive.open(info_by_name[member_name], "r") as source_obj:
+                    return _write_archive_preview_cache(target_path, source_obj, archive_mtime)
+
+        with tarfile.open(archive_path, "r:*") as archive:
+            candidates = []
+            member_by_name = {}
+            best_rank: Optional[int] = None
+            best_member: Optional[tarfile.TarInfo] = None
+            for member in archive:
+                if not member.isfile():
+                    continue
+                expected_rank = _radar_archive_expected_preview_rank(archive_path, member.name)
+                if expected_rank is not None:
+                    if best_rank is None or expected_rank < best_rank:
+                        best_rank = expected_rank
+                        best_member = member
+                    if expected_rank == 0:
+                        source_obj = archive.extractfile(member)
+                        if source_obj is None:
+                            return None
+                        target_path = _radar_archive_preview_cache_path(archive_path, member.name)
+                        with source_obj:
+                            return _write_archive_preview_cache(target_path, source_obj, archive_mtime)
+                    continue
+
+                score = _radar_archive_preview_score(member.name, int(member.size or 0))
+                if score is None:
+                    if best_member is not None and int(member.size or 0) > _RADAR_ARCHIVE_PREVIEW_MAX_BYTES:
+                        break
+                    continue
+                candidates.append(score)
+                member_by_name[member.name] = member
+                if os.path.basename(str(member.name or "").lower()) in {"quick-look.png", "quicklook.png"}:
+                    source_obj = archive.extractfile(member)
+                    if source_obj is None:
+                        return None
+                    target_path = _radar_archive_preview_cache_path(archive_path, member.name)
+                    with source_obj:
+                        return _write_archive_preview_cache(target_path, source_obj, archive_mtime)
+            if best_member is not None:
+                source_obj = archive.extractfile(best_member)
+                if source_obj is None:
+                    return None
+                target_path = _radar_archive_preview_cache_path(archive_path, best_member.name)
+                with source_obj:
+                    return _write_archive_preview_cache(target_path, source_obj, archive_mtime)
+            if not candidates:
+                return None
+            candidates.sort()
+            member_name = candidates[0][-1]
+            source_obj = archive.extractfile(member_by_name[member_name])
+            if source_obj is None:
+                return None
+            target_path = _radar_archive_preview_cache_path(archive_path, member_name)
+            with source_obj:
+                return _write_archive_preview_cache(target_path, source_obj, archive_mtime)
+    except Exception:
+        return None
+    return None
 
 
 def extract_geotiff_bounds(tiff_path: str) -> Optional[List[Tuple[float, float]]]:
@@ -380,6 +586,8 @@ class DataService:
 
     @staticmethod
     def find_radar_preview_source(scene_dir: str) -> Optional[str]:
+        if scene_dir and os.path.isfile(scene_dir) and _has_radar_archive_suffix(scene_dir):
+            return _find_radar_archive_preview_source(scene_dir)
         if not scene_dir or not os.path.isdir(scene_dir):
             return None
 
@@ -520,21 +728,26 @@ class DataService:
         if orbit_dir and orbit_files_map:
             update_progress("正在同步精轨到本地引擎池...", 8)
             try:
+                isce2_pool = settings.ORBIT_POOL_ISCE2 if settings.ISCE2_ENABLED else ""
                 sync_result = await asyncio.to_thread(
                     sync_orbit_pools,
                     orbit_dir,
                     settings.ORBIT_POOL_ENVI,
-                    settings.ORBIT_POOL_ISCE2,
+                    isce2_pool,
                     settings.ORBIT_POOL_LANDSAR,
+                    bool(settings.ISCE2_ENABLED),
                 )
                 envi_new = len(sync_result.get("envi", {}).get("copied", []))
                 envi_updated = len(sync_result.get("envi", {}).get("updated", []))
                 isce2_new = len(sync_result.get("isce2", {}).get("converted", []))
                 isce2_updated = len(sync_result.get("isce2", {}).get("reconverted", []))
-                print(
-                    f"  [精轨同步] ENVI 新增 {envi_new}、刷新 {envi_updated}，"
-                    f"ISCE2 转换 {isce2_new}、重转 {isce2_updated}"
-                )
+                if settings.ISCE2_ENABLED:
+                    print(
+                        f"  [精轨同步] ENVI/Gamma TXT 新增 {envi_new}、刷新 {envi_updated}，"
+                        f"ISCE2 XML 转换 {isce2_new}、重转 {isce2_updated}"
+                    )
+                else:
+                    print(f"  [精轨同步] ENVI/Gamma TXT 新增 {envi_new}、刷新 {envi_updated}，ISCE2 已停用")
                 invalid_orbit_stems = {
                     item.get("name")
                     for item in sync_result.get("invalid_sources", [])
@@ -550,7 +763,11 @@ class DataService:
                 sync_errors = (
                     sync_result.get("source", {}).get("errors", [])
                     + [item.get("error", "") for item in sync_result.get("envi", {}).get("errors", [])]
-                    + [item.get("error", "") for item in sync_result.get("isce2", {}).get("errors", [])]
+                    + (
+                        [item.get("error", "") for item in sync_result.get("isce2", {}).get("errors", [])]
+                        if settings.ISCE2_ENABLED
+                        else []
+                    )
                 )
                 if task_id and sync_errors:
                     await task_service.add_log(
@@ -560,15 +777,16 @@ class DataService:
                             "精轨同步存在异常: "
                             f"源目录异常 {len(sync_result.get('source', {}).get('errors', []))} 项, "
                             f"ENVI 复制异常 {len(sync_result.get('envi', {}).get('errors', []))} 项, "
-                            f"ISCE2 转换异常 {len(sync_result.get('isce2', {}).get('errors', []))} 项"
+                            f"ISCE2 转换异常 {len(sync_result.get('isce2', {}).get('errors', [])) if settings.ISCE2_ENABLED else 0} 项"
                         ),
                     )
-                    for item in sync_result.get("isce2", {}).get("errors", [])[:20]:
-                        await task_service.add_log(
-                            task_id,
-                            "WARN",
-                            f"ISCE2 转换失败: {item.get('file')} -> {item.get('error')}",
-                        )
+                    if settings.ISCE2_ENABLED:
+                        for item in sync_result.get("isce2", {}).get("errors", [])[:20]:
+                            await task_service.add_log(
+                                task_id,
+                                "WARN",
+                                f"ISCE2 转换失败: {item.get('file')} -> {item.get('error')}",
+                            )
                 if task_id and invalid_orbit_stems:
                     await task_service.add_log(
                         task_id,

@@ -259,12 +259,15 @@ class TaskService:
             task = result.scalar_one_or_none()
 
             if task:
+                previous_message = task.message
                 if status:
                     task.status = status
                 if progress is not None:
                     task.progress = progress
                 if message:
                     task.message = message
+                    if message != previous_message:
+                        await self._add_log(task_id, "INFO", message, db=db)
 
                 # 如果任务结束，更新结束时间
                 if status in ["COMPLETED", "FAILED", "CANCELLED"]:

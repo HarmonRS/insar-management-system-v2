@@ -41,6 +41,7 @@ from .dependencies import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+GF3_NATIVE_PREVIEW_SOURCE_FORMAT = "GF3_SARSCAPE_NATIVE_PREVIEW"
 LIST_QUERY_MAX_LIMIT = read_int_env(
     "LIST_QUERY_MAX_LIMIT",
     2000,
@@ -188,6 +189,38 @@ def _radar_preview_paths(record: RadarDataORM) -> Tuple[str, str]:
     return raw_cache_path, geo_cache_path
 
 
+def _is_gf3_native_preview_record(record: RadarDataORM) -> bool:
+    return str(record.source_format or "") == GF3_NATIVE_PREVIEW_SOURCE_FORMAT
+
+
+def _build_gf3_native_preview_status(record: RadarDataORM) -> RadarPreviewStatusInfo:
+    preview_path = str(record.preview_cache_path or "")
+    has_native_cache = (
+        (record.preview_cache_status or "NONE") == "READY"
+        and preview_path.lower().endswith(".webp")
+        and os.path.exists(preview_path)
+    )
+    metadata = record.metadata_json or {}
+    source_path = str(metadata.get("default_native_path") or "")
+    source_found = bool(source_path and os.path.exists(source_path))
+    return RadarPreviewStatusInfo(
+        radar_id=record.id,
+        status="READY" if has_native_cache else (record.preview_cache_status or "NONE"),
+        cache_version=record.preview_cache_version,
+        cache_updated_at=record.preview_cache_updated_at,
+        has_geo_cache=has_native_cache,
+        has_raw_cache=has_native_cache,
+        source_found=source_found,
+        fallback_in_use=False,
+        message=(
+            "GF3 native _geo WebP cache is available."
+            if has_native_cache
+            else "GF3 native _geo WebP cache has not been generated."
+        ),
+        error=None if has_native_cache else record.preview_cache_error,
+    )
+
+
 def _build_radar_preview_status(
     record: RadarDataORM,
     source_found: bool,
@@ -228,6 +261,9 @@ async def _build_radar_preview_cache(
     db: AsyncSession,
     force: bool = False,
 ) -> RadarPreviewStatusInfo:
+    if _is_gf3_native_preview_record(record):
+        return _build_gf3_native_preview_status(record)
+
     raw_cache_path, geo_cache_path = _radar_preview_paths(record)
     has_geo_cache = os.path.exists(geo_cache_path)
     has_raw_cache = os.path.exists(raw_cache_path)
@@ -355,7 +391,33 @@ async def _get_cached_radar_preview(data_id: int, db: AsyncSession):
     if not record:
         raise HTTPException(status_code=404, detail=f"ID为 {data_id} 的源数据不存在。")
 
+    if _is_gf3_native_preview_record(record):
+        preview_path = str(record.preview_cache_path or "")
+        if (
+            (record.preview_cache_status or "NONE") == "READY"
+            and preview_path.lower().endswith(".webp")
+            and os.path.exists(preview_path)
+        ):
+            return FileResponse(
+                preview_path,
+                media_type="image/webp",
+                headers={"Cache-Control": "public, max-age=31536000"},
+            )
+        raise HTTPException(status_code=404, detail="GF3 native _geo WebP cache has not been generated.")
+
     raw_cache_path, geo_cache_path = _radar_preview_paths(record)
+    if (
+        (record.preview_cache_status or "NONE") == "READY"
+        and record.preview_cache_path
+        and str(record.preview_cache_path).lower().endswith(".webp")
+        and os.path.exists(record.preview_cache_path)
+    ):
+        return FileResponse(
+            record.preview_cache_path,
+            media_type="image/webp",
+            headers={"Cache-Control": "public, max-age=31536000"},
+        )
+
     if os.path.exists(geo_cache_path):
         return FileResponse(
             geo_cache_path,
@@ -663,6 +725,9 @@ async def get_radar_preview_status_endpoint(data_id: int, db: AsyncSession = Dep
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail=f"ID为 {data_id} 的源数据不存在。")
+
+    if _is_gf3_native_preview_record(record):
+        return _build_gf3_native_preview_status(record)
 
     raw_cache_path, geo_cache_path = _radar_preview_paths(record)
     has_geo_cache = os.path.exists(geo_cache_path)

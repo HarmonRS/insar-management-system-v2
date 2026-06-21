@@ -1,28 +1,14 @@
 # Frontend Navigation Architecture
 
-## 1. Purpose
+Last updated: 2026-06-20
 
-This document is the source of truth for the left-side navigation structure and the production workspace view model in the frontend.
+This document is the frontend navigation source of truth. It reflects the current product decision: the system manages data for LT-1, Sentinel-1, and GF-3, but production is organized only around D-InSAR and SBAS-InSAR. PS-InSAR and legacy time-series entries are compatibility code, not visible primary workflows.
 
-It explains:
-
-- the first-level menu groups
-- the sectioned groups and their leaf tabs
-- the special-case production workspace entry
-- the reserved entries and legacy route aliases
-- the files that must be updated when navigation changes
-
-The goal is to keep module boundaries stable as the system expands across D-InSAR, time-series InSAR, AI analysis, and operations workflows.
-
-## 2. Current First-Level Groups
-
-The current first-level menu groups are:
+## Current First-Level Groups
 
 - `data`: 数据管理
-- `production_planning`: 生产规划
 - `production_management`: 生产管理
 - `insar_analysis`: InSAR形变分析
-- `ai_analysis`: AI分析
 - `flood_analysis`: 洪涝灾害分析
 - `ops`: 运行维护
 
@@ -30,179 +16,106 @@ Definition files:
 
 - `frontend/src/config/appConstants.js`
 - `frontend/src/utils/appUiHelpers.js`
+- `frontend/src/components/app/AppSidePanel.jsx`
+- `frontend/src/ProductionWorkspace.jsx`
 
-## 3. Navigation Model
-
-The current frontend uses two navigation patterns:
-
-1. Sectioned navigation:
-   first-level group -> second-level section -> leaf tab
-2. Workspace navigation:
-   first-level group -> single leaf tab -> internal workspace view switcher
-
-### 3.1 生产规划
-
-This is a sectioned group.
+## Data Management
 
 ```text
-生产规划
-├─ 规划编组
-│  ├─ 配对规划 (`pairing`)
-│  ├─ 任务规划 (`pairs`)
-│  ├─ 时序候选栈 (`ps_results`)
-│  └─ 任务批次 (`batches`)
-└─ 数据分发
-   └─ 数据分发 (`copier`)
+数据管理
+├─ 入库监控 (`ingest`)
+├─ 资产库存 (`asset_inventory`)
+├─ 数据列表 (`data`)
+└─ 灾害点 (`hazard`)
 ```
 
-Notes:
+Boundary:
 
-- `ps_results` here means planning-stage candidate stacks, not analysis-facing result pages.
-- This group no longer hosts D-InSAR production or product pages.
+- LT-1 and Sentinel-1 source data are managed as local compressed archives.
+- Metadata, footprint, and preview are extracted from archives without full unpacking.
+- Full materialization happens only when production preparation creates a task under the local Task_Pool.
+- GF-3 registers copied native `_geo` production results and generates local WebP previews.
 
-### 3.2 生产管理
+## Production Management
 
-This is a workspace group, not a multi-tab planning tree.
+`production_management` is a workspace group. The left navigation exposes one entry; the workspace owns the internal production views.
 
 ```text
-生产管理
-└─ 生产管理 (`production_management`)
-   ├─ D-InSAR运行 (`dinsar_runs`)
-   ├─ SBAS-InSAR Production (`sbas_insar_production`)
-   ├─ SBAS-InSAR结果 (`sbas_insar_products`)
-   └─ D-InSAR产物 (`dinsar_products`)
+生产管理 (`production_management`)
+├─ D-InSAR配对规划 (`dinsar_pairing`)
+├─ D-InSAR任务规划 (`dinsar_pairs`)
+├─ D-InSAR任务批次 (`dinsar_batches`)
+├─ D-InSAR生产准备/分发 (`dinsar_prepare`)
+├─ D-InSAR运行 (`dinsar_runs`)
+├─ D-InSAR产物 (`dinsar_products`)
+├─ SBAS-InSAR Production (`sbas_insar_production`)
+├─ SBAS-InSAR结果 (`sbas_insar_products`)
+├─ 陆探生产占位 (`lt1_production`)
+├─ 哨兵生产占位 (`sentinel1_production`)
+└─ 高分三结果登记 (`gf3_native_registration`)
 ```
 
-Notes:
+Boundary:
 
-- The left navigation contains only one tab for this group: `production_management`.
-- Internal workspace views are controlled by `PRODUCTION_WORKSPACE_VIEWS`.
-- Route alias mapping is controlled by `PRODUCTION_WORKSPACE_ENTRY_TO_VIEW`.
-- Legacy route tabs such as `dinsar_production`, `ps_production`, and `ps_products` map into this workspace and should not be treated as standalone left-nav entries.
-- The old ISCE2/MintPy `timeseries_runs` and `timeseries_products` workspace views are deprecated and hidden; SBAS production is handled by the Gamma `sbas_insar_production` view.
+- D-InSAR uses the sequence: pair planning -> selected pairs -> D-InSAR batch -> production preparation -> run -> product catalog.
+- D-InSAR production preparation materializes archive sources into `DINSAR_TASK_POOL_ROOT` and must not use UNC paths.
+- Data distribution is a separate D-InSAR mode that exports source archive bundles under `DATA_DISTRIBUTION_ROOT`; it is not the production runtime path.
+- SBAS-InSAR uses the dedicated Gamma/LandSAR SBAS production page. It does not depend on the old D-InSAR pair list or PS candidate-stack page.
+- GF-3 is not produced on this server. The server registers native `_geo` results copied into the configured GF-3 pool and builds WebP from the produced binary raster, not from quicklook TIFFs.
 
-### 3.3 InSAR形变分析
+Compatibility route aliases:
 
-This is a sectioned group.
+- `pairing` -> `dinsar_pairing`
+- `pairs` -> `dinsar_pairs`
+- `ps_results` -> `sbas_insar_production`
+- `batches` -> `dinsar_batches`
+- `copier` -> `dinsar_prepare`
+- `dinsar_production` -> `dinsar_runs`
+- `dinsar_products` -> `dinsar_products`
+- `ps_production` -> `sbas_insar_production`
+- `ps_products` -> `sbas_insar_products`
+
+These aliases exist so existing code paths can redirect into the workspace. They are not standalone left-navigation entries.
+
+## InSAR Analysis
 
 ```text
 InSAR形变分析
 ├─ D-InSAR
 │  ├─ D-InSAR结果 (`dinsar_results`)
 │  └─ D-InSAR分析 (`dinsar_analysis`)
-└─ 时序InSAR
-   ├─ 时序InSAR结果 (`psinsar_results`)
-   └─ 时序InSAR分析 (`psinsar_analysis`)
+│     ├─ AI质量评估
+│     └─ D-InSAR诊断
+└─ SBAS
+   └─ SBAS-InSAR分析 (`psinsar_analysis`)
 ```
 
-Notes:
+Boundary:
 
-- This group is for business-facing result browsing and interpretation.
-- AI diagnosis does not belong here.
-- `dinsar_analysis`, `psinsar_results`, and `psinsar_analysis` are currently reserved placeholders.
+- Analysis pages consume registered result catalogs.
+- They should not submit production jobs or materialize source archives.
+- The standalone `AI分析` first-level page has been removed. D-InSAR quality assessment and D-InSAR diagnosis are owned by `dinsar_analysis`.
+- D-InSAR diagnosis uses the `AI_DIAGNOSIS` task type and persists reports in the `ai_diagnosis` table. The older `AI_ANALYZE` endpoint/task is compatibility code only.
+- `psinsar_analysis` remains the historical route key, but its user-facing meaning is SBAS-InSAR analysis.
 
-### 3.4 AI分析
+## Deprecated Visible Workflows
 
-This is a sectioned group.
+The following workflows must not be shown as primary UI entries:
 
-```text
-AI分析
-├─ 形变智能分析
-│  ├─ AI质量评估 (`ai_quality`)
-│  └─ D-InSAR诊断 (`ai_diagnosis`)
-└─ 遥感视觉分析
-   ├─ 滑坡语义分割 (`landslide_segmentation`)
-   └─ 无人机影像分析 (`uav_image_analysis`)
-```
+- PS-InSAR production
+- PS candidate-stack distribution
+- legacy ISCE2/MintPy time-series production
+- source-folder distribution for unpacked LT-1 or Sentinel-1 folders
+- standalone AI analysis first-level navigation
+- remote-sensing vision AI placeholder pages
 
-Notes:
+Backend compatibility code may remain until historical data models and catalog names are migrated.
 
-- `ai_diagnosis` is the actual tab key; its display label is `D-InSAR诊断`.
-- `landslide_segmentation` and `uav_image_analysis` remain reserved placeholders.
+## Navigation Update Rules
 
-### 3.5 无二级分组的一级入口
-
-The following groups do not define second-level sections:
-
-- `data`
-  leaf tabs: `ingest`, `data`, `hazard`
-- `flood_analysis`
-  leaf tabs: `flood_analysis`
-- `ops`
-  leaf tabs: `health`, `users`, `audit`
-
-## 4. Source-Of-Truth Rules
-
-The navigation follows these rules:
-
-- `LEFT_GROUP_LABELS` defines the first-level group vocabulary.
-- `LEFT_GROUP_SECTIONS` defines second-level sections where they exist.
-- `LEFT_GROUP_TABS` defines which leaf tabs belong to each group.
-- `LEFT_TAB_GROUP` and `LEFT_TAB_SECTION` are derived maps and should not be edited manually.
-- `leftPanelTab` remains the route/state source of truth for the selected leaf entry.
-- `production_management` is a special case: one left-nav tab owns multiple internal workspace views.
-- New features should be added under an existing group whenever possible.
-- A new first-level group should be introduced only for a durable, independent capability area.
-
-## 5. Naming Rules
-
-To avoid future ambiguity, use these naming constraints:
-
-- Use `结果` for browsing, querying, and result-facing visualization pages.
-- Use `产物` for extraction, publishing, packaging, and catalog-management pages.
-- Use `运行` for task submission, engine selection, execution control, and runtime monitoring views.
-- Use `分析` for interpretation, statistics, and analyst-facing thematic workflows.
-- Use `诊断` for model-assisted fault analysis or AI-driven reasoning pages.
-- Use `时序候选栈` only for planning-stage candidate stacks under `production_planning`.
-- Use `时序InSAR结果` for analysis-facing result pages under `insar_analysis`.
-
-## 6. Files To Update When Navigation Changes
-
-When adding or moving a tab, update these files together:
-
-- `frontend/src/config/appConstants.js`
-  Defines first-level groups, sections, tab ownership, workspace view mappings, and admin-only visibility.
-- `frontend/src/utils/appUiHelpers.js`
-  Defines display labels for leaf tabs.
-- `frontend/src/components/app/AppSidePanel.jsx`
-  Renders the side-panel navigation and group/section switching behavior.
-- `frontend/src/App.jsx`
-  Connects route state with panel rendering.
-- `frontend/src/ProductionWorkspace.jsx`
-  Owns the internal production workspace view switcher.
-- `frontend/src/App.css`
-  Styles the navigation hierarchy and workspace entry state.
-
-If the new tab is a real page instead of a placeholder, also add or update the corresponding panel component.
-
-## 7. Reserved Entries And Legacy Route Aliases
-
-Reserved leaf tabs:
-
-- `dinsar_analysis`
-- `psinsar_results`
-- `psinsar_analysis`
-- `landslide_segmentation`
-- `uav_image_analysis`
-
-Legacy route aliases mapped into `production_management`:
-
-- `dinsar_production`
-- `dinsar_products`
-- `ps_production`
-- `ps_products`
-
-These aliases exist for compatibility, but they are not first-class left-nav entries anymore.
-
-## 8. Future Extension Guidance
-
-Recommended future additions:
-
-- Use `flood_analysis` as the combined first-level group for water extraction, flood detection, overlay analysis, and flood results. The legacy `water` route may remain in code for compatibility, but it is no longer a first-class left-nav entry.
-- Put new production execution or product-governance capability under `production_management` as an internal workspace view unless a separate first-level domain is clearly required.
-- Put planning, batching, pairing, and dispatch preparation capability under `production_planning`.
-- Put result browsing and analyst-facing deformation interpretation under `insar_analysis`.
-- Put intelligent interpretation, diagnosis, segmentation, and computer-vision modules under `ai_analysis`.
-
-If a new feature belongs to intelligent interpretation or computer vision, prefer `AI分析`.
-If a new feature belongs to result browsing or deformation business analysis, prefer `InSAR形变分析`.
+- Add production execution, preparation, product registration, and product catalog features inside `ProductionWorkspace`.
+- Add source ingestion, archive scanning, orbit scanning, and storage inventory under `data`.
+- Add result interpretation and map analysis under `insar_analysis`.
+- Keep `production_management` as the only production first-level group.
+- Do not reintroduce a separate `production_planning` first-level group.
+- When changing navigation, update `appConstants.js`, `appUiHelpers.js`, `AppSidePanel.jsx`, `ProductionWorkspace.jsx`, and this document together.

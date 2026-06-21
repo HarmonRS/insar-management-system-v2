@@ -101,6 +101,18 @@ def _default_task_pool_root(project_root: str) -> str:
     return os.path.join(normalized_root, "Task_Pool")
 
 
+def _default_gf3_data_root(project_root: str) -> str:
+    normalized_root = os.path.normpath(project_root)
+    drive, _tail = os.path.splitdrive(normalized_root)
+    if drive:
+        return os.path.join(drive + os.sep, "GaoFen3_Pool")
+    return os.path.join(normalized_root, "GaoFen3_Pool")
+
+
+def _default_gf3_task_pool_root(project_root: str) -> str:
+    return os.path.join(_default_gf3_data_root(project_root), "task_pool")
+
+
 def _default_runtime_dir(project_root: str, *parts: str) -> str:
     return os.path.join(_default_runtime_root(project_root), *parts)
 
@@ -199,6 +211,7 @@ class Settings(BaseSettings):
     DINSAR_TASK_POOL_ROOT: str = ""
     SBAS_TASK_POOL_ROOT: str = ""
     GF3_TASK_POOL_ROOT: str = ""
+    DATA_DISTRIBUTION_ROOT: str = ""
     SOURCE_PRODUCT_DIRS: str = ""
     SENTINEL1_STORAGE_DIRS: str = ""
     ORBIT_SOURCE_DIRS: str = ""
@@ -239,7 +252,7 @@ class Settings(BaseSettings):
     GF3_GEO_DEM_PATH: str = ""
     GF3_ARCHIVE_SOURCE_DIRS: str = ""
     GF3_ARCHIVE_EXTS: str = ".zip,.tar,.tar.gz,.tgz"
-    GF3_UNPACK_DELETE_ARCHIVE: bool = True
+    GF3_UNPACK_DELETE_ARCHIVE: bool = False
     GF3_LEGACY_GDAL_ENABLED: bool = False
     GF3_SOURCE_DIRS: str = ""
     GF3_SARSCAPE_NATIVE_DIRS: str = ""
@@ -250,7 +263,7 @@ class Settings(BaseSettings):
     GF3_SARSCAPE_DEM_PATH: str = ""
     GF3_SARSCAPE_POLARIZATIONS: str = "HH,HV"
     GF3_SARSCAPE_KEEP_EXTRACTED: bool = True
-    GF3_SARSCAPE_AUTO_STANDARDIZE: bool = True
+    GF3_SARSCAPE_AUTO_STANDARDIZE: bool = False
     GF3_SARSCAPE_CLEAN_AFTER_SUCCESS: bool = True
     GF3_SARSCAPE_PRODUCE_TIMEOUT_SECONDS: int = 0
 
@@ -460,7 +473,9 @@ class Settings(BaseSettings):
         if not self.SBAS_TASK_POOL_ROOT:
             object.__setattr__(self, "SBAS_TASK_POOL_ROOT", os.path.join(self.TASK_POOL_ROOT, "SBAS"))
         if not self.GF3_TASK_POOL_ROOT:
-            object.__setattr__(self, "GF3_TASK_POOL_ROOT", os.path.join(self.TASK_POOL_ROOT, "GF3"))
+            object.__setattr__(self, "GF3_TASK_POOL_ROOT", _default_gf3_task_pool_root(project_root))
+        if not self.DATA_DISTRIBUTION_ROOT:
+            object.__setattr__(self, "DATA_DISTRIBUTION_ROOT", os.path.join(self.TASK_POOL_ROOT, "Data_Distribution"))
         if not self.SAR_ANALYSIS_READY_ROOT:
             object.__setattr__(
                 self,
@@ -484,25 +499,25 @@ class Settings(BaseSettings):
             object.__setattr__(
                 self,
                 "GF3_ARCHIVE_SOURCE_DIRS",
-                os.path.join(_default_input_root(project_root), "gf3", "archives"),
+                os.path.join(_default_gf3_data_root(project_root), "archives"),
             )
         if not self.GF3_SARSCAPE_NATIVE_DIRS:
             object.__setattr__(
                 self,
                 "GF3_SARSCAPE_NATIVE_DIRS",
-                os.path.join(_default_result_publish_root(project_root), "gf3", "sarscape_native"),
+                os.path.join(_default_gf3_data_root(project_root), "native_geo"),
             )
         if not self.GF3_STORAGE_DIRS:
             object.__setattr__(
                 self,
                 "GF3_STORAGE_DIRS",
-                os.path.join(_default_result_publish_root(project_root), "gf3", "standard_l2"),
+                os.path.join(_default_gf3_data_root(project_root), "catalog"),
             )
         if not self.GF3_SARSCAPE_RUNTIME_DIR:
             object.__setattr__(
                 self,
                 "GF3_SARSCAPE_RUNTIME_DIR",
-                _default_runtime_dir(project_root, "gf3", "sarscape_runtime"),
+                os.path.join(self.GF3_TASK_POOL_ROOT, "sarscape_runtime"),
             )
         if not self.ORBIT_QUARANTINE_DIR and self.MONITOR_ORBIT_DIR:
             object.__setattr__(
@@ -835,7 +850,8 @@ class Settings(BaseSettings):
                 if "lutan" in item.lower() or "lt1" in item.lower()
             ]
             lt1_roots = list(dict.fromkeys(lt1_roots))
-            object.__setattr__(self, "GAMMA_SBAS_SOURCE_ROOTS", ";".join(lt1_roots) or r"D:\LuTan1_Image_Pool")
+            materialized_lt1_root = os.path.join(self.TASK_POOL_ROOT, "source_materialized", "lutan1")
+            object.__setattr__(self, "GAMMA_SBAS_SOURCE_ROOTS", materialized_lt1_root)
         if not self.GAMMA_SBAS_ORBIT_ROOTS:
             object.__setattr__(self, "GAMMA_SBAS_ORBIT_ROOTS", self.PYINT_ORBIT_POOL_TXT or self.ORBIT_POOL_ENVI)
         object.__setattr__(self, "GAMMA_SBAS_DEFAULT_RLKS", max(1, int(self.GAMMA_SBAS_DEFAULT_RLKS or 8)))
@@ -1014,6 +1030,7 @@ class Settings(BaseSettings):
         os.makedirs(settings.DINSAR_TASK_POOL_ROOT, exist_ok=True)
         os.makedirs(settings.SBAS_TASK_POOL_ROOT, exist_ok=True)
         os.makedirs(settings.GF3_TASK_POOL_ROOT, exist_ok=True)
+        os.makedirs(settings.DATA_DISTRIBUTION_ROOT, exist_ok=True)
         for path in split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS):
             os.makedirs(path, exist_ok=True)
         for path in split_env_paths(settings.GF3_SARSCAPE_NATIVE_DIRS):
@@ -1100,6 +1117,24 @@ def _is_wsl_posix_path(value: str) -> bool:
     return text.startswith("/home/") or text.startswith("/mnt/")
 
 
+def _is_unc_path(value: str) -> bool:
+    return str(value or "").strip().strip('"').strip("'").startswith("\\\\")
+
+
+def _enforce_local_runtime_paths(
+    *,
+    pairs: list[tuple[str, str]],
+    errors: list[str],
+) -> None:
+    for label, raw_value in pairs:
+        raw_text = str(raw_value or "")
+        values = split_env_paths(raw_text) if (";" in raw_text or "," in raw_text) else [raw_text]
+        for item in values:
+            text = str(item or "").strip().strip('"').strip("'")
+            if text and _is_unc_path(text):
+                errors.append(f"{label} points to UNC path {text}; active production paths must be local.")
+
+
 def _check_path(
     *,
     label: str,
@@ -1171,21 +1206,66 @@ def validate_runtime_config() -> dict[str, Any]:
     else:
         info.append("DATABASE_URL 已配置。")
 
+    _enforce_local_runtime_paths(
+        pairs=[
+            ("UNPACK_SOURCE_DIRS", settings.UNPACK_SOURCE_DIRS),
+            ("SOURCE_PRODUCT_DIRS", settings.SOURCE_PRODUCT_DIRS),
+            ("SENTINEL1_STORAGE_DIRS", settings.SENTINEL1_STORAGE_DIRS),
+            ("ORBIT_SOURCE_DIRS", settings.ORBIT_SOURCE_DIRS),
+            ("INSAR_STORAGE_DIRS", settings.INSAR_STORAGE_DIRS),
+            ("MONITOR_RADAR_DIRS", settings.MONITOR_RADAR_DIRS),
+            ("MONITOR_DINSAR_DIRS", settings.MONITOR_DINSAR_DIRS),
+            ("MONITOR_ORBIT_DIR", settings.MONITOR_ORBIT_DIR),
+            ("TASK_POOL_ROOT", settings.TASK_POOL_ROOT),
+            ("DINSAR_TASK_POOL_ROOT", settings.DINSAR_TASK_POOL_ROOT),
+            ("SBAS_TASK_POOL_ROOT", settings.SBAS_TASK_POOL_ROOT),
+            ("GF3_TASK_POOL_ROOT", settings.GF3_TASK_POOL_ROOT),
+            ("DATA_DISTRIBUTION_ROOT", settings.DATA_DISTRIBUTION_ROOT),
+            ("ORBIT_POOL_ENVI", settings.ORBIT_POOL_ENVI),
+            ("ORBIT_POOL_ISCE2", settings.ORBIT_POOL_ISCE2),
+            ("ORBIT_POOL_LANDSAR", settings.ORBIT_POOL_LANDSAR),
+            ("PYINT_ORBIT_POOL_TXT", settings.PYINT_ORBIT_POOL_TXT),
+            ("PYINT_WORK_ROOT", settings.PYINT_WORK_ROOT),
+            ("PYINT_OUTPUT_ROOT", settings.PYINT_OUTPUT_ROOT),
+            ("LANDSAR_WORK_ROOT", settings.LANDSAR_WORK_ROOT),
+            ("RESULT_PUBLISH_ROOT", settings.RESULT_PUBLISH_ROOT),
+            ("DINSAR_PRODUCT_DIR", settings.DINSAR_PRODUCT_DIR),
+            ("TIMESERIES_PRODUCT_DIR", settings.TIMESERIES_PRODUCT_DIR),
+            ("SAR_ANALYSIS_READY_ROOT", settings.SAR_ANALYSIS_READY_ROOT),
+            ("SAR_ANALYSIS_WORK_ROOT", settings.SAR_ANALYSIS_WORK_ROOT),
+            ("GAMMA_SBAS_WORK_ROOT", settings.GAMMA_SBAS_WORK_ROOT),
+            ("GAMMA_SBAS_PRODUCT_ROOT", settings.GAMMA_SBAS_PRODUCT_ROOT),
+            ("GAMMA_SBAS_SOURCE_ROOTS", settings.GAMMA_SBAS_SOURCE_ROOTS),
+            ("GAMMA_SBAS_ORBIT_ROOTS", settings.GAMMA_SBAS_ORBIT_ROOTS),
+            ("GF3_ARCHIVE_SOURCE_DIRS", settings.GF3_ARCHIVE_SOURCE_DIRS),
+            ("GF3_SOURCE_DIRS", settings.GF3_SOURCE_DIRS),
+            ("GF3_SARSCAPE_NATIVE_DIRS", settings.GF3_SARSCAPE_NATIVE_DIRS),
+            ("GF3_STORAGE_DIRS", settings.GF3_STORAGE_DIRS),
+            ("GF3_SARSCAPE_RUNTIME_DIR", settings.GF3_SARSCAPE_RUNTIME_DIR),
+        ],
+        errors=errors,
+    )
+
     _check_path(label="PYTHON_PATH", value=settings.PYTHON_PATH, errors=errors, warnings=warnings, expect_file=True)
     _check_path(label="NGINX_PATH", value=settings.NGINX_PATH, errors=errors, warnings=warnings, required=True, expect_file=True)
     _check_path(label="LICENSE_PATH", value=settings.LICENSE_PATH, errors=errors, warnings=warnings, expect_file=True)
     _check_path(label="IDL_EXECUTABLE", value=settings.IDL_EXECUTABLE, errors=errors, warnings=warnings, expect_file=True)
     _check_path(label="IDL_WORKBENCH_PATH", value=settings.IDL_WORKBENCH_PATH, errors=errors, warnings=warnings, expect_file=True)
     _check_path(label="GF3_GEO_DEM_PATH", value=settings.GF3_GEO_DEM_PATH, errors=errors, warnings=warnings, expect_file=True)
-    _check_path(label="GF3_SARSCAPE_WRAPPER_EXE", value=settings.GF3_SARSCAPE_WRAPPER_EXE, errors=errors, warnings=warnings, expect_file=True)
-    _check_path(label="GF3_SARSCAPE_IDLRT_PATH", value=settings.GF3_SARSCAPE_IDLRT_PATH, errors=errors, warnings=warnings, expect_file=True)
-    _check_path(
-        label="GF3_SARSCAPE_DEM_PATH",
-        value=(settings.GF3_SARSCAPE_DEM_PATH or settings.GF3_GEO_DEM_PATH),
-        errors=errors,
-        warnings=warnings,
-        expect_file=True,
+    gf3_local_sarscape_enabled = bool(
+        settings.GF3_LEGACY_GDAL_ENABLED
+        or settings.GF3_SARSCAPE_AUTO_STANDARDIZE
     )
+    if gf3_local_sarscape_enabled:
+        _check_path(label="GF3_SARSCAPE_WRAPPER_EXE", value=settings.GF3_SARSCAPE_WRAPPER_EXE, errors=errors, warnings=warnings, expect_file=True)
+        _check_path(label="GF3_SARSCAPE_IDLRT_PATH", value=settings.GF3_SARSCAPE_IDLRT_PATH, errors=errors, warnings=warnings, expect_file=True)
+        _check_path(
+            label="GF3_SARSCAPE_DEM_PATH",
+            value=(settings.GF3_SARSCAPE_DEM_PATH or settings.GF3_GEO_DEM_PATH),
+            errors=errors,
+            warnings=warnings,
+            expect_file=True,
+        )
     _check_path(label="SRTM_DEM_DIR", value=settings.SRTM_DEM_DIR, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="WATER_RESULTS_DIR", value=settings.WATER_RESULTS_DIR, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="SAR_ANALYSIS_READY_ROOT", value=settings.SAR_ANALYSIS_READY_ROOT, errors=errors, warnings=warnings, expect_file=False)
@@ -1213,9 +1293,6 @@ def validate_runtime_config() -> dict[str, Any]:
     _check_path(label="RESULT_QUARANTINE_ROOT", value=settings.RESULT_QUARANTINE_ROOT, errors=errors, warnings=warnings, expect_file=False)
 
     for label, raw_value in (
-        ("UNPACK_SOURCE_DIRS", settings.UNPACK_SOURCE_DIRS),
-        ("INSAR_STORAGE_DIRS", settings.INSAR_STORAGE_DIRS),
-        ("MONITOR_RADAR_DIRS", settings.MONITOR_RADAR_DIRS),
         ("MONITOR_DINSAR_DIRS", settings.MONITOR_DINSAR_DIRS),
         ("GF3_SARSCAPE_NATIVE_DIRS", settings.GF3_SARSCAPE_NATIVE_DIRS),
         ("GF3_STORAGE_DIRS", settings.GF3_STORAGE_DIRS),
@@ -1230,7 +1307,7 @@ def validate_runtime_config() -> dict[str, Any]:
 
     gf3_archive_dirs = split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS)
     if not gf3_archive_dirs:
-        warnings.append("GF3_ARCHIVE_SOURCE_DIRS 未配置；无法触发 GF3 SARscape 生产，只能扫描已有原生结果。")
+        warnings.append("GF3_ARCHIVE_SOURCE_DIRS 未配置；GF3 本机生产已停用，原始归档仅用于本地资产追踪。")
     for item in gf3_archive_dirs:
         _check_path(label="GF3_ARCHIVE_SOURCE_DIRS", value=item, errors=errors, warnings=warnings, expect_file=False)
 

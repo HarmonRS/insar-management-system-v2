@@ -17,10 +17,13 @@ from ..utils import parse_gf3_l2_dirname
 
 NATIVE_MANIFEST_NAME = "gf3_native_manifest.json"
 NATIVE_MANIFEST_SCHEMA = "gf3_sarscape_native.v1"
+FLAT_SCENE_CATALOG_DIR_NAME = ".gf3_flat_scenes"
 POLARIZATION_PRIORITY = ("HH", "VV", "HV", "VH")
 SKIP_DIR_NAMES = {
     ".git",
+    FLAT_SCENE_CATALOG_DIR_NAME,
     ".gf3_extract",
+    ".gf3_runtime",
     ".sarmap",
     "__pycache__",
     "temp",
@@ -87,6 +90,16 @@ def _polarization_from_geo_name(name: str) -> str | None:
     return None
 
 
+def _scene_name_from_geo_name(name: str) -> str:
+    text = str(name or "").strip()
+    match = re.match(r"^(?P<scene>.+)_(?:hh|hv|vh|vv)_geo$", text, flags=re.IGNORECASE)
+    if match:
+        return match.group("scene")
+    if text.lower().endswith("_geo"):
+        return text[:-4]
+    return Path(text).stem
+
+
 def _is_geo_native_data_file(path: Path) -> bool:
     return path.is_file() and path.name.lower().endswith("_geo")
 
@@ -128,6 +141,62 @@ def _parse_scene_metadata(scene_name: str, assets: list[dict[str, Any]]) -> dict
     return metadata
 
 
+def _native_asset_from_base(base: Path) -> dict[str, Any]:
+    hdr = Path(str(base) + ".hdr")
+    sml = Path(str(base) + ".sml")
+    aux_xml = Path(str(base) + ".aux.xml")
+    ovr = Path(str(base) + ".ovr")
+    kml = Path(str(base) + ".kml")
+    quicklook = base.with_name(base.name + "_ql.tif")
+    ql_kml = base.with_name(base.name + "_ql.kml")
+    polarization = _polarization_from_geo_name(base.name) or "UNKNOWN"
+    complete = _is_nonempty_file(base) and _is_nonempty_file(hdr) and _is_nonempty_file(sml)
+
+    return {
+        "polarization": polarization,
+        "role": "geo_native",
+        "path": str(base),
+        "hdr": str(hdr) if hdr.exists() else None,
+        "sml": str(sml) if sml.exists() else None,
+        "aux_xml": str(aux_xml) if aux_xml.exists() else None,
+        "ovr": str(ovr) if ovr.exists() else None,
+        "quicklook": str(quicklook) if quicklook.exists() else None,
+        "kml": str(kml) if kml.exists() else (str(ql_kml) if ql_kml.exists() else None),
+        "complete": bool(complete),
+        "source": _safe_stat(base),
+        "hdr_info": _safe_stat(hdr) if hdr.exists() else None,
+        "sml_info": _safe_stat(sml) if sml.exists() else None,
+    }
+
+
+def _asset_fingerprint_part(asset: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "polarization": str(asset.get("polarization") or "").upper(),
+        "path": asset.get("path"),
+        "complete": bool(asset.get("complete")),
+        "source": asset.get("source"),
+        "hdr": asset.get("hdr_info"),
+        "sml": asset.get("sml_info"),
+    }
+
+
+def _native_fingerprint(assets: list[dict[str, Any]]) -> str:
+    payload = [
+        _asset_fingerprint_part(asset)
+        for asset in sorted(
+            assets,
+            key=lambda item: (
+                str(item.get("polarization") or ""),
+                str(item.get("path") or ""),
+            ),
+        )
+    ]
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    import hashlib
+
+    return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+
+
 def _collect_native_assets(scene_dir: Path) -> list[dict[str, Any]]:
     assets: list[dict[str, Any]] = []
     try:
@@ -139,43 +208,25 @@ def _collect_native_assets(scene_dir: Path) -> list[dict[str, Any]]:
         if not _is_geo_native_data_file(path):
             continue
 
-        base = path
-        hdr = Path(str(base) + ".hdr")
-        sml = Path(str(base) + ".sml")
-        aux_xml = Path(str(base) + ".aux.xml")
-        ovr = Path(str(base) + ".ovr")
-        kml = Path(str(base) + ".kml")
-        quicklook = base.with_name(base.name + "_ql.tif")
-        polarization = _polarization_from_geo_name(base.name) or "UNKNOWN"
-        complete = _is_nonempty_file(base) and _is_nonempty_file(hdr) and _is_nonempty_file(sml)
-
-        asset: dict[str, Any] = {
-            "polarization": polarization,
-            "role": "geo_native",
-            "path": str(base),
-            "hdr": str(hdr) if hdr.exists() else None,
-            "sml": str(sml) if sml.exists() else None,
-            "aux_xml": str(aux_xml) if aux_xml.exists() else None,
-            "ovr": str(ovr) if ovr.exists() else None,
-            "quicklook": str(quicklook) if quicklook.exists() else None,
-            "kml": str(kml) if kml.exists() else None,
-            "complete": bool(complete),
-            "source": _safe_stat(base),
-            "hdr_info": _safe_stat(hdr) if hdr.exists() else None,
-            "sml_info": _safe_stat(sml) if sml.exists() else None,
-        }
-        assets.append(asset)
+        assets.append(_native_asset_from_base(path))
 
     return assets
 
 
-def _collect_scene_manifest(root: Path, scene_dir: Path) -> dict[str, Any] | None:
-    assets = _collect_native_assets(scene_dir)
+def _build_scene_manifest(
+    root: Path,
+    *,
+    scene_name: str,
+    native_dir: Path,
+    manifest_dir: Path,
+    assets: list[dict[str, Any]],
+    source_dir: Path,
+    storage_layout: str,
+) -> dict[str, Any] | None:
     if not assets:
         return None
 
-    scene_name = scene_dir.name
-    batch_name = _scene_batch_name(root, scene_dir, scene_name)
+    batch_name = _scene_batch_name(root, source_dir, scene_name)
     complete_assets = [asset for asset in assets if asset.get("complete")]
     complete_pols = [
         pol
@@ -200,31 +251,79 @@ def _collect_scene_manifest(root: Path, scene_dir: Path) -> dict[str, Any] | Non
 
     logs = []
     for name in ("gf3_sarscape_cli.log",):
-        log_path = scene_dir / name
+        log_path = source_dir / name
         if log_path.is_file():
             logs.append(str(log_path))
     try:
-        logs.extend(str(path) for path in sorted(scene_dir.glob("*.log"), key=lambda item: item.name.lower()) if str(path) not in logs)
+        logs.extend(str(path) for path in sorted(source_dir.glob("*.log"), key=lambda item: item.name.lower()) if str(path) not in logs)
     except OSError:
         pass
 
     metadata = _parse_scene_metadata(scene_name, assets)
-    manifest_path = scene_dir / NATIVE_MANIFEST_NAME
+    native_fingerprint = _native_fingerprint(assets)
+    metadata["native_fingerprint"] = native_fingerprint
+    manifest_path = manifest_dir / NATIVE_MANIFEST_NAME
     return {
         "schema": NATIVE_MANIFEST_SCHEMA,
         "generated_at": _utc_now(),
         "scene_name": scene_name,
         "batch_name": batch_name,
         "native_root": str(root),
-        "native_dir": str(scene_dir),
+        "native_dir": str(native_dir),
+        "source_dir": str(source_dir),
         "manifest_path": str(manifest_path),
         "source_archive": None,
+        "storage_layout": storage_layout,
+        "native_fingerprint": native_fingerprint,
         "status": status,
         "polarizations": complete_pols,
         "metadata": metadata,
         "assets": assets,
         "logs": logs,
     }
+
+
+def _collect_scene_manifest(root: Path, scene_dir: Path) -> dict[str, Any] | None:
+    assets = _collect_native_assets(scene_dir)
+    return _build_scene_manifest(
+        root,
+        scene_name=scene_dir.name,
+        native_dir=scene_dir,
+        manifest_dir=scene_dir,
+        assets=assets,
+        source_dir=scene_dir,
+        storage_layout="scene_dir",
+    )
+
+
+def _collect_flat_scene_manifests(root: Path, source_dir: Path) -> list[dict[str, Any]]:
+    try:
+        entries = sorted(source_dir.iterdir(), key=lambda item: item.name.lower())
+    except OSError:
+        return []
+
+    grouped_assets: dict[str, list[dict[str, Any]]] = {}
+    for path in entries:
+        if not _is_geo_native_data_file(path):
+            continue
+        scene_name = _scene_name_from_geo_name(path.name)
+        grouped_assets.setdefault(scene_name, []).append(_native_asset_from_base(path))
+
+    manifests: list[dict[str, Any]] = []
+    for scene_name in sorted(grouped_assets):
+        scene_catalog_dir = source_dir / FLAT_SCENE_CATALOG_DIR_NAME / scene_name
+        manifest = _build_scene_manifest(
+            root,
+            scene_name=scene_name,
+            native_dir=scene_catalog_dir,
+            manifest_dir=scene_catalog_dir,
+            assets=grouped_assets[scene_name],
+            source_dir=source_dir,
+            storage_layout="flat_files",
+        )
+        if manifest:
+            manifests.append(manifest)
+    return manifests
 
 
 def _normalize_roots(native_dirs: list[str] | tuple[str, ...] | None) -> tuple[list[Path], list[str]]:
@@ -251,6 +350,7 @@ def scan_gf3_sarscape_native_roots(
     native_dirs: list[str] | tuple[str, ...] | None,
     *,
     write_manifest: bool = True,
+    scene_dirs_only: bool = False,
 ) -> dict[str, Any]:
     """Scan configured native roots and return discovered scene manifests."""
     roots, missing_roots = _normalize_roots(native_dirs)
@@ -258,12 +358,56 @@ def scan_gf3_sarscape_native_roots(
     seen_scene_dirs: set[str] = set()
     write_errors: list[dict[str, str]] = []
 
+    def append_manifest(manifest: dict[str, Any], scene_key: str, scene_dir_for_error: Path) -> None:
+        seen_scene_dirs.add(scene_key)
+        if write_manifest:
+            try:
+                _write_json(Path(manifest["manifest_path"]), manifest)
+            except OSError as exc:
+                write_errors.append({"scene_dir": str(scene_dir_for_error), "error": str(exc)})
+        scenes.append(manifest)
+
     for root in roots:
+        if scene_dirs_only:
+            try:
+                candidate_dirs = [root] + [
+                    child
+                    for child in sorted(root.iterdir(), key=lambda item: item.name.lower())
+                    if child.is_dir()
+                    and child.name not in SKIP_DIR_NAMES
+                    and not child.name.startswith(".SARscape")
+                    and not child.name.startswith(".gf3_")
+                ]
+            except OSError:
+                candidate_dirs = [root]
+
+            for scene_dir in candidate_dirs:
+                scene_key = str(scene_dir).lower()
+                if scene_key in seen_scene_dirs:
+                    continue
+
+                if not scene_dir.name.upper().startswith("GF3_"):
+                    flat_manifests = _collect_flat_scene_manifests(root, scene_dir)
+                    if flat_manifests:
+                        for manifest in flat_manifests:
+                            flat_key = str(manifest.get("native_dir") or "").lower()
+                            if flat_key and flat_key not in seen_scene_dirs:
+                                append_manifest(manifest, flat_key, scene_dir)
+                        continue
+
+                manifest = _collect_scene_manifest(root, scene_dir)
+                if not manifest:
+                    continue
+
+                append_manifest(manifest, scene_key, scene_dir)
+            continue
+
         for current_dir, dir_names, _file_names in os.walk(root):
             dir_names[:] = [
                 name
                 for name in dir_names
                 if name not in SKIP_DIR_NAMES and not name.startswith(".SARscape")
+                and not name.startswith(".gf3_")
             ]
             scene_dir = Path(current_dir)
             scene_key = str(scene_dir).lower()
@@ -271,17 +415,20 @@ def scan_gf3_sarscape_native_roots(
                 dir_names[:] = []
                 continue
 
+            if not scene_dir.name.upper().startswith("GF3_"):
+                flat_manifests = _collect_flat_scene_manifests(root, scene_dir)
+                if flat_manifests:
+                    for manifest in flat_manifests:
+                        flat_key = str(manifest.get("native_dir") or "").lower()
+                        if flat_key and flat_key not in seen_scene_dirs:
+                            append_manifest(manifest, flat_key, scene_dir)
+                    continue
+
             manifest = _collect_scene_manifest(root, scene_dir)
             if not manifest:
                 continue
 
-            seen_scene_dirs.add(scene_key)
-            if write_manifest:
-                try:
-                    _write_json(Path(manifest["manifest_path"]), manifest)
-                except OSError as exc:
-                    write_errors.append({"scene_dir": str(scene_dir), "error": str(exc)})
-            scenes.append(manifest)
+            append_manifest(manifest, scene_key, scene_dir)
             dir_names[:] = []
 
     native_ready = sum(1 for scene in scenes if scene.get("status") == "NATIVE_READY")

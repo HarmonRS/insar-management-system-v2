@@ -15,12 +15,13 @@ from shapely.geometry import Polygon
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..config import settings
+from ..config import settings, split_env_paths
 from ..models import ManagedRootORM, RadarDataORM, SARSceneGeoORM, SourceProductAssetORM
-from .data_service import extract_geotiff_bounds
+from .data_service import DataService, extract_geotiff_bounds
 from .gf3_native_inventory_service import (
     NATIVE_MANIFEST_NAME,
     POLARIZATION_PRIORITY,
+    SKIP_DIR_NAMES,
     scan_gf3_sarscape_native_roots,
 )
 from .image_service import image_service
@@ -31,6 +32,9 @@ STANDARD_MANIFEST_SCHEMA = "gf3_standard_geotiff.v1"
 CONVERTER_NAME = "gf3_sarscape_geo_to_tif"
 CONVERTER_VERSION = "v1"
 SOURCE_ASSET_FORMAT = "GF3_SARSCAPE_L2"
+SOURCE_ASSET_QUICKLOOK_FORMAT = "GF3_SARSCAPE_QUICKLOOK"
+SOURCE_ASSET_NATIVE_PREVIEW_FORMAT = "GF3_SARSCAPE_NATIVE_PREVIEW"
+QUICKLOOK_PREVIEW_CACHE_VERSION = "gf3_native_webp.v2"
 
 
 def _utc_now() -> str:
@@ -70,6 +74,112 @@ def _path_kind(path: str) -> str:
     if text.startswith("/"):
         return "posix"
     return "relative"
+
+
+def _path_key(path: str | Path) -> str:
+    return os.path.normcase(os.path.normpath(str(path))).lower()
+
+
+def _has_native_geo_assets(path: Path) -> bool:
+    try:
+        return any(item.is_file() and item.name.lower().endswith("_geo") for item in path.iterdir())
+    except OSError:
+        return False
+
+
+def _discover_gf3_sarscape_scan_roots(native_dirs: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Expand stable GF3 roots into SARscape ``*_geo`` result pools before scanning.
+
+    Operators usually configure a durable GF3 root rather than a date folder.
+    Date-specific SARscape output pools live below it as ``YYYYMMDD_geo``. Prefer
+    direct ``*_geo`` children and fall back to recursive discovery.
+    """
+    roots: list[str] = []
+    seen: set[str] = set()
+
+    def add(path: str | Path) -> None:
+        text = os.path.normpath(str(path))
+        key = _path_key(text)
+        if key and key not in seen:
+            seen.add(key)
+            roots.append(text)
+
+    for raw in native_dirs or []:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+
+        if any(ch in text for ch in "*?"):
+            glob_root = Path(os.path.normpath(text))
+            try:
+                matches = sorted(glob_root.parent.glob(glob_root.name), key=lambda item: item.name.lower())
+            except OSError:
+                matches = []
+            if matches:
+                for match in matches:
+                    if match.is_dir():
+                        add(match)
+                continue
+            add(glob_root)
+            continue
+
+        root = Path(os.path.normpath(text))
+        try:
+            is_dir = root.is_dir()
+        except OSError:
+            is_dir = False
+        if not is_dir:
+            add(root)
+            continue
+
+        if root.name.lower().endswith("_geo"):
+            add(root)
+
+        try:
+            immediate_geo_roots = sorted(
+                (
+                    child
+                    for child in root.iterdir()
+                    if child.is_dir() and child.name.lower().endswith("_geo")
+                ),
+                key=lambda item: item.name.lower(),
+            )
+        except OSError:
+            immediate_geo_roots = []
+
+        if immediate_geo_roots:
+            for child in immediate_geo_roots:
+                add(child)
+            continue
+
+        if _has_native_geo_assets(root):
+            add(root)
+            continue
+
+        found_recursive = 0
+        for current_dir, dir_names, _file_names in os.walk(root):
+            dir_names[:] = [
+                name
+                for name in dir_names
+                if name not in SKIP_DIR_NAMES and not name.startswith(".SARscape")
+                and not name.startswith(".gf3_")
+            ]
+            selected: list[str] = []
+            remaining: list[str] = []
+            for name in dir_names:
+                if name.lower().endswith("_geo"):
+                    selected.append(name)
+                else:
+                    remaining.append(name)
+            for name in selected:
+                add(Path(current_dir) / name)
+            found_recursive += len(selected)
+            dir_names[:] = remaining
+
+        if found_recursive == 0:
+            add(root)
+
+    return roots
 
 
 def _source_asset_uid(path: str) -> str:
@@ -439,7 +549,7 @@ def _crs_is_geographic_lonlat(crs: Any) -> bool:
     return False
 
 
-def _polygon_from_tif(path: Path) -> list[tuple[float, float]] | None:
+def _polygon_from_raster(path: Path) -> list[tuple[float, float]] | None:
     polygon = extract_geotiff_bounds(str(path))
     if polygon and len(polygon) >= 4:
         return polygon
@@ -475,6 +585,22 @@ def _polygon_from_tif(path: Path) -> list[tuple[float, float]] | None:
             return points
     except Exception:
         return None
+    return None
+
+
+def _polygon_from_native_asset(asset: dict[str, Any] | None) -> list[tuple[float, float]] | None:
+    if not asset:
+        return None
+    for key in ("path", "quicklook"):
+        text = _path_text(asset.get(key))
+        if not text:
+            continue
+        path = Path(text)
+        if not path.is_file():
+            continue
+        polygon = _polygon_from_raster(path)
+        if polygon and len(polygon) >= 4:
+            return polygon
     return None
 
 
@@ -520,6 +646,505 @@ def _select_default_asset(assets: list[dict[str, Any]]) -> dict[str, Any] | None
         if pol in by_pol:
             return by_pol[pol]
     return assets[0] if assets else None
+
+
+def _is_quicklook_raster_path(path: Any) -> bool:
+    text = _path_text(path).lower()
+    return text.endswith("_ql.tif") or text.endswith("_ql.tiff")
+
+
+def _select_default_native_asset(assets: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates = [
+        asset
+        for asset in assets
+        if _path_text(asset.get("path")) and not _is_quicklook_raster_path(asset.get("path"))
+    ]
+    complete = [asset for asset in candidates if asset.get("complete") is not False]
+    return _select_default_asset(complete or candidates)
+
+
+def _quicklook_assets_from_scene_manifest(scene_manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    output_assets: list[dict[str, Any]] = []
+    for asset in scene_manifest.get("assets") or []:
+        native_path = _path_text(asset.get("path"))
+        if not native_path or _is_quicklook_raster_path(native_path) or asset.get("complete") is not True:
+            continue
+        output_assets.append(
+            {
+                "polarization": str(asset.get("polarization") or "UNKNOWN").upper(),
+                "role": "native_geo",
+                "path": native_path,
+                "hdr": _path_text(asset.get("hdr")) or None,
+                "sml": _path_text(asset.get("sml")) or None,
+                "quicklook": _path_text(asset.get("quicklook")) or None,
+                "complete": bool(asset.get("complete")),
+                "status": "registered_native_geo",
+            }
+        )
+    return output_assets
+
+
+def _quicklook_manifest_for_scene(scene_manifest: dict[str, Any], storage_root: str | Path | None) -> dict[str, Any]:
+    root = Path(storage_root or settings.GF3_STORAGE_DIRS).resolve()
+    out_dir = _standard_scene_dir(scene_manifest, root)
+    manifest_path = out_dir / "gf3_native_preview_manifest.json"
+    assets = _quicklook_assets_from_scene_manifest(scene_manifest)
+    manifest = {
+        "schema": "gf3_sarscape_native_preview.v1",
+        "generated_at": _utc_now(),
+        "scene_name": scene_manifest.get("scene_name"),
+        "batch_name": scene_manifest.get("batch_name"),
+        "native_manifest": scene_manifest.get("manifest_path") or str(Path(scene_manifest.get("native_dir") or "") / NATIVE_MANIFEST_NAME),
+        "native_dir": scene_manifest.get("native_dir"),
+        "standard_dir": str(out_dir),
+        "manifest_path": str(manifest_path),
+        "status": "NATIVE_READY" if assets else "FAILED",
+        "assets": assets,
+        "summary": {
+            "native_assets": len(assets),
+            "quicklook_assets": 0,
+            "full_raster_materialized": True,
+            "webp_source": "native_geo",
+        },
+        "errors": [] if assets else [{"error": "no native _geo assets found"}],
+    }
+    _write_json(manifest_path, manifest)
+    return manifest
+
+
+def _read_geotiff_quicklook_webp(source_path: str, target_path: str, *, max_size: int | None = None) -> bool:
+    """Build a local WebP from a registered GF3 raster, including ENVI ``*_geo``."""
+    try:
+        import numpy as np
+        import rasterio
+        from PIL import Image
+        from rasterio.enums import Resampling
+    except Exception:
+        return False
+
+    try:
+        target = Path(target_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        limit = int(max_size or settings.RADAR_THUMBNAIL_MAX_SIZE or 1600)
+        with rasterio.open(source_path) as src:
+            scale = min(limit / max(src.width, 1), limit / max(src.height, 1), 1.0)
+            out_width = max(1, int(src.width * scale))
+            out_height = max(1, int(src.height * scale))
+            band = src.read(
+                1,
+                out_shape=(out_height, out_width),
+                masked=True,
+                resampling=Resampling.bilinear,
+            )
+            data = band.filled(0)
+            if data.dtype != np.uint8:
+                valid = band.compressed() if hasattr(band, "compressed") else data[np.isfinite(data)]
+                if valid.size:
+                    p2, p98 = np.nanpercentile(valid.astype("float32"), [2, 98])
+                    scaled = np.clip((data.astype("float32") - p2) / max(float(p98 - p2), 1e-6), 0, 1)
+                    data = (scaled * 255).astype("uint8")
+                else:
+                    data = np.zeros(data.shape, dtype="uint8")
+            else:
+                data = data.astype("uint8", copy=False)
+
+            mask = getattr(band, "mask", None)
+            if mask is None or np.ndim(mask) == 0:
+                alpha = np.full(data.shape, 255, dtype="uint8")
+            else:
+                alpha = np.where(mask, 0, 255).astype("uint8")
+            rgba = np.stack([data, data, data, alpha], axis=-1)
+
+        image = Image.fromarray(rgba, "RGBA")
+        image = image_service.make_edge_dark_transparent(image)
+        image_service.save_image_as_webp(image, target_path, quality=82)
+        return target.exists() and target.stat().st_size > 0
+    except Exception:
+        return False
+
+
+def _native_preview_source_from_metadata(metadata: dict[str, Any]) -> str:
+    candidates: list[Any] = [metadata.get("default_native_path")]
+    for key in ("native_assets", "quicklook_assets"):
+        for asset in metadata.get(key) or []:
+            if isinstance(asset, dict):
+                candidates.append(asset.get("path"))
+    for candidate in candidates:
+        text = _path_text(candidate)
+        if text and not _is_quicklook_raster_path(text):
+            return text
+    return ""
+
+
+def _path_is_under_any(path: str, roots: list[str]) -> bool:
+    target = _path_key(path)
+    if not target:
+        return False
+    for root in roots:
+        root_key = _path_key(root)
+        if root_key and (target == root_key or target.startswith(root_key + os.sep)):
+            return True
+    return False
+
+
+def _configured_gf3_native_roots(native_dirs: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    roots = [str(item) for item in (native_dirs or []) if str(item or "").strip()]
+    if not roots:
+        roots = split_env_paths(settings.GF3_SARSCAPE_NATIVE_DIRS)
+    return [os.path.normpath(root) for root in roots if str(root or "").strip()]
+
+
+def _scene_native_fingerprint(scene_manifest: dict[str, Any]) -> str:
+    return str(
+        scene_manifest.get("native_fingerprint")
+        or (scene_manifest.get("metadata") or {}).get("native_fingerprint")
+        or ""
+    ).strip()
+
+
+def _record_has_bounds(record: RadarDataORM) -> bool:
+    return (
+        record.coverage_polygon is not None
+        and record.min_lon is not None
+        and record.min_lat is not None
+        and record.max_lon is not None
+        and record.max_lat is not None
+    )
+
+
+async def _find_existing_quicklook_radar(
+    db: AsyncSession,
+    *,
+    scene_manifest: dict[str, Any],
+) -> RadarDataORM | None:
+    native_dir = str(scene_manifest.get("native_dir") or "")
+    scene_name = scene_manifest.get("scene_name") or Path(native_dir).name
+    unique_id = f"gf3_sarscape_native_preview:{scene_name}"
+    result = await db.execute(
+        select(RadarDataORM).where(
+            or_(
+                RadarDataORM.unique_id == unique_id,
+                RadarDataORM.file_path == native_dir,
+            )
+        )
+    )
+    return result.scalars().first()
+
+
+async def _can_skip_unchanged_quicklook_radar(
+    db: AsyncSession,
+    *,
+    scene_manifest: dict[str, Any],
+) -> tuple[bool, int | None, str]:
+    native_fingerprint = _scene_native_fingerprint(scene_manifest)
+    if not native_fingerprint:
+        return False, None, "missing_native_fingerprint"
+
+    record = await _find_existing_quicklook_radar(db, scene_manifest=scene_manifest)
+    if record is None:
+        return False, None, "missing_record"
+
+    metadata = record.metadata_json or {}
+    if str(metadata.get("native_fingerprint") or "") != native_fingerprint:
+        return False, int(record.id) if record.id is not None else None, "native_fingerprint_changed"
+    if str(metadata.get("registration_mode") or "") != "native_preview":
+        return False, int(record.id) if record.id is not None else None, "registration_mode_changed"
+    if not _record_has_bounds(record):
+        return False, int(record.id) if record.id is not None else None, "missing_bounds"
+
+    return True, int(record.id) if record.id is not None else None, "unchanged"
+
+
+async def generate_gf3_quicklook_webp_cache(
+    db: AsyncSession,
+    *,
+    force: bool = False,
+    max_records: int | None = None,
+    native_dirs: list[str] | tuple[str, ...] | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    """Generate local WebP previews from registered GF3 SARscape native ``*_geo`` rasters."""
+    stmt = (
+        select(RadarDataORM)
+        .where(RadarDataORM.source_format == SOURCE_ASSET_NATIVE_PREVIEW_FORMAT)
+        .order_by(RadarDataORM.imaging_date.desc().nullslast(), RadarDataORM.id.asc())
+    )
+
+    result = await db.execute(stmt)
+    configured_roots = _configured_gf3_native_roots(native_dirs)
+    records = [
+        record
+        for record in result.scalars().all()
+        if _path_is_under_any(_native_preview_source_from_metadata(record.metadata_json or {}), configured_roots)
+    ]
+    if max_records and max_records > 0:
+        records = records[: int(max_records)]
+    total = len(records)
+    generated = 0
+    skipped = 0
+    failed = 0
+    record_results: list[dict[str, Any]] = []
+
+    for idx, record in enumerate(records):
+        metadata = record.metadata_json or {}
+        source_path = _native_preview_source_from_metadata(metadata)
+        cache_path = DataService.get_radar_raw_cache_path(record.unique_id or record.file_path, record.file_path)
+        if progress_callback:
+            pct = 5 + int((idx / max(total, 1)) * 90)
+            progress_callback(pct, f"Generate GF3 native _geo WebP {idx + 1}/{total}: {record.product_unique_id or record.id}")
+
+        if (
+            not force
+            and (record.preview_cache_status or "NONE") == "READY"
+            and record.preview_cache_path
+            and os.path.exists(record.preview_cache_path)
+        ):
+            skipped += 1
+            record_results.append({"id": record.id, "status": "SKIPPED", "cache_path": record.preview_cache_path})
+            continue
+
+        if not source_path:
+            failed += 1
+            record.preview_cache_status = "FAILED"
+            record.preview_cache_path = None
+            record.preview_cache_error = "default_native_path_missing"
+            record.preview_cache_version = QUICKLOOK_PREVIEW_CACHE_VERSION
+            record.preview_cache_updated_at = _db_now()
+            record_results.append({"id": record.id, "status": "FAILED", "error": record.preview_cache_error})
+            await db.commit()
+            continue
+
+        ok = await asyncio.to_thread(_read_geotiff_quicklook_webp, source_path, cache_path)
+        record.preview_cache_version = QUICKLOOK_PREVIEW_CACHE_VERSION
+        record.preview_cache_updated_at = _db_now()
+        if ok and os.path.exists(cache_path):
+            generated += 1
+            record.preview_cache_status = "READY"
+            record.preview_cache_path = cache_path
+            record.preview_cache_error = None
+            record_results.append({"id": record.id, "status": "READY", "cache_path": cache_path})
+        else:
+            failed += 1
+            record.preview_cache_status = "FAILED"
+            record.preview_cache_path = None
+            record.preview_cache_error = "native_webp_build_failed"
+            record_results.append({"id": record.id, "status": "FAILED", "error": record.preview_cache_error})
+        await db.commit()
+
+    return {
+        "ok": failed == 0,
+        "mode": "gf3_native_webp",
+        "total": total,
+        "generated": generated,
+        "skipped": skipped,
+        "failed": failed,
+        "records": record_results,
+    }
+
+
+async def _upsert_quicklook_source_product_asset(
+    db: AsyncSession,
+    scene_manifest: dict[str, Any],
+    quicklook_manifest: dict[str, Any],
+) -> int | None:
+    native_dir_text = _path_text(scene_manifest.get("native_dir"))
+    if not native_dir_text:
+        return None
+    metadata = scene_manifest.get("metadata") or {}
+    imaging_date = str(metadata.get("imaging_date") or "").strip() or None
+    acquisition_start = _date_to_naive_utc(imaging_date)
+    scene_name = scene_manifest.get("scene_name") or Path(native_dir_text).name
+    now = _db_now()
+    root = await _find_managed_root_for_path(db, native_dir_text)
+    asset_metadata = _json_safe(
+        {
+            "source": "GF3 SARscape native _geo",
+            "native_dir": native_dir_text,
+            "native_manifest": scene_manifest.get("manifest_path"),
+            "native_fingerprint": _scene_native_fingerprint(scene_manifest),
+            "native_preview_manifest": quicklook_manifest.get("manifest_path"),
+            "native_assets": quicklook_manifest.get("assets") or [],
+            "full_raster_materialized": True,
+            "analysis_engine": "gf3_sarscape",
+        }
+    )
+    data = {
+        "asset_uid": _source_asset_uid(f"gf3_native_preview:{native_dir_text}"),
+        "logical_product_uid": scene_name,
+        "satellite_family": "GF3",
+        "satellite": "GF3",
+        "source_format": SOURCE_ASSET_NATIVE_PREVIEW_FORMAT,
+        "product_type": metadata.get("product_type") or "SARSCAPE_NATIVE",
+        "product_level": "L2_NATIVE",
+        "imaging_mode": metadata.get("imaging_mode"),
+        "polarization": metadata.get("polarization"),
+        "absolute_orbit": metadata.get("absolute_orbit") or metadata.get("orbit_circle"),
+        "relative_orbit": metadata.get("relative_orbit"),
+        "orbit_direction": metadata.get("orbit_direction"),
+        "acquisition_start_time_utc": acquisition_start,
+        "acquisition_stop_time_utc": None,
+        "imaging_date": imaging_date,
+        "root_ref_id": root.id if root else None,
+        "root_path": root.path if root else str(Path(native_dir_text).parent),
+        "file_path": native_dir_text,
+        "archive_path": scene_manifest.get("source_archive"),
+        "path_kind": _path_kind(native_dir_text),
+        "file_name": Path(native_dir_text).name,
+        "file_stem": Path(native_dir_text).name,
+        "file_ext": "",
+        "size_bytes": None,
+        "mtime_epoch": None,
+        "checksum_status": "NOT_COMPUTED",
+        "parser_name": "gf3_sarscape_native_preview_manifest",
+        "parser_version": CONVERTER_VERSION,
+        "parse_status": "NATIVE_READY" if quicklook_manifest.get("assets") else "FAILED",
+        "parse_error": "; ".join(str(item.get("error") or item) for item in (quicklook_manifest.get("errors") or [])) or None,
+        "parsed_at": now,
+        "metadata_json": asset_metadata,
+        "is_active": True,
+        "missing_since": None,
+        "updated_at": now,
+    }
+    result = await db.execute(
+        select(SourceProductAssetORM).where(
+            or_(
+                SourceProductAssetORM.asset_uid == data["asset_uid"],
+                SourceProductAssetORM.file_path == native_dir_text,
+            )
+        )
+    )
+    asset = result.scalars().first()
+    if asset is None:
+        asset = SourceProductAssetORM(**data)
+        db.add(asset)
+    else:
+        for key, value in data.items():
+            setattr(asset, key, value)
+    await db.flush()
+    return int(asset.id) if asset.id is not None else None
+
+
+async def _upsert_quicklook_radar_data(
+    db: AsyncSession,
+    scene_manifest: dict[str, Any],
+    quicklook_manifest: dict[str, Any],
+    source_product_ref_id: int | None = None,
+) -> int | None:
+    assets = quicklook_manifest.get("assets") or []
+    default_asset = _select_default_native_asset(assets)
+    if not default_asset:
+        return None
+    metadata = scene_manifest.get("metadata") or {}
+    imaging_date = str(metadata.get("imaging_date") or "").strip() or None
+    acquisition_start = _date_to_naive_utc(imaging_date)
+    scene_name = scene_manifest.get("scene_name") or Path(str(scene_manifest.get("native_dir") or "")).name
+    native_dir = str(scene_manifest.get("native_dir") or "")
+    unique_id = f"gf3_sarscape_native_preview:{scene_name}"
+    default_native_path = str(default_asset.get("path") or "")
+    default_quicklook_path = str(default_asset.get("quicklook") or "")
+    polygon = _polygon_from_native_asset(default_asset)
+    min_lon = min_lat = max_lon = max_lat = None
+    geom = None
+    if polygon:
+        min_lon, min_lat, max_lon, max_lat = _bounds_from_polygon(polygon)
+        center_lon, center_lat = _scene_center_from_polygon(polygon)
+        geom = _geom_from_polygon(polygon)
+    else:
+        center_lon = metadata.get("scene_center_lon")
+        center_lat = metadata.get("scene_center_lat")
+    preview_cache_path = None
+    preview_cache_kind = "deferred"
+    preview_cache_error = "native_webp_not_generated"
+    radar_metadata = _json_safe(
+        {
+            **metadata,
+            "native_dir": native_dir,
+            "native_manifest": scene_manifest.get("manifest_path"),
+            "native_fingerprint": _scene_native_fingerprint(scene_manifest),
+            "native_preview_manifest": quicklook_manifest.get("manifest_path"),
+            "native_assets": assets,
+            "quicklook_assets": [],
+            "default_native_path": default_native_path,
+            "default_quicklook_path": default_quicklook_path,
+            "coverage_source": "native_geo_or_quicklook" if polygon else "scene_name",
+            "preview_cache_kind": preview_cache_kind,
+            "analysis_engine": "gf3_sarscape",
+            "registration_mode": "native_preview",
+            "full_raster_materialized": True,
+        }
+    )
+    data_to_upsert = {
+        "unique_id": unique_id,
+        "satellite": "GF3",
+        "satellite_family": "GF3",
+        "imaging_date": imaging_date,
+        "imaging_mode": metadata.get("imaging_mode"),
+        "polarization": ",".join(
+            pol
+            for pol in POLARIZATION_PRIORITY
+            if any(str(asset.get("polarization") or "").upper() == pol for asset in assets)
+        )
+        or metadata.get("polarization"),
+        "scene_center_lon": center_lon,
+        "scene_center_lat": center_lat,
+        "acquisition_time_utc": acquisition_start.isoformat() if acquisition_start else None,
+        "product_level": "L2_NATIVE",
+        "product_unique_id": metadata.get("product_unique_id") or scene_name,
+        "source_product_token": scene_name,
+        "acquisition_start_time_utc": acquisition_start,
+        "acquisition_stop_time_utc": None,
+        "absolute_orbit": metadata.get("absolute_orbit") or metadata.get("orbit_circle"),
+        "relative_orbit": metadata.get("relative_orbit"),
+        "source_format": SOURCE_ASSET_NATIVE_PREVIEW_FORMAT,
+        "source_product_ref_id": source_product_ref_id,
+        "image_data_format": "ENVI_NATIVE",
+        "geocoded_flag": True,
+        "metadata_json": radar_metadata,
+        "file_path": native_dir,
+        "has_orbit_data": False,
+        "orbit_file_path": None,
+        "is_envi_processed": True,
+        "coverage_polygon": polygon,
+        "geom": geom,
+        "min_lon": min_lon,
+        "min_lat": min_lat,
+        "max_lon": max_lon,
+        "max_lat": max_lat,
+        "preview_cache_status": "NONE",
+        "preview_cache_version": QUICKLOOK_PREVIEW_CACHE_VERSION,
+        "preview_cache_path": preview_cache_path,
+        "preview_cache_updated_at": _db_now(),
+        "preview_cache_error": preview_cache_error,
+    }
+    result = await db.execute(
+        select(RadarDataORM).where(
+            or_(
+                RadarDataORM.unique_id == unique_id,
+                RadarDataORM.file_path == native_dir,
+            )
+        )
+    )
+    radar = result.scalars().first()
+    if (
+        radar is not None
+        and (radar.preview_cache_status or "").upper() == "READY"
+        and radar.preview_cache_path
+        and os.path.exists(radar.preview_cache_path)
+        and str((radar.metadata_json or {}).get("default_native_path") or "") == default_native_path
+    ):
+        data_to_upsert["preview_cache_status"] = radar.preview_cache_status
+        data_to_upsert["preview_cache_version"] = radar.preview_cache_version or QUICKLOOK_PREVIEW_CACHE_VERSION
+        data_to_upsert["preview_cache_path"] = radar.preview_cache_path
+        data_to_upsert["preview_cache_updated_at"] = radar.preview_cache_updated_at
+        data_to_upsert["preview_cache_error"] = radar.preview_cache_error
+    if radar is None:
+        radar = RadarDataORM(**data_to_upsert)
+        db.add(radar)
+    else:
+        for key, value in data_to_upsert.items():
+            setattr(radar, key, value)
+    await db.flush()
+    return int(radar.id) if radar.id is not None else None
 
 
 def _metadata_for_radar(scene_manifest: dict[str, Any], standard_manifest: dict[str, Any]) -> dict[str, Any]:
@@ -635,7 +1260,7 @@ async def _upsert_radar_data(
     if not default_asset:
         return None
 
-    polygon = _polygon_from_tif(Path(_path_text(default_asset.get("path"))))
+    polygon = _polygon_from_raster(Path(_path_text(default_asset.get("path"))))
     min_lon, min_lat, max_lon, max_lat = _bounds_from_polygon(polygon)
     center_lon, center_lat = _scene_center_from_polygon(polygon)
     geom = _geom_from_polygon(polygon)
@@ -851,16 +1476,117 @@ async def standardize_gf3_sarscape_native_roots(
     storage_root: str | None = None,
     force: bool = False,
     register: bool = True,
+    quicklook_only: bool = False,
     progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     """Scan native roots, convert complete assets, and register standard scenes."""
-    inventory = await asyncio.to_thread(
-        scan_gf3_sarscape_native_roots,
-        native_dirs,
-        write_manifest=True,
-    )
+    requested_native_dirs = [str(item) for item in (native_dirs or []) if str(item or "").strip()]
+    if quicklook_only:
+        scan_roots = _discover_gf3_sarscape_scan_roots(native_dirs)
+        inventory = await asyncio.to_thread(
+            scan_gf3_sarscape_native_roots,
+            scan_roots,
+            write_manifest=True,
+        )
+    else:
+        scan_roots = _discover_gf3_sarscape_scan_roots(native_dirs)
+        inventory = await asyncio.to_thread(
+            scan_gf3_sarscape_native_roots,
+            scan_roots,
+            write_manifest=True,
+        )
     scenes = inventory.get("scenes") or []
     ready_scenes = [scene for scene in scenes if scene.get("status") in {"NATIVE_READY", "PARTIAL"}]
+
+    if quicklook_only:
+        registered = 0
+        quicklook_assets = 0
+        failed_scenes = 0
+        skipped_unchanged = 0
+        scene_results: list[dict[str, Any]] = []
+        total = len(ready_scenes)
+        for idx, scene_manifest in enumerate(ready_scenes):
+            if progress_callback:
+                pct = 10 + int((idx / max(total, 1)) * 80)
+                progress_callback(pct, f"Register GF3 native _geo {idx + 1}/{total}: {scene_manifest.get('scene_name')}")
+
+            quicklook_manifest = await asyncio.to_thread(
+                _quicklook_manifest_for_scene,
+                scene_manifest,
+                storage_root,
+            )
+            assets = quicklook_manifest.get("assets") or []
+            quicklook_assets += len(assets)
+            source_asset_id = None
+            radar_id = None
+            skipped_reason = None
+            if register and assets:
+                can_skip, existing_radar_id, skip_reason = await _can_skip_unchanged_quicklook_radar(
+                    db,
+                    scene_manifest=scene_manifest,
+                )
+                if can_skip:
+                    skipped_unchanged += 1
+                    radar_id = existing_radar_id
+                    skipped_reason = skip_reason
+                    if progress_callback:
+                        pct = 10 + int(((idx + 1) / max(total, 1)) * 80)
+                        progress_callback(pct, f"Skip unchanged GF3 native _geo {idx + 1}/{total}: {scene_manifest.get('scene_name')}")
+                else:
+                    skipped_reason = skip_reason
+                    source_asset_id = await _upsert_quicklook_source_product_asset(db, scene_manifest, quicklook_manifest)
+                    radar_id = await _upsert_quicklook_radar_data(
+                        db,
+                        scene_manifest,
+                        quicklook_manifest,
+                        source_product_ref_id=source_asset_id,
+                    )
+                    if radar_id:
+                        registered += 1
+                    await db.commit()
+            if not assets:
+                failed_scenes += 1
+            scene_results.append(
+                {
+                    "scene_name": scene_manifest.get("scene_name"),
+                    "native_status": scene_manifest.get("status"),
+                    "standard_status": quicklook_manifest.get("status"),
+                    "native_preview_manifest": quicklook_manifest.get("manifest_path"),
+                    "source_asset_id": source_asset_id,
+                    "radar_id": radar_id,
+                    "skipped_unchanged": bool(skipped_reason == "unchanged"),
+                    "skip_reason": skipped_reason,
+                    "native_fingerprint": _scene_native_fingerprint(scene_manifest),
+                    "summary": quicklook_manifest.get("summary") or {},
+                    "errors": quicklook_manifest.get("errors") or [],
+                }
+            )
+
+        return {
+            "ok": failed_scenes == 0,
+            "mode": "native_preview",
+            "inventory": {
+                key: value
+                for key, value in inventory.items()
+                if key != "scenes"
+            },
+            "requested_native_dirs": requested_native_dirs,
+            "scan_roots": scan_roots,
+            "scene_count": len(scenes),
+            "ready_scene_count": len(ready_scenes),
+            "converted_scenes": 0,
+            "partial_scenes": 0,
+            "failed_scenes": failed_scenes,
+            "converted_assets": 0,
+            "skipped_assets": skipped_unchanged,
+            "skipped_unchanged": skipped_unchanged,
+            "failed_assets": failed_scenes,
+            "quicklook_assets": quicklook_assets,
+            "native_assets": quicklook_assets,
+            "registered": registered,
+            "analysis_ready": 0,
+            "scenes": scene_results,
+        }
 
     converted_scenes = 0
     partial_scenes = 0
@@ -936,6 +1662,8 @@ async def standardize_gf3_sarscape_native_roots(
             for key, value in inventory.items()
             if key != "scenes"
         },
+        "requested_native_dirs": requested_native_dirs,
+        "scan_roots": scan_roots,
         "scene_count": len(scenes),
         "ready_scene_count": len(ready_scenes),
         "converted_scenes": converted_scenes,

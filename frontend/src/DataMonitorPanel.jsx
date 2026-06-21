@@ -1,12 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import './App.css';
 import { useI18n } from './i18n/I18nContext';
-import { getAssetInventoryStatus, scanAssetInventory, unpackSentinel1Batch } from './api/assets';
+import { auditSourceArchiveIntegrity, scanAssetInventory } from './api/assets';
 
 const DEFAULT_MONITOR_CONFIG = {
   radar_dirs: [],
   orbit_dir: '',
+  orbit_source_dirs: [],
+  orbit_production_txt_pool: '',
   dinsar_dirs: [],
+  dinsar_product_dir: '',
+  sbas_product_root: '',
   gf3_archive_source_dirs: [],
   gf3_source_dirs: [],
   gf3_legacy_gdal_enabled: false,
@@ -22,49 +26,124 @@ const DEFAULT_MONITOR_CONFIG = {
   s1_source_dirs: [],
   s1_storage_dirs: [],
   s1_orbit_dirs: [],
-};
-
-const DEFAULT_UNPACK_CONFIG = {
-  source_dirs: [],
-  insar_storage_dirs: [],
-  min_disk_space_gb: 50,
-  max_files_per_run: 0,
-  max_runtime_minutes: 0,
-  delete_archive: true,
-  tmp_suffix: '.unpack_tmp',
-  archive_exts: [],
+  task_pool_root: '',
+  dinsar_task_pool_root: '',
+  sbas_task_pool_root: '',
+  gf3_task_pool_root: '',
+  data_distribution_root: '',
+  storage_roots: [],
 };
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
-const formatGf3Date = (value) => {
-  const text = String(value || '').replace(/\D/g, '');
-  if (text.length !== 8) {
-    return value || '';
-  }
-  return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
+const formatList = (list) => (Array.isArray(list) && list.length ? list.join('; ') : '未配置');
+const formatGb = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(1)} GB` : '未知';
+};
+const storageStatusText = (status) => ({
+  ok: '正常',
+  warning: '偏低',
+  critical: '严重不足',
+  partial: '路径缺失',
+  missing: '路径不存在',
+  blocked: '禁止 UNC',
+  error: '探测失败',
+  empty: '未配置',
+}[status] || status || '未知');
+const storageStatusColor = (status) => ({
+  ok: '#15803d',
+  warning: '#b45309',
+  critical: '#b91c1c',
+  partial: '#b45309',
+  missing: '#64748b',
+  blocked: '#b91c1c',
+  error: '#b91c1c',
+  empty: '#64748b',
+}[status] || '#475569');
+const normalizeComparePath = (value) => String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+const uniquePaths = (items) => {
+  const seen = new Set();
+  return toArray(items).filter((item) => {
+    const text = String(item || '').trim();
+    if (!text) {
+      return false;
+    }
+    const key = normalizeComparePath(text);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+};
+const SCAN_TASK_TYPES = new Set([
+  'SCAN_ASSET_INVENTORY',
+  'AUDIT_SOURCE_ARCHIVE_INTEGRITY',
+  'SCAN_DATA',
+  'SCAN_DINSAR',
+  'GF3_SARSCAPE_SYNC',
+  'GF3_QUICKLOOK_WEBP',
+]);
+
+const TASK_TYPE_LABELS = {
+  SCAN_ASSET_INVENTORY: 'LT/S1 资产索引',
+  AUDIT_SOURCE_ARCHIVE_INTEGRITY: '压缩包完整性审计',
+  SCAN_DATA: '源数据/精轨扫描',
+  SCAN_DINSAR: 'D-InSAR 结果扫描',
+  GF3_SARSCAPE_SYNC: 'GF3 _geo 登记',
+  GF3_QUICKLOOK_WEBP: 'GF3 WebP 生成',
 };
 
-const createUnpackRunOptions = (config = DEFAULT_UNPACK_CONFIG) => ({
-  max_files_per_run: String(config?.max_files_per_run ?? 0),
-  max_runtime_minutes: String(config?.max_runtime_minutes ?? 0),
-});
+const mergeTasks = (...groups) => {
+  const map = new Map();
+  groups.flatMap((group) => toArray(group)).forEach((task) => {
+    if (task?.task_id && !map.has(task.task_id)) {
+      map.set(task.task_id, task);
+    }
+  });
+  return Array.from(map.values()).sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+};
 
-const parseUnpackRunValue = (rawValue, label) => {
-  const value = String(rawValue ?? '').trim();
-  if (!value) {
+const clampProgress = (value) => {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
     return 0;
   }
-
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new Error(`${label}必须是大于等于 0 的整数`);
-  }
-  return parsed;
+  return Math.max(0, Math.min(100, Math.round(number)));
 };
 
-const formatList = (list) => (Array.isArray(list) && list.length ? list.join('; ') : '未配置');
-const normalizeComparePath = (value) => String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+const statusLabel = (status) => ({
+  PENDING: '等待中',
+  RUNNING: '运行中',
+  COMPLETED: '已完成',
+  FAILED: '失败',
+  CANCELLED: '已取消',
+}[String(status || '').toUpperCase()] || status || '未知');
+
+const statusColor = (status) => ({
+  PENDING: '#64748b',
+  RUNNING: '#2563eb',
+  COMPLETED: '#15803d',
+  FAILED: '#b91c1c',
+  CANCELLED: '#92400e',
+}[String(status || '').toUpperCase()] || '#475569');
+
+const formatTaskTime = (value) => {
+  if (!value) {
+    return '--:--:--';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value).slice(11, 19) || '--:--:--';
+  }
+  return date.toLocaleTimeString('zh-CN', { hour12: false });
+};
+
+const taskTitle = (task) => {
+  const type = String(task?.task_type || '');
+  return TASK_TYPE_LABELS[type] || task?.task_name || type || '任务';
+};
 
 const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled = true }) => {
   const { t } = useI18n();
@@ -72,26 +151,16 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const [configLoaded, setConfigLoaded] = useState(false);
   const [logs, setLogs] = useState([]);
   const [activeTasks, setActiveTasks] = useState([]);
-  const [unpackConfig, setUnpackConfig] = useState(DEFAULT_UNPACK_CONFIG);
-  const [unpackLoading, setUnpackLoading] = useState(false);
-  const [unpackMessage, setUnpackMessage] = useState('');
-  const [showUnpackDialog, setShowUnpackDialog] = useState(false);
-  const [unpackRunOptions, setUnpackRunOptions] = useState(() => createUnpackRunOptions());
-  const [unpackDialogError, setUnpackDialogError] = useState('');
-  const [unpackTaskId, setUnpackTaskId] = useState('');
-  const [unpackTaskTerminal, setUnpackTaskTerminal] = useState(false);
-  const [s1Loading, setS1Loading] = useState(false);
+  const [recentScanTasks, setRecentScanTasks] = useState([]);
+  const [selectedTaskId, setSelectedTaskId] = useState('');
+  const [selectedTaskLogs, setSelectedTaskLogs] = useState([]);
+  const [clearScanHistoryLoading, setClearScanHistoryLoading] = useState(false);
+  const [clearScanHistoryMessage, setClearScanHistoryMessage] = useState('');
   const [s1ScanLoading, setS1ScanLoading] = useState(false);
+  const [archiveAuditLoading, setArchiveAuditLoading] = useState(false);
   const [s1Message, setS1Message] = useState('');
-  const [gf3UnpackLoading, setGf3UnpackLoading] = useState(false);
-  const [gf3ProcessLoading, setGf3ProcessLoading] = useState(false);
   const [gf3SarscapeProduceLoading, setGf3SarscapeProduceLoading] = useState(false);
-  const [gf3SarscapeSyncLoading, setGf3SarscapeSyncLoading] = useState(false);
-  const [gf3SarscapeCleanLoading, setGf3SarscapeCleanLoading] = useState(false);
-  const [gf3ScanLoading, setGf3ScanLoading] = useState(false);
-  const [gf3DateLoading, setGf3DateLoading] = useState(false);
-  const [gf3SarscapeDates, setGf3SarscapeDates] = useState([]);
-  const [gf3SelectedDate, setGf3SelectedDate] = useState('');
+  const [gf3QuicklookWebpLoading, setGf3QuicklookWebpLoading] = useState(false);
   const [gf3Message, setGf3Message] = useState('');
   const logEndRef = useRef(null);
 
@@ -105,12 +174,10 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
 
   const displayLogs = toArray(logs);
   const displayActiveTasks = toArray(activeTasks);
-  const unpackActiveTask = displayActiveTasks.find((task) =>
-    task.task_id === unpackTaskId || task.task_type === 'UNPACK_ARCHIVES'
-  );
-  const s1ActiveTask = displayActiveTasks.find((task) => task.task_type === 'UNPACK_SENTINEL1');
+  const sourceInventoryActiveTask = displayActiveTasks.find((task) => task.task_type === 'SCAN_ASSET_INVENTORY');
+  const archiveAuditActiveTask = displayActiveTasks.find((task) => task.task_type === 'AUDIT_SOURCE_ARCHIVE_INTEGRITY');
   const gf3ActiveTask = displayActiveTasks.find((task) =>
-    ['GF3_UNPACK', 'GF3_BATCH_PROCESS', 'GF3_SARSCAPE_PRODUCE', 'GF3_SARSCAPE_SYNC', 'GF3_SARSCAPE_CLEAN'].includes(task.task_type)
+    task.task_type === 'GF3_SARSCAPE_SYNC' || task.task_type === 'GF3_QUICKLOOK_WEBP'
   );
 
   useEffect(() => {
@@ -137,10 +204,15 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
           ...DEFAULT_MONITOR_CONFIG,
           ...data,
           radar_dirs: toArray(data?.radar_dirs),
+          orbit_source_dirs: toArray(data?.orbit_source_dirs),
+          orbit_production_txt_pool: data?.orbit_production_txt_pool || '',
           dinsar_dirs: toArray(data?.dinsar_dirs),
+          dinsar_product_dir: data?.dinsar_product_dir || '',
+          sbas_product_root: data?.sbas_product_root || '',
           s1_source_dirs: toArray(data?.s1_source_dirs),
           s1_storage_dirs: toArray(data?.s1_storage_dirs),
           s1_orbit_dirs: toArray(data?.s1_orbit_dirs),
+          storage_roots: toArray(data?.storage_roots),
           gf3_archive_source_dirs: toArray(data?.gf3_archive_source_dirs),
           gf3_source_dirs: toArray(data?.gf3_source_dirs),
           gf3_sarscape_native_dirs: toArray(data?.gf3_sarscape_native_dirs),
@@ -163,64 +235,24 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
 
   useEffect(() => {
     if (!enabled) {
-      setUnpackConfig(DEFAULT_UNPACK_CONFIG);
-      setShowUnpackDialog(false);
-      setUnpackRunOptions(createUnpackRunOptions());
-      setUnpackDialogError('');
-      return;
-    }
-
-    let canceled = false;
-    fetch(`${apiEndpoint}/unpack/config`, { credentials: 'include' })
-      .then(async (res) => {
-        const data = await parseJsonSafe(res, {});
-        if (!res.ok) {
-          throw new Error(data?.detail || `HTTP ${res.status}`);
-        }
-        return data;
-      })
-      .then((data) => {
-        if (canceled) {
-          return;
-        }
-        setUnpackConfig({
-          ...DEFAULT_UNPACK_CONFIG,
-          ...data,
-          source_dirs: toArray(data?.source_dirs),
-          insar_storage_dirs: toArray(data?.insar_storage_dirs),
-        });
-      })
-      .catch((err) => {
-        if (canceled) {
-          return;
-        }
-        console.error('Failed to fetch unpack config:', err);
-      });
-
-    return () => {
-      canceled = true;
-    };
-  }, [apiEndpoint, enabled]);
-
-  useEffect(() => {
-    if (!enabled) {
       setLogs([]);
       setActiveTasks([]);
-      setUnpackTaskId('');
-      setUnpackTaskTerminal(false);
       return;
     }
 
     let canceled = false;
     const fetchLogsAndTasks = async () => {
       try {
-        const [logsRes, tasksRes] = await Promise.all([
+        const scanTaskTypes = Array.from(SCAN_TASK_TYPES).join(',');
+        const [logsRes, tasksRes, recentRes] = await Promise.all([
           fetch(`${apiEndpoint}/monitor/logs`, { credentials: 'include' }),
           fetch(`${apiEndpoint}/tasks/active`, { credentials: 'include' }),
+          fetch(`${apiEndpoint}/tasks/recent?task_types=${encodeURIComponent(scanTaskTypes)}&limit=8`, { credentials: 'include' }),
         ]);
-        const [logsData, tasksData] = await Promise.all([
+        const [logsData, tasksData, recentData] = await Promise.all([
           parseJsonSafe(logsRes, {}),
           parseJsonSafe(tasksRes, []),
+          parseJsonSafe(recentRes, []),
         ]);
 
         if (canceled) {
@@ -228,6 +260,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
         }
         setLogs(logsRes.ok ? toArray(logsData?.logs) : []);
         setActiveTasks(tasksRes.ok ? toArray(tasksData) : []);
+        setRecentScanTasks(recentRes.ok ? toArray(recentData) : []);
       } catch (err) {
         if (canceled) {
           return;
@@ -245,183 +278,123 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
     };
   }, [apiEndpoint, enabled]);
 
+  const displayedScanTasks = mergeTasks(
+    displayActiveTasks.filter((task) => SCAN_TASK_TYPES.has(task.task_type)),
+    recentScanTasks
+  ).slice(0, 8);
+
   useEffect(() => {
     if (!enabled) {
-      setUnpackTaskId('');
-      setUnpackTaskTerminal(false);
+      setSelectedTaskId('');
+      setSelectedTaskLogs([]);
       return;
     }
+    if (displayedScanTasks.length && !displayedScanTasks.some((task) => task.task_id === selectedTaskId)) {
+      setSelectedTaskId(displayedScanTasks[0].task_id);
+    }
+  }, [displayedScanTasks, enabled, selectedTaskId]);
 
-    if (unpackActiveTask) {
-      if (!unpackTaskId) {
-        setUnpackTaskId(unpackActiveTask.task_id);
-      }
-      setUnpackTaskTerminal(false);
-      setUnpackMessage(
-        `运行中 (${unpackActiveTask.progress || 0}%): ${unpackActiveTask.message || '正在解包 LT-1 归档...'}`
-      );
+  useEffect(() => {
+    if (!enabled || !selectedTaskId) {
+      setSelectedTaskLogs([]);
       return;
     }
-
-    if (!unpackTaskId || unpackTaskTerminal) {
-      return;
-    }
-
     let canceled = false;
-    fetch(`${apiEndpoint}/tasks/${unpackTaskId}`, { credentials: 'include' })
-      .then(async (res) => {
-        const data = await parseJsonSafe(res, null);
-        if (!res.ok) {
-          throw new Error(data?.detail || `HTTP ${res.status}`);
+    const fetchTaskLogs = async () => {
+      try {
+        const res = await fetch(`${apiEndpoint}/tasks/${selectedTaskId}/logs?limit=120`, { credentials: 'include' });
+        const data = await parseJsonSafe(res, {});
+        if (!canceled) {
+          setSelectedTaskLogs(res.ok ? toArray(data?.logs) : []);
         }
-        return data;
-      })
-      .then((task) => {
-        if (canceled || !task) {
-          return;
+      } catch (err) {
+        if (!canceled) {
+          console.error('Failed to fetch task logs:', err);
+          setSelectedTaskLogs([]);
         }
-        if (task.status === 'COMPLETED') {
-          setUnpackMessage(task.message || 'LT-1 解包已完成。');
-          setUnpackTaskTerminal(true);
-        } else if (task.status === 'FAILED') {
-          setUnpackMessage(`失败：${task.message || 'LT-1 解包任务失败'}`);
-          setUnpackTaskTerminal(true);
-        }
-      })
-      .catch((err) => {
-        if (canceled) {
-          return;
-        }
-        console.error('Failed to fetch unpack task status:', err);
-      });
-
+      }
+    };
+    fetchTaskLogs();
+    const intervalId = setInterval(fetchTaskLogs, 2000);
     return () => {
       canceled = true;
+      clearInterval(intervalId);
     };
-  }, [apiEndpoint, enabled, unpackActiveTask, unpackTaskId, unpackTaskTerminal]);
+  }, [apiEndpoint, enabled, selectedTaskId]);
 
   useEffect(() => {
     if (logEndRef.current) {
       logEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [logs]);
+  }, [logs, selectedTaskLogs]);
 
-  const hasRadarDirs = config.radar_dirs.length > 0;
-  const hasOrbitDir = typeof config.orbit_dir === 'string' && config.orbit_dir.trim() !== '';
-  const hasS1SourceDirs = config.s1_source_dirs.length > 0;
-  const hasS1StorageDirs = config.s1_storage_dirs.length > 0;
-  const hasS1OrbitDirs = config.s1_orbit_dirs.length > 0;
-  const hasGf3ArchiveSourceDirs = config.gf3_archive_source_dirs.length > 0;
-  const hasGf3SourceDirs = config.gf3_source_dirs.length > 0;
+  const selectedTask = displayedScanTasks.find((task) => task.task_id === selectedTaskId) || displayedScanTasks[0] || null;
+
+  const sourceInventoryDirs = uniquePaths([...config.s1_source_dirs, ...config.s1_storage_dirs]);
+  const orbitInventoryDirs = uniquePaths([
+    ...config.orbit_source_dirs,
+    ...config.s1_orbit_dirs,
+    config.orbit_dir,
+  ]);
+  const hasSourceProductDirs = sourceInventoryDirs.length > 0;
+  const hasOrbitAssetDirs = orbitInventoryDirs.length > 0;
   const hasGf3SarscapeNativeDirs = config.gf3_sarscape_native_dirs.length > 0;
   const hasGf3StorageDirs = config.gf3_storage_dirs.length > 0;
-  const gf3LegacyGdalEnabled = Boolean(config.gf3_legacy_gdal_enabled);
-  const hasGf3SarscapeWrapper = typeof config.gf3_sarscape_wrapper_exe === 'string' && config.gf3_sarscape_wrapper_exe.trim() !== '';
-  const hasGf3SarscapeDem = typeof config.gf3_sarscape_dem_path === 'string' && config.gf3_sarscape_dem_path.trim() !== '';
 
-  const canRunRadar = !readOnly && configLoaded && hasRadarDirs;
-  const canRunOrbit = !readOnly && configLoaded && hasOrbitDir;
-  const canRunS1 = !readOnly && configLoaded && (hasS1SourceDirs || hasS1StorageDirs || hasS1OrbitDirs);
-  const canRunS1Scan = !readOnly && configLoaded && hasS1SourceDirs;
-  const canRunS1OrbitScan = !readOnly && configLoaded && hasS1OrbitDirs;
-  const canRunGf3Scan = !readOnly && configLoaded && hasGf3StorageDirs;
-  const canRunGf3Unpack = !readOnly && configLoaded && gf3LegacyGdalEnabled && hasGf3ArchiveSourceDirs && hasGf3SourceDirs;
-  const canRunGf3Process = !readOnly && configLoaded && gf3LegacyGdalEnabled && hasGf3SourceDirs;
-  const canRunGf3SarscapeProduce = !readOnly && configLoaded && hasGf3ArchiveSourceDirs && hasGf3SarscapeNativeDirs && hasGf3StorageDirs && hasGf3SarscapeWrapper && hasGf3SarscapeDem;
-  const canRunGf3SarscapeSync = !readOnly && configLoaded && hasGf3SarscapeNativeDirs && hasGf3StorageDirs;
-  const canRunGf3SarscapeClean = !readOnly && configLoaded && hasGf3SarscapeNativeDirs && hasGf3StorageDirs;
-  const canOpenUnpackDialog = !readOnly && unpackConfig.source_dirs.length > 0;
+  const canRunSourceProductScan = !readOnly && configLoaded && hasSourceProductDirs;
+  const canRunOrbitAssetScan = !readOnly && configLoaded && hasOrbitAssetDirs;
+  const canRunGf3SarscapeProduce = !readOnly && configLoaded && hasGf3SarscapeNativeDirs && hasGf3StorageDirs;
 
-  useEffect(() => {
-    if (!enabled || !configLoaded || !hasGf3ArchiveSourceDirs) {
-      setGf3SarscapeDates([]);
-      setGf3SelectedDate('');
-      return;
-    }
-
-    let canceled = false;
-    const fetchGf3Dates = async () => {
-      setGf3DateLoading(true);
-      try {
-        const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-dates`, { credentials: 'include' });
-        const data = await parseJsonSafe(res, {});
-        if (canceled) {
-          return;
-        }
-        if (!res.ok) {
-          throw new Error(data?.detail || `HTTP ${res.status}`);
-        }
-        const nextDates = toArray(data?.dates);
-        setGf3SarscapeDates(nextDates);
-        setGf3SelectedDate((prev) => (
-          prev && nextDates.some((item) => String(item?.date || '') === prev) ? prev : ''
-        ));
-      } catch (err) {
-        if (!canceled) {
-          console.error('Failed to fetch GF3 SARscape dates:', err);
-          setGf3SarscapeDates([]);
-        }
-      } finally {
-        if (!canceled) {
-          setGf3DateLoading(false);
-        }
-      }
-    };
-
-    fetchGf3Dates();
-
-    return () => {
-      canceled = true;
-    };
-  }, [apiEndpoint, enabled, configLoaded, hasGf3ArchiveSourceDirs]);
-
-  const handleS1Run = async () => {
+  const handleClearScanTaskHistory = async () => {
     if (readOnly) {
-      setS1Message('当前账户为只读模式，无法触发 Sentinel-1 任务。');
+      setClearScanHistoryMessage('当前账户为只读模式，无法清空扫描日志。');
       return;
     }
-    setS1Loading(true);
-    setS1Message('Sentinel-1 任务启动中...');
+    const hasRunningScan = displayedScanTasks.some((task) => ['PENDING', 'RUNNING'].includes(String(task.status || '').toUpperCase()));
+    const confirmText = hasRunningScan
+      ? '将清空已结束扫描任务的历史和日志，正在运行的任务会保留。确认继续？'
+      : '将清空扫描任务历史和日志。确认继续？';
+    if (!window.confirm(confirmText)) {
+      return;
+    }
+    setClearScanHistoryLoading(true);
+    setClearScanHistoryMessage('正在清空扫描任务历史...');
     try {
-      const res = await unpackSentinel1Batch({
-        scan_before_unpack: true,
-        overwrite: false,
+      const res = await fetch(`${apiEndpoint}/monitor/scan-task-history`, {
+        method: 'DELETE',
+        credentials: 'include',
       });
-      setS1Message(res.message || 'Sentinel-1 任务已启动');
-      if (onTaskStart) {
-        onTaskStart(res.task_id, 'Sentinel-1 任务已启动。', {
-          nonBlocking: true,
-          taskType: 'UNPACK_SENTINEL1',
-        });
+      const data = await parseJsonSafe(res, {});
+      if (!res.ok) {
+        throw new Error(data?.detail || `HTTP ${res.status}`);
       }
+      setRecentScanTasks([]);
+      setSelectedTaskId('');
+      setSelectedTaskLogs([]);
+      setLogs([]);
+      setClearScanHistoryMessage(`已清空 ${data.deleted_task_count || 0} 个扫描任务、${data.deleted_log_count || 0} 条日志。`);
     } catch (err) {
-      setS1Message(`失败：${err?.response?.data?.detail || err.message || '未知错误'}`);
+      setClearScanHistoryMessage(`清空失败：${err?.message || '未知错误'}`);
     } finally {
-      setS1Loading(false);
+      setClearScanHistoryLoading(false);
     }
   };
 
-  const handleS1Scan = async () => {
+  const handleAssetInventoryScan = async (scanPayload, label) => {
     if (readOnly) {
-      setS1Message('当前账户为只读模式，无法触发 Sentinel-1 扫描。');
+      setS1Message('当前账户为只读模式，无法触发资产扫描。');
       return;
     }
     setS1ScanLoading(true);
-    setS1Message('Sentinel-1 源数据扫描启动中...');
+    setS1Message(`${label}启动中...`);
     try {
-      const inventoryStatus = await getAssetInventoryStatus();
-      const sourcePathSet = new Set(config.s1_source_dirs.map(normalizeComparePath));
-      const rootIds = (inventoryStatus?.states || [])
-        .filter((item) => item?.inventory_type === 'source_product' && sourcePathSet.has(normalizeComparePath(item?.root_path)))
-        .map((item) => item.root_ref_id)
-        .filter((value, index, array) => value && array.indexOf(value) === index);
       const res = await scanAssetInventory({
-        inventory_types: ['source_product'],
-        root_ids: rootIds,
+        root_ids: [],
         bind_orbits: true,
+        ...scanPayload,
       });
-      setS1Message(res.message || 'Sentinel-1 源数据扫描任务已启动');
-      onTaskStart?.(res.task_id, 'Sentinel-1 源数据扫描任务已启动。', {
+      setS1Message(res.message || `${label}任务已启动`);
+      onTaskStart?.(res.task_id, `${label}任务已启动`, {
         nonBlocking: true,
         taskType: 'SCAN_ASSET_INVENTORY',
       });
@@ -432,110 +405,48 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
     }
   };
 
-  const handleS1OrbitScan = async () => {
+  const handleArchiveIntegrityAudit = async () => {
     if (readOnly) {
-      setS1Message('当前账户为只读模式，无法触发 Sentinel-1 精轨扫描。');
+      setS1Message('当前账户为只读模式，无法触发压缩包完整性审计。');
       return;
     }
-    setS1ScanLoading(true);
-    setS1Message('Sentinel-1 精轨扫描启动中...');
+    setArchiveAuditLoading(true);
+    setS1Message('压缩包完整性审计启动中...');
     try {
-      const inventoryStatus = await getAssetInventoryStatus();
-      const orbitPathSet = new Set(config.s1_orbit_dirs.map(normalizeComparePath));
-      const rootIds = (inventoryStatus?.states || [])
-        .filter((item) => item?.inventory_type === 'orbit_asset' && orbitPathSet.has(normalizeComparePath(item?.root_path)))
-        .map((item) => item.root_ref_id)
-        .filter((value, index, array) => value && array.indexOf(value) === index);
-      const res = await scanAssetInventory({
-        inventory_types: ['orbit_asset'],
-        root_ids: rootIds,
-        bind_orbits: true,
+      const res = await auditSourceArchiveIntegrity({
+        families: ['LT1', 'S1'],
+        source_formats: ['LT1_ARCHIVE', 'S1_ZIP'],
+        force: false,
       });
-      setS1Message(res.message || 'Sentinel-1 精轨扫描任务已启动');
-      onTaskStart?.(res.task_id, 'Sentinel-1 精轨扫描任务已启动。', {
+      setS1Message(res.message || '压缩包完整性审计任务已启动');
+      onTaskStart?.(res.task_id, '压缩包完整性审计任务已启动', {
         nonBlocking: true,
-        taskType: 'SCAN_ASSET_INVENTORY',
+        taskType: 'AUDIT_SOURCE_ARCHIVE_INTEGRITY',
       });
     } catch (err) {
       setS1Message(`失败：${err?.response?.data?.detail || err.message || '未知错误'}`);
     } finally {
-      setS1ScanLoading(false);
-    }
-  };
-
-  const handleGf3BatchProcess = async () => {
-    if (readOnly) {
-      setGf3Message('当前账户为只读模式，无法触发 GF3 预处理。');
-      return;
-    }
-    setGf3ProcessLoading(true);
-    setGf3Message('GF3 预处理启动中...');
-    try {
-      const res = await fetch(`${apiEndpoint}/monitor/gf3-process`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-      const data = await parseJsonSafe(res, {});
-      if (res.ok) {
-        setGf3Message(data.message || 'GF3 批量处理任务已启动');
-        if (onTaskStart) {
-          onTaskStart(data.task_id, 'GF3 L1A→L2 批量处理已启动。');
-        }
-      } else {
-        setGf3Message(`失败：${data.detail || '未知错误'}`);
-      }
-    } catch (err) {
-      setGf3Message(`失败：${err.message || '未知错误'}`);
-    } finally {
-      setGf3ProcessLoading(false);
-    }
-  };
-
-  const handleGf3Unpack = async () => {
-    if (readOnly) {
-      setGf3Message('当前账户为只读模式，无法触发 GF3 解包。');
-      return;
-    }
-    setGf3UnpackLoading(true);
-    setGf3Message('GF3 解包启动中...');
-    try {
-      const res = await fetch(`${apiEndpoint}/monitor/gf3-unpack`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      });
-      const data = await parseJsonSafe(res, {});
-      if (res.ok) {
-        setGf3Message(data.message || 'GF3 解包任务已启动');
-        if (onTaskStart) {
-          onTaskStart(data.task_id, 'GF3 解包任务已启动。', {
-            nonBlocking: true,
-            taskType: 'GF3_UNPACK',
-          });
-        }
-      } else {
-        setGf3Message(`失败：${data.detail || '未知错误'}`);
-      }
-    } catch (err) {
-      setGf3Message(`失败：${err.message || '未知错误'}`);
-    } finally {
-      setGf3UnpackLoading(false);
+      setArchiveAuditLoading(false);
     }
   };
 
   const handleGf3SarscapeProduce = async () => {
     if (readOnly) {
-      setGf3Message('当前账户为只读模式，无法触发 GF3 SARscape 生产。');
+      setGf3Message('当前账户为只读模式，无法登记 GF3 _geo 原生结果。');
+      return;
+    }
+    if (!hasGf3SarscapeNativeDirs) {
+      setGf3Message('GF3_SARSCAPE_NATIVE_DIRS 未配置，无法登记 _geo 原生结果。');
       return;
     }
     setGf3SarscapeProduceLoading(true);
-    setGf3Message('GF3 SARscape 生产链路启动中...');
+    setGf3Message('正在按 GF3 日期/场景命名规则登记本机 _geo 原生结果...');
     try {
-      const payload = gf3SelectedDate ? { selected_dates: [gf3SelectedDate] } : {};
-      const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-produce`, {
+      const payload = {
+        quicklook_only: true,
+        register: true,
+      };
+      const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-sync`, {
         method: 'POST',
         credentials: 'include',
         headers: {
@@ -545,11 +456,11 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
       });
       const data = await parseJsonSafe(res, {});
       if (res.ok) {
-        setGf3Message(data.message || 'GF3 SARscape 生产任务已启动');
+        setGf3Message(data.message || 'GF3 _geo 原生结果登记任务已启动');
         if (onTaskStart) {
-          onTaskStart(data.task_id, 'GF3 SARscape 生产链路已启动。', {
+          onTaskStart(data.task_id, 'GF3 _geo 原生结果登记已启动', {
             nonBlocking: true,
-            taskType: 'GF3_SARSCAPE_PRODUCE',
+            taskType: 'GF3_SARSCAPE_SYNC',
           });
         }
       } else {
@@ -562,55 +473,29 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
     }
   };
 
-  const handleRefreshGf3Dates = async () => {
-    if (!hasGf3ArchiveSourceDirs) {
-      setGf3Message('GF3_ARCHIVE_SOURCE_DIRS 未配置。');
-      return;
-    }
-    setGf3DateLoading(true);
-    setGf3Message('正在刷新 GF3 影像日期...');
-    try {
-      const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-dates`, { credentials: 'include' });
-      const data = await parseJsonSafe(res, {});
-      if (!res.ok) {
-        throw new Error(data?.detail || `HTTP ${res.status}`);
-      }
-      const nextDates = toArray(data?.dates);
-      setGf3SarscapeDates(nextDates);
-      setGf3SelectedDate((prev) => (
-        prev && nextDates.some((item) => String(item?.date || '') === prev) ? prev : ''
-      ));
-      setGf3Message(`GF3 影像日期已刷新：${nextDates.length} 个日期。`);
-    } catch (err) {
-      setGf3Message(`失败：${err.message || '未知错误'}`);
-    } finally {
-      setGf3DateLoading(false);
-    }
-  };
-
-  const handleGf3SarscapeSync = async () => {
+  const handleGf3QuicklookWebp = async () => {
     if (readOnly) {
-      setGf3Message('当前账户为只读模式，无法触发 GF3 SARscape 标准化。');
+      setGf3Message('当前账户为只读模式，无法生成 GF3 _geo WebP。');
       return;
     }
-    setGf3SarscapeSyncLoading(true);
-    setGf3Message('GF3 SARscape 原生结果标准化启动中...');
+    setGf3QuicklookWebpLoading(true);
+    setGf3Message('GF3 _geo WebP 生成任务启动中...');
     try {
-      const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-sync`, {
+      const res = await fetch(`${apiEndpoint}/monitor/gf3-quicklook-webp`, {
         method: 'POST',
         credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ force: false }),
       });
       const data = await parseJsonSafe(res, {});
       if (res.ok) {
-        setGf3Message(data.message || 'GF3 SARscape 标准化任务已启动');
+        setGf3Message(data.message || 'GF3 _geo WebP 生成任务已启动');
         if (onTaskStart) {
-          onTaskStart(data.task_id, 'GF3 SARscape 原生结果标准化已启动。', {
+          onTaskStart(data.task_id, 'GF3 _geo WebP 生成任务已启动', {
             nonBlocking: true,
-            taskType: 'GF3_SARSCAPE_SYNC',
+            taskType: 'GF3_QUICKLOOK_WEBP',
           });
         }
       } else {
@@ -619,207 +504,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
     } catch (err) {
       setGf3Message(`失败：${err.message || '未知错误'}`);
     } finally {
-      setGf3SarscapeSyncLoading(false);
-    }
-  };
-
-  const handleGf3SarscapeClean = async () => {
-    if (readOnly) {
-      setGf3Message('当前账户为只读模式，无法触发 GF3 SARscape 清理。');
-      return;
-    }
-    setGf3SarscapeCleanLoading(true);
-    setGf3Message('GF3 SARscape 中间数据清理启动中...');
-    try {
-      const res = await fetch(`${apiEndpoint}/monitor/gf3-sarscape-clean`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ dry_run: false, require_standardized: true }),
-      });
-      const data = await parseJsonSafe(res, {});
-      if (res.ok) {
-        setGf3Message(data.message || 'GF3 SARscape 清理任务已启动');
-        if (onTaskStart) {
-          onTaskStart(data.task_id, 'GF3 SARscape 中间数据清理已启动。', {
-            nonBlocking: true,
-            taskType: 'GF3_SARSCAPE_CLEAN',
-          });
-        }
-      } else {
-        setGf3Message(`失败：${data.detail || '未知错误'}`);
-      }
-    } catch (err) {
-      setGf3Message(`失败：${err.message || '未知错误'}`);
-    } finally {
-      setGf3SarscapeCleanLoading(false);
-    }
-  };
-
-  const handleOpenUnpackDialog = () => {
-    if (readOnly) {
-      setUnpackMessage('当前账户为只读模式，无法触发解包任务。');
-      return;
-    }
-    setUnpackDialogError('');
-    setUnpackRunOptions(createUnpackRunOptions(unpackConfig));
-    setShowUnpackDialog(true);
-  };
-
-  const handleCloseUnpackDialog = () => {
-    if (unpackLoading) {
-      return;
-    }
-    setShowUnpackDialog(false);
-    setUnpackDialogError('');
-  };
-
-  const handleUnpackOptionChange = (field, value) => {
-    setUnpackRunOptions((prev) => ({
-      ...prev,
-      [field]: value,
-    }));
-  };
-
-  const handleUnpackRun = async () => {
-    if (readOnly) {
-      setUnpackMessage('当前账户为只读模式，无法触发解包任务。');
-      return;
-    }
-
-    let payload;
-    try {
-      payload = {
-        max_files_per_run: parseUnpackRunValue(unpackRunOptions.max_files_per_run, '单次解包数量'),
-        max_runtime_minutes: parseUnpackRunValue(unpackRunOptions.max_runtime_minutes, '最长运行时间'),
-      };
-    } catch (err) {
-      const errorText = err instanceof Error ? err.message : '解包参数校验失败';
-      setUnpackDialogError(errorText);
-      setUnpackMessage(`失败：${errorText}`);
-      return;
-    }
-
-    setUnpackDialogError('');
-    setUnpackLoading(true);
-    setUnpackMessage('LT-1 解包任务启动中...');
-    try {
-      const res = await fetch(`${apiEndpoint}/unpack/run`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-      const data = await parseJsonSafe(res, {});
-      if (res.ok) {
-        setShowUnpackDialog(false);
-        setUnpackTaskId(data.task_id || '');
-        setUnpackTaskTerminal(false);
-        setUnpackMessage(data.message || 'LT-1 解包任务已启动');
-        if (onTaskStart) {
-          onTaskStart(data.task_id, 'LT-1 解包任务已启动。', {
-            nonBlocking: true,
-            taskType: 'UNPACK_ARCHIVES',
-          });
-        }
-      } else {
-        const errorText = data.detail || '未知错误';
-        setUnpackDialogError(errorText);
-        setUnpackMessage(`失败：${errorText}`);
-      }
-    } catch (err) {
-      const errorText = err.message || '未知错误';
-      setUnpackDialogError(errorText);
-      setUnpackMessage(`失败：${errorText}`);
-    } finally {
-      setUnpackLoading(false);
-    }
-  };
-
-  const handleRadarScan = async () => {
-    if (readOnly) {
-      setUnpackMessage('当前账户为只读模式，无法触发扫描。');
-      return;
-    }
-    setUnpackMessage('LT-1 扫描启动中...');
-    try {
-      const res = await fetch(`${apiEndpoint}/monitor/run-now?target=radar`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-      const data = await parseJsonSafe(res, {});
-      if (res.ok) {
-        setUnpackMessage(data.message || 'LT-1 扫描任务已启动');
-        if (onTaskStart) {
-          onTaskStart(data.task_id, '已触发 LT-1 手动扫描...');
-        }
-      } else {
-        setUnpackMessage(`失败：${data.detail || '未知错误'}`);
-      }
-    } catch (err) {
-      setUnpackMessage(`失败：${err.message || '未知错误'}`);
-    }
-  };
-
-  const handleOrbitScan = async () => {
-    if (readOnly) {
-      setUnpackMessage('当前账户为只读模式，无法触发扫描。');
-      return;
-    }
-    setUnpackMessage('精轨扫描启动中...');
-    try {
-      const res = await fetch(`${apiEndpoint}/monitor/run-now?target=orbit`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-      const data = await parseJsonSafe(res, {});
-      if (res.ok) {
-        setUnpackMessage(data.message || '精轨扫描任务已启动');
-        if (onTaskStart) {
-          onTaskStart(data.task_id, '已触发精轨手动扫描...');
-        }
-      } else {
-        setUnpackMessage(`失败：${data.detail || '未知错误'}`);
-      }
-    } catch (err) {
-      setUnpackMessage(`失败：${err.message || '未知错误'}`);
-    }
-  };
-
-  const handleGf3Scan = async () => {
-    if (readOnly) {
-      setGf3Message('当前账户为只读模式，无法触发扫描。');
-      return;
-    }
-    setGf3ScanLoading(true);
-    setGf3Message('GF3 资产扫描启动中...');
-    try {
-      const inventoryStatus = await getAssetInventoryStatus();
-      const gf3SourcePathSet = new Set(config.gf3_archive_source_dirs.map(normalizeComparePath));
-      const rootIds = (inventoryStatus?.states || [])
-        .filter((item) => item?.inventory_type === 'source_product' && gf3SourcePathSet.has(normalizeComparePath(item?.root_path)))
-        .map((item) => item.root_ref_id)
-        .filter((value, index, array) => value && array.indexOf(value) === index);
-      const data = await scanAssetInventory({
-        inventory_types: ['source_product'],
-        root_ids: rootIds,
-        bind_orbits: false,
-      });
-      setGf3Message(data.message || 'GF3 资产扫描任务已启动');
-      if (onTaskStart) {
-        onTaskStart(data.task_id, '已触发 GF3 资产扫描...', {
-          nonBlocking: true,
-          taskType: 'SCAN_ASSET_INVENTORY',
-        });
-      }
-    } catch (err) {
-      setGf3Message(`失败：${err?.response?.data?.detail || err.message || '未知错误'}`);
-    } finally {
-      setGf3ScanLoading(false);
+      setGf3QuicklookWebpLoading(false);
     }
   };
 
@@ -880,203 +565,227 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
         <div style={sectionStyle}>
           <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>路径摘要</div>
           <div style={gridStyle}>
-            <div style={rowStyle}><span style={labelStyle}>LT-1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.radar_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>LT-1 精轨</span><span style={{ wordBreak: 'break-all' }}>{config.orbit_dir || '未配置'}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>S1 源数据</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_source_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>S1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_storage_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>S1 精轨</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_orbit_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>GF3 压缩包</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_archive_source_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>GF3 legacy L1A</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_source_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>GF3 原生</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_sarscape_native_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>GF3 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>GF3 runtime</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_runtime_dir || '未配置'}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>D-InSAR 结果</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.dinsar_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>精轨源资产</span><span style={{ wordBreak: 'break-all' }}>{formatList(orbitInventoryDirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>LT-1 生产 TXT 池</span><span style={{ wordBreak: 'break-all' }}>{config.orbit_production_txt_pool || '未配置'}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>LT/S1 压缩包源池</span><span style={{ wordBreak: 'break-all' }}>{formatList(sourceInventoryDirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>GF3 独立 _geo 池</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_sarscape_native_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>GF3 标准/索引池</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>GF3 Task_Pool</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_task_pool_root || '未配置'}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>GF3 运行池</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_runtime_dir || '未配置'}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>数据分发根</span><span style={{ wordBreak: 'break-all' }}>{config.data_distribution_root || '未配置'}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>D-InSAR 结果</span><span style={{ wordBreak: 'break-all' }}>{config.dinsar_product_dir || '未配置'}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>SBAS 结果</span><span style={{ wordBreak: 'break-all' }}>{config.sbas_product_root || '未配置'}</span></div>
           </div>
         </div>
 
         <div style={sectionStyle}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>LT-1 归档解包 / 扫描</div>
-          <div style={{ ...gridStyle, marginBottom: '8px' }}>
-            <div style={rowStyle}><span style={labelStyle}>来源目录</span><span style={{ wordBreak: 'break-all' }}>{formatList(unpackConfig.source_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>LT-1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(unpackConfig.insar_storage_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>单次上限</span><span>{unpackConfig.max_files_per_run > 0 ? `${unpackConfig.max_files_per_run} 个压缩包` : '不限'}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>最长运行</span><span>{unpackConfig.max_runtime_minutes > 0 ? `${unpackConfig.max_runtime_minutes} 分钟` : '不限'}</span></div>
-          </div>
-          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-            <button
-              onClick={handleOpenUnpackDialog}
-              disabled={unpackLoading || !canOpenUnpackDialog}
-              style={actionBtnStyle(unpackLoading, !canOpenUnpackDialog)}
-            >
-              {unpackLoading ? '运行中...' : (readOnly ? '只读模式' : 'LT-1 解包')}
-            </button>
-            <button
-              onClick={handleRadarScan}
-              disabled={readOnly || !canRunRadar}
-              style={actionBtnStyle(false, !canRunRadar)}
-            >
-              {readOnly ? '只读模式' : '扫描 LT-1'}
-            </button>
-            <button
-              onClick={handleOrbitScan}
-              disabled={readOnly || !canRunOrbit}
-              style={actionBtnStyle(false, !canRunOrbit)}
-            >
-              {readOnly ? '只读模式' : '扫描精轨'}
-            </button>
-            <div
-              style={{
-                fontSize: '0.85em',
-                color: unpackMessage.includes('失败') ? 'var(--color-danger)' : 'var(--color-text-muted)',
-                alignSelf: 'center',
-              }}
-            >
-              {unpackMessage}
-            </div>
-          </div>
-        </div>
-
-        <div style={sectionStyle}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>Sentinel-1 解包 / 扫描</div>
-          <div style={{ ...gridStyle, marginBottom: '8px' }}>
-            <div style={rowStyle}><span style={labelStyle}>S1 源数据</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_source_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>S1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_storage_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>S1 精轨</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.s1_orbit_dirs)}</span></div>
-          </div>
-          <div style={{ display: 'flex', gap: '10px' }}>
-            <button
-              onClick={handleS1Run}
-              disabled={s1Loading || s1ScanLoading || !canRunS1}
-              style={actionBtnStyle(s1Loading, !canRunS1)}
-            >
-              {s1Loading ? '运行中...' : (readOnly ? '只读模式' : 'Sentinel-1 解包')}
-            </button>
-            <button
-              onClick={handleS1Scan}
-              disabled={s1ScanLoading || s1Loading || !canRunS1Scan}
-              style={actionBtnStyle(s1ScanLoading, !canRunS1Scan)}
-            >
-              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描 S1 源数据')}
-            </button>
-            <button
-              onClick={handleS1OrbitScan}
-              disabled={s1ScanLoading || s1Loading || !canRunS1OrbitScan}
-              style={actionBtnStyle(s1ScanLoading, !canRunS1OrbitScan)}
-            >
-              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描 S1 精轨')}
-            </button>
-            <div
-              style={{
-                fontSize: '0.85em',
-                color: s1Message.includes('失败') ? 'var(--color-danger)' : 'var(--color-text-muted)',
-                alignSelf: 'center',
-              }}
-            >
-              {s1ActiveTask ? (s1ActiveTask.message || 'Sentinel-1 任务运行中...') : s1Message}
-            </div>
-          </div>
-        </div>
-
-        <div style={sectionStyle}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>GF3 SARscape 生产</div>
-          <div style={{ ...gridStyle, marginBottom: '8px' }}>
-            <div style={rowStyle}><span style={labelStyle}>压缩包来源</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_archive_source_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>SARscape 原生</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_sarscape_native_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>L2 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>Runtime</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_runtime_dir || '未配置'}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>Wrapper</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_wrapper_exe || '未配置'}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>SARscape DEM</span><span style={{ wordBreak: 'break-all' }}>{config.gf3_sarscape_dem_path || '未配置'}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>极化</span><span>{config.gf3_sarscape_polarizations || 'HH,HV'}</span></div>
-            <div style={rowStyle}><span style={labelStyle}>Legacy GDAL</span><span>{gf3LegacyGdalEnabled ? '启用' : '关闭'}</span></div>
-            <div style={rowStyle}>
-              <span style={labelStyle}>影像日期</span>
-              <span style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-                <select
-                  value={gf3SelectedDate}
-                  onChange={(event) => setGf3SelectedDate(event.target.value)}
-                  disabled={gf3DateLoading || gf3SarscapeProduceLoading || readOnly || !canRunGf3SarscapeProduce}
-                  style={{ minWidth: '180px', padding: '4px 6px' }}
-                >
-                  <option value="">全部可用日期</option>
-                  {gf3SarscapeDates.map((item) => (
-                    <option key={item.date} value={item.date}>
-                      {formatGf3Date(item.date)} ({item.scene_count || 0})
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={handleRefreshGf3Dates}
-                  disabled={gf3DateLoading || readOnly || !hasGf3ArchiveSourceDirs}
-                  style={actionBtnStyle(gf3DateLoading, readOnly || !hasGf3ArchiveSourceDirs)}
-                >
-                  {gf3DateLoading ? '加载中...' : '刷新日期'}
-                </button>
-              </span>
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-            {gf3LegacyGdalEnabled && (
-              <>
-                <button
-                  onClick={handleGf3Unpack}
-                  disabled={gf3UnpackLoading || readOnly || !canRunGf3Unpack}
-                  style={actionBtnStyle(gf3UnpackLoading, readOnly || !canRunGf3Unpack)}
-                >
-                  {gf3UnpackLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 legacy 解包')}
-                </button>
-                <button
-                  onClick={handleGf3BatchProcess}
-                  disabled={gf3ProcessLoading || readOnly || !canRunGf3Process}
-                  style={actionBtnStyle(gf3ProcessLoading, readOnly || !canRunGf3Process)}
-                >
-                  {gf3ProcessLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 legacy 预处理')}
-                </button>
-              </>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>本机存储感知</div>
+          <div style={{ ...gridStyle, rowGap: '8px' }}>
+            {config.storage_roots.length ? config.storage_roots.map((item, index) => (
+              <div
+                key={`${item.path || item.label}-${index}`}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'minmax(92px, 140px) minmax(110px, 150px) 1fr',
+                  gap: '8px',
+                  alignItems: 'start',
+                }}
+              >
+                <span style={{ color: 'var(--color-text-muted)' }}>{item.label || item.role || '路径'}</span>
+                <span style={{ color: storageStatusColor(item.status), fontWeight: 700 }}>
+                  {storageStatusText(item.status)} · {formatGb(item.free_gb)} 可用
+                </span>
+                <span style={{ wordBreak: 'break-all' }}>
+                  {item.path || '未配置'}
+                  {item.total_gb != null ? `（总量 ${formatGb(item.total_gb)}）` : ''}
+                  {item.message ? ` ${item.message}` : ''}
+                </span>
+              </div>
+            )) : (
+              <div style={{ color: 'var(--color-text-muted)' }}>未返回本机存储状态。</div>
             )}
+          </div>
+        </div>
+
+        <div style={sectionStyle}>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>LT-1 / Sentinel-1 压缩包资产索引</div>
+          <div style={{ ...gridStyle, marginBottom: '8px' }}>
+            <div style={rowStyle}><span style={labelStyle}>压缩包源池</span><span style={{ wordBreak: 'break-all' }}>{formatList(sourceInventoryDirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>精轨源资产</span><span style={{ wordBreak: 'break-all' }}>{formatList(orbitInventoryDirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>LT-1 生产 TXT 池</span><span style={{ wordBreak: 'break-all' }}>{config.orbit_production_txt_pool || '未配置'}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>管理规则</span><span>压缩包只抽取 XML/manifest 和预览图；LT-1 精轨扫描后同步到生产 TXT 池，S1 精轨只登记 EOF 资产。</span></div>
+          </div>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <button
+              onClick={() => handleAssetInventoryScan(
+                { inventory_types: ['source_product'], families: ['LT1', 'S1'] },
+                'LT-1 / Sentinel-1 源压缩包扫描'
+              )}
+              disabled={s1ScanLoading || !canRunSourceProductScan}
+              style={actionBtnStyle(s1ScanLoading, !canRunSourceProductScan)}
+            >
+              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描压缩包')}
+            </button>
+            <button
+              onClick={() => handleAssetInventoryScan(
+                { inventory_types: ['orbit_asset'], families: ['LT1', 'S1'] },
+                'LT-1 / Sentinel-1 精轨扫描'
+              )}
+              disabled={s1ScanLoading || !canRunOrbitAssetScan}
+              style={actionBtnStyle(s1ScanLoading, !canRunOrbitAssetScan)}
+            >
+              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描全部精轨')}
+            </button>
+            <button
+              onClick={() => handleAssetInventoryScan(
+                { inventory_types: ['orbit_asset'], families: ['S1'] },
+                'Sentinel-1 精轨扫描'
+              )}
+              disabled={s1ScanLoading || !canRunOrbitAssetScan}
+              style={actionBtnStyle(s1ScanLoading, !canRunOrbitAssetScan)}
+            >
+              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描 S1 EOF')}
+            </button>
+            <button
+              onClick={() => handleAssetInventoryScan(
+                { inventory_types: ['orbit_asset'], families: ['LT1'] },
+                'LT-1 精轨扫描'
+              )}
+              disabled={s1ScanLoading || !canRunOrbitAssetScan}
+              style={actionBtnStyle(s1ScanLoading, !canRunOrbitAssetScan)}
+            >
+              {readOnly ? '只读模式' : '扫描 LT-1 TXT'}
+            </button>
+            <button
+              onClick={handleArchiveIntegrityAudit}
+              disabled={archiveAuditLoading || !canRunSourceProductScan}
+              style={actionBtnStyle(archiveAuditLoading, !canRunSourceProductScan)}
+            >
+              {archiveAuditLoading ? '运行中...' : (readOnly ? '只读模式' : '压缩包完整性审计')}
+            </button>
+            <div style={{ fontSize: '0.85em', color: s1Message.includes('失败') ? 'var(--color-danger)' : 'var(--color-text-muted)', alignSelf: 'center' }}>
+              {archiveAuditActiveTask
+                ? (archiveAuditActiveTask.message || '完整性审计运行中...')
+                : sourceInventoryActiveTask
+                  ? (sourceInventoryActiveTask.message || '资产索引运行中...')
+                  : s1Message}
+            </div>
+          </div>
+        </div>
+
+        <div style={sectionStyle}>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>GF3 _geo 原生结果登记</div>
+          <div style={{ ...gridStyle, marginBottom: '8px' }}>
+            <div style={rowStyle}><span style={labelStyle}>GF3 _geo 结果根目录</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_sarscape_native_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>GF3 标准/索引池</span><span style={{ wordBreak: 'break-all' }}>{formatList(config.gf3_storage_dirs)}</span></div>
+            <div style={rowStyle}><span style={labelStyle}>登记内容</span><span>按 YYYYMMDD_geo/场景目录扫描 *_geo ENVI 二进制，WebP 从 _geo 主数据生成</span></div>
+          </div>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
             <button
               onClick={handleGf3SarscapeProduce}
-              disabled={gf3SarscapeProduceLoading || readOnly || !canRunGf3SarscapeProduce}
+              disabled={gf3SarscapeProduceLoading || gf3QuicklookWebpLoading || readOnly || !canRunGf3SarscapeProduce}
               style={actionBtnStyle(gf3SarscapeProduceLoading, readOnly || !canRunGf3SarscapeProduce)}
             >
-              {gf3SarscapeProduceLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 SARscape 生产')}
+              {gf3SarscapeProduceLoading ? '运行中...' : (readOnly ? '只读模式' : '登记 _geo 结果')}
             </button>
             <button
-              onClick={handleGf3SarscapeSync}
-              disabled={gf3SarscapeSyncLoading || readOnly || !canRunGf3SarscapeSync}
-              style={actionBtnStyle(gf3SarscapeSyncLoading, readOnly || !canRunGf3SarscapeSync)}
+              onClick={handleGf3QuicklookWebp}
+              disabled={gf3QuicklookWebpLoading || gf3SarscapeProduceLoading || readOnly || !hasGf3StorageDirs}
+              style={actionBtnStyle(gf3QuicklookWebpLoading, readOnly || !hasGf3StorageDirs)}
             >
-              {gf3SarscapeSyncLoading ? '运行中...' : (readOnly ? '只读模式' : 'GF3 SARscape 入库')}
+              {gf3QuicklookWebpLoading ? '运行中...' : (readOnly ? '只读模式' : '生成 WebP')}
             </button>
-            <button
-              onClick={handleGf3SarscapeClean}
-              disabled={gf3SarscapeCleanLoading || readOnly || !canRunGf3SarscapeClean}
-              style={actionBtnStyle(gf3SarscapeCleanLoading, readOnly || !canRunGf3SarscapeClean)}
-            >
-              {gf3SarscapeCleanLoading ? '运行中...' : (readOnly ? '只读模式' : '清理 GF3 中间')}
-            </button>
-            <button
-              onClick={handleGf3Scan}
-              disabled={gf3ScanLoading || readOnly || !canRunGf3Scan}
-              style={actionBtnStyle(gf3ScanLoading, readOnly || !canRunGf3Scan)}
-            >
-              {gf3ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描 GF3')}
-            </button>
-            <div
-              style={{
-                fontSize: '0.85em',
-                color: gf3Message.includes('失败') ? 'var(--color-danger)' : 'var(--color-text-muted)',
-                alignSelf: 'center',
-              }}
-            >
+            <div style={{ fontSize: '0.85em', color: gf3Message.includes('失败') ? 'var(--color-danger)' : 'var(--color-text-muted)', alignSelf: 'center' }}>
               {gf3ActiveTask ? (gf3ActiveTask.message || 'GF3 任务运行中...') : gf3Message}
             </div>
           </div>
         </div>
+
+        <div style={sectionStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', marginBottom: '8px' }}>
+            <div style={{ fontWeight: 'bold', color: 'var(--color-text-primary)' }}>扫描任务状态</div>
+            <button
+              type="button"
+              onClick={handleClearScanTaskHistory}
+              disabled={readOnly || clearScanHistoryLoading || displayedScanTasks.length === 0}
+              style={{
+                padding: '4px 10px',
+                backgroundColor: readOnly || clearScanHistoryLoading || displayedScanTasks.length === 0 ? '#94a3b8' : '#b91c1c',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: readOnly || clearScanHistoryLoading || displayedScanTasks.length === 0 ? 'not-allowed' : 'pointer',
+                fontSize: '0.8em',
+              }}
+            >
+              {clearScanHistoryLoading ? '清空中...' : '清空日志'}
+            </button>
+          </div>
+          {clearScanHistoryMessage && (
+            <div
+              style={{
+                color: clearScanHistoryMessage.includes('失败') ? 'var(--color-danger)' : 'var(--color-text-muted)',
+                fontSize: '0.85em',
+                marginBottom: '8px',
+              }}
+            >
+              {clearScanHistoryMessage}
+            </div>
+          )}
+          {displayedScanTasks.length ? (
+            <div style={{ display: 'grid', gap: '10px' }}>
+              {displayedScanTasks.map((task) => {
+                const progress = clampProgress(task.progress);
+                const isSelected = task.task_id === selectedTask?.task_id;
+                return (
+                  <button
+                    key={task.task_id}
+                    type="button"
+                    onClick={() => setSelectedTaskId(task.task_id)}
+                    style={{
+                      textAlign: 'left',
+                      border: `1px solid ${isSelected ? 'var(--color-accent)' : 'var(--color-border)'}`,
+                      background: isSelected ? 'var(--color-accent-soft)' : '#fff',
+                      borderRadius: '8px',
+                      padding: '10px 12px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', marginBottom: '6px' }}>
+                      <strong style={{ color: 'var(--color-text-primary)' }}>{taskTitle(task)}</strong>
+                      <span style={{ color: statusColor(task.status), fontWeight: 700 }}>{statusLabel(task.status)} · {progress}%</span>
+                    </div>
+                    <div style={{ height: '8px', background: '#e5e7eb', borderRadius: '999px', overflow: 'hidden', marginBottom: '6px' }}>
+                      <div
+                        style={{
+                          width: `${progress}%`,
+                          height: '100%',
+                          background: statusColor(task.status),
+                          transition: 'width 0.2s ease',
+                        }}
+                      />
+                    </div>
+                    <div style={{ color: 'var(--color-text-secondary)', fontSize: '0.85em', wordBreak: 'break-word' }}>
+                      {task.message || task.task_name || task.task_id}
+                    </div>
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: '0.78em', marginTop: '4px' }}>
+                      {formatTaskTime(task.created_at)} · {task.task_id}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={{ color: 'var(--color-text-muted)', fontSize: '0.9em' }}>暂无扫描任务。</div>
+          )}
+        </div>
+
       </div>
 
       <div style={{ flexShrink: 0, borderTop: '1px solid var(--color-border)', paddingTop: '10px', marginTop: '6px' }}>
-        <div style={{ fontWeight: 'bold', marginBottom: '6px', color: 'var(--color-text-primary)' }}>实时日志</div>
+        <div style={{ fontWeight: 'bold', marginBottom: '6px', color: 'var(--color-text-primary)' }}>
+          {selectedTask ? `${taskTitle(selectedTask)} 日志` : '实时日志'}
+        </div>
         <div
           style={{
             height: '160px',
@@ -1089,7 +798,17 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
             borderRadius: '4px',
           }}
         >
-          {displayLogs.length === 0 ? (
+          {selectedTask ? (
+            selectedTaskLogs.length ? (
+              selectedTaskLogs.map((log) => (
+                <div key={log.id || `${log.timestamp}-${log.message}`} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                  [{formatTaskTime(log.timestamp)}] [{log.level || 'INFO'}] {log.message}
+                </div>
+              ))
+            ) : (
+              <div style={{ color: 'var(--color-text-muted)' }}>暂无任务日志...</div>
+            )
+          ) : displayLogs.length === 0 ? (
             <div style={{ color: 'var(--color-text-muted)' }}>暂无日志...</div>
           ) : (
             displayLogs.map((log, index) => (
@@ -1100,85 +819,6 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
         </div>
       </div>
 
-      {showUnpackDialog && (
-        <div className="modal-overlay visible" onClick={handleCloseUnpackDialog}>
-          <div className="modal-content" onClick={(event) => event.stopPropagation()}>
-            <h3 style={{ marginTop: 0 }}>LT-1 解包任务参数</h3>
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                handleUnpackRun();
-              }}
-            >
-              <div
-                style={{
-                  marginBottom: '14px',
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  background: 'var(--color-panel-muted)',
-                  border: '1px solid var(--color-border)',
-                  fontSize: '0.9em',
-                  color: 'var(--color-text-secondary)',
-                  lineHeight: 1.7,
-                }}
-              >
-                本次填写的参数只覆盖当前这一次解包任务，不会修改 `.env` 默认值。输入 `0` 表示不限。
-              </div>
-
-              <div style={{ ...gridStyle, marginBottom: '14px' }}>
-                <div style={rowStyle}><span style={labelStyle}>来源目录</span><span style={{ wordBreak: 'break-all' }}>{formatList(unpackConfig.source_dirs)}</span></div>
-                <div style={rowStyle}><span style={labelStyle}>LT-1 存储</span><span style={{ wordBreak: 'break-all' }}>{formatList(unpackConfig.insar_storage_dirs)}</span></div>
-              </div>
-
-              <div className="form-group">
-                <label>单次最多解包数量</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={unpackRunOptions.max_files_per_run}
-                  onChange={(event) => handleUnpackOptionChange('max_files_per_run', event.target.value)}
-                  disabled={unpackLoading}
-                />
-              </div>
-
-              <div className="form-group">
-                <label>最长运行时间（分钟）</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={unpackRunOptions.max_runtime_minutes}
-                  onChange={(event) => handleUnpackOptionChange('max_runtime_minutes', event.target.value)}
-                  disabled={unpackLoading}
-                />
-              </div>
-
-              {unpackDialogError && (
-                <div
-                  style={{
-                    marginTop: '6px',
-                    color: 'var(--color-danger)',
-                    fontSize: '0.9em',
-                    wordBreak: 'break-all',
-                  }}
-                >
-                  {unpackDialogError}
-                </div>
-              )}
-
-              <div className="modal-actions">
-                <button type="button" onClick={handleCloseUnpackDialog} disabled={unpackLoading}>
-                  取消
-                </button>
-                <button type="submit" disabled={unpackLoading}>
-                  {unpackLoading ? '启动中...' : '启动解包任务'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

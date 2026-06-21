@@ -1,5 +1,6 @@
 import os
 import re
+import math
 from datetime import datetime
 from typing import Optional, Tuple, List, Callable, Dict, Any
 from lxml import etree
@@ -19,6 +20,80 @@ def _create_secure_xml_parser() -> etree.XMLParser:
         huge_tree=False,
         recover=False,
     )
+
+
+def _ordered_closed_polygon(points: List[Tuple[float, float]]) -> Optional[List[Tuple[float, float]]]:
+    unique: List[Tuple[float, float]] = []
+    for point in points or []:
+        try:
+            lon = float(point[0])
+            lat = float(point[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        current = (lon, lat)
+        if unique and abs(unique[-1][0] - lon) < 1e-12 and abs(unique[-1][1] - lat) < 1e-12:
+            continue
+        if unique and abs(unique[0][0] - lon) < 1e-12 and abs(unique[0][1] - lat) < 1e-12:
+            continue
+        if current not in unique:
+            unique.append(current)
+    if len(unique) < 3:
+        return None
+    if len(unique) == 4:
+        center_lon = sum(item[0] for item in unique) / len(unique)
+        center_lat = sum(item[1] for item in unique) / len(unique)
+        ordered = sorted(
+            unique,
+            key=lambda item: math.atan2(item[1] - center_lat, item[0] - center_lon),
+        )
+    else:
+        ordered = unique
+    if ordered[0] != ordered[-1]:
+        ordered.append(ordered[0])
+    return ordered
+
+
+def _closed_polygon_if_valid(points: List[Tuple[float, float]]) -> Optional[List[Tuple[float, float]]]:
+    ring = [(float(point[0]), float(point[1])) for point in points or []]
+    if len(ring) < 3:
+        return None
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+    return ring
+
+
+def _ordered_closed_polygon_from_corner_details(corner_details: Dict[str, Dict[str, Any]]) -> Optional[List[Tuple[float, float]]]:
+    by_name = {str(key or "").strip().lower(): value for key, value in (corner_details or {}).items()}
+    name_order = ["bottomleft", "bottomright", "topright", "topleft"]
+    if all(name in by_name for name in name_order):
+        return _closed_polygon_if_valid([(by_name[name]["lon"], by_name[name]["lat"]) for name in name_order])
+
+    entries = [
+        value
+        for value in (corner_details or {}).values()
+        if value.get("lon") is not None
+        and value.get("lat") is not None
+        and value.get("ref_row") is not None
+        and value.get("ref_col") is not None
+    ]
+    if len(entries) >= 4:
+        min_row = min(float(item["ref_row"]) for item in entries)
+        max_row = max(float(item["ref_row"]) for item in entries)
+        min_col = min(float(item["ref_col"]) for item in entries)
+        max_col = max(float(item["ref_col"]) for item in entries)
+        targets = [(min_row, min_col), (min_row, max_col), (max_row, max_col), (max_row, min_col)]
+        remaining = list(entries)
+        ordered_entries: List[Dict[str, Any]] = []
+        for target_row, target_col in targets:
+            chosen = min(
+                remaining,
+                key=lambda item: abs(float(item["ref_row"]) - target_row) + abs(float(item["ref_col"]) - target_col),
+            )
+            ordered_entries.append(chosen)
+            remaining.remove(chosen)
+        return _closed_polygon_if_valid([(item["lon"], item["lat"]) for item in ordered_entries])
+
+    return _ordered_closed_polygon([(value["lon"], value["lat"]) for value in (corner_details or {}).values()])
 
 # --- Sentinel-1 (S1A/S1B/S1C) Parsers ---
 
@@ -573,7 +648,10 @@ def parse_xml_metadata(
                 return None, None
         
         if len(polygon) == 4:
-            polygon.append(polygon[0])
+            ordered_polygon = _ordered_closed_polygon_from_corner_details(corner_details)
+            if not ordered_polygon:
+                return None, None
+            polygon = ordered_polygon
             corner_pixel_mapping = _build_corner_pixel_mapping(corner_details)
             meta = {
                 "orbit_direction": orbit_direction,

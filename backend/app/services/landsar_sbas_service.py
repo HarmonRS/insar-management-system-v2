@@ -24,6 +24,8 @@ from ..dinsar_engines.landsar_engine import (
     _norm_path,
     _path_search_dirs,
     _summarize_landsar_failure,
+    derive_landsar_dem_bbox_from_xml_paths,
+    prepare_landsar_dem_crop,
 )
 
 
@@ -633,6 +635,16 @@ class LandsarSbasService:
             "errors": errors,
         }
 
+    def _derive_task_dem_bbox(self, task: dict[str, Any], input_dir: str) -> tuple[float, float, float, float] | None:
+        xml_paths = [
+            str(scene.get("xml") or "")
+            for scene in (task.get("scenes") or [])
+            if str(scene.get("xml") or "").strip()
+        ]
+        if not xml_paths and input_dir and os.path.isdir(input_dir):
+            xml_paths = [str(path) for path in sorted(Path(input_dir).glob("LT1*_SLC.xml"), key=lambda item: item.name.lower())]
+        return derive_landsar_dem_bbox_from_xml_paths(xml_paths, fallback_paths=xml_paths)
+
     def materialize_stack(
         self,
         *,
@@ -949,7 +961,7 @@ class LandsarSbasService:
         params_payload = self.normalize_params(params or {})
         normalized_dem = _norm_path(dem_path or self.default_dem_path)
         if not normalized_dem or not os.path.isfile(normalized_dem):
-            raise ValueError(f"LandSAR SBAS DEM file is missing: {normalized_dem or '<empty>'}")
+            raise ValueError(f"LandSAR SBAS DEM source file is missing: {normalized_dem or '<empty>'}")
 
         from .sbas_insar_production_service import sbas_insar_production_service
 
@@ -1035,6 +1047,8 @@ class LandsarSbasService:
             "input_task_root": import_dest_root,
             "publish_root": str(publish_root),
             "dem_path": normalized_dem,
+            "dem_source_path": normalized_dem,
+            "dem_role": "global_prepared_source",
             "params": params_payload,
             "timeout_seconds": max(60, int(timeout_seconds or settings.LANDSAR_SBAS_TIMEOUT_SECONDS or 172800)),
             "import_timeout_seconds": max(60, int(import_timeout_seconds or timeout_seconds or settings.LANDSAR_SBAS_TIMEOUT_SECONDS or 172800)),
@@ -1541,9 +1555,9 @@ class LandsarSbasService:
         if not bool(settings.LANDSAR_SBAS_ENABLED):
             raise ValueError("LandSAR SBAS is disabled.")
         params = self.normalize_params(extra or {})
-        dem_path = _norm_path((extra or {}).get("dem_path") or self.default_dem_path)
-        if not dem_path or not os.path.isfile(dem_path):
-            raise ValueError(f"LandSAR SBAS DEM file is missing: {dem_path or '<empty>'}")
+        dem_source_path = _norm_path((extra or {}).get("dem_path") or self.default_dem_path)
+        if not dem_source_path or not os.path.isfile(dem_source_path):
+            raise ValueError(f"LandSAR SBAS DEM source file is missing: {dem_source_path or '<empty>'}")
         validation = self.validate_root_dir(
             root_dir,
             min_scenes=min_scenes,
@@ -1585,7 +1599,9 @@ class LandsarSbasService:
             "work_root_strategy": "short_landsar_execution_path",
             "native_root": str(native_root),
             "publish_root": str(publish_root),
-            "dem_path": dem_path,
+            "dem_path": dem_source_path,
+            "dem_source_path": dem_source_path,
+            "dem_role": "global_prepared_source",
             "params": params,
             "timeout_seconds": max(60, int(timeout_seconds or settings.LANDSAR_SBAS_TIMEOUT_SECONDS or 172800)),
             "min_scenes": validation.get("min_scenes"),
@@ -1716,10 +1732,56 @@ class LandsarSbasService:
             native_output_dir = native_root / task_alias / "Output_Data"
             native_output_dir.mkdir(parents=True, exist_ok=True)
             project_name = str((manifest.get("params") or {}).get("project_name") or task_alias).strip() or task_alias
+            dem_source_path = _norm_path(str(manifest.get("dem_path") or ""))
+            effective_dem_path = dem_source_path
+            dem_crop_info: dict[str, Any] = {}
+            try:
+                dem_bbox = self._derive_task_dem_bbox(task, input_dir)
+                if not dem_bbox:
+                    raise ValueError("cannot derive DEM crop bbox from LandSAR SBAS Input_Data XML corner coordinates")
+                dem_crop_info = prepare_landsar_dem_crop(
+                    dem_source_path,
+                    str(native_root / task_alias / "dem_crop"),
+                    dem_bbox,
+                    label=task_alias,
+                )
+                effective_dem_path = str(dem_crop_info.get("dem_path") or dem_source_path)
+                self._emit(
+                    progress_callback,
+                    "INFO",
+                    f"[{index}/{len(tasks)}] LandSAR SBAS DEM crop ready: {effective_dem_path}",
+                )
+            except Exception as exc:
+                failed_count += 1
+                error = f"LandSAR SBAS DEM crop failed: {exc}"
+                self._emit(progress_callback, "ERROR", f"[{index}/{len(tasks)}] {task_name} failed: {error}")
+                task_results.append(
+                    {
+                        "task_name": task_name,
+                        "task_alias": task_alias,
+                        "input_data_dir": input_dir,
+                        "native_output_dir": str(native_output_dir),
+                        "param_file": "",
+                        "process_name": SBAS_PROCESS_NAME,
+                        "command": "",
+                        "returncode": -2,
+                        "success": False,
+                        "timed_out": False,
+                        "failure_kind": "dem_crop_failed",
+                        "error": error,
+                        "stdout_tail": "",
+                        "native_logs": {},
+                        "publish": {},
+                        "dem_source_path": dem_source_path,
+                        "dem_path": effective_dem_path,
+                        "dem_crop": dem_crop_info,
+                    }
+                )
+                continue
             param_file = _generate_sbas_param_file(
                 str(native_output_dir / f"{SBAS_PROID}.txt"),
                 slc_folder=input_dir,
-                dem_path=str(manifest.get("dem_path") or ""),
+                dem_path=effective_dem_path,
                 output_dir=str(native_output_dir),
                 project_name=project_name,
                 params=dict(manifest.get("params") or {}),
@@ -1784,6 +1846,9 @@ class LandsarSbasService:
                     "stdout_tail": _collect_tail(stdout_text, 4000),
                     "native_logs": log_publish_result,
                     "publish": publish_result,
+                    "dem_source_path": dem_source_path,
+                    "dem_path": effective_dem_path,
+                    "dem_crop": dem_crop_info,
                 }
             )
 

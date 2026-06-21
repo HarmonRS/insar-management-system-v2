@@ -6,11 +6,12 @@ import tarfile
 import zipfile
 import json
 import hashlib
+import re
 from datetime import datetime
 from typing import List, Tuple, Optional, Dict, Any
 
 from .services.task_service import task_service
-from .services.dinsar_naming import write_pair_metadata
+from .services.dinsar_naming import build_task_alias, write_pair_metadata
 
 # --- Core Logic ---
 
@@ -44,12 +45,262 @@ def find_dinsar_source_to_copy(path: str) -> str:
     return path
 
 
+def _resolve_dinsar_task_names(item: Dict[str, Any]) -> Tuple[str, str]:
+    task_name = str(item.get("task_name") or item.get("task_alias") or "").strip()
+    task_alias = str(item.get("task_alias") or "").strip()
+    if not task_alias:
+        task_alias = build_task_alias(item.get("master_imaging_date"), item.get("slave_imaging_date"))
+    if task_alias == "Task_unknown_unknown" and task_name:
+        task_alias = task_name
+    if not task_name:
+        task_name = task_alias or "task"
+    return task_name or "task", task_alias or task_name or "task"
+
+
 _DINSAR_ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".zip", ".tar")
+_LT1_RASTER_SUFFIXES = (".tif", ".tiff")
 
 
 def _is_supported_archive(path: str) -> bool:
     lower = str(path or "").lower()
     return any(lower.endswith(suffix) for suffix in _DINSAR_ARCHIVE_SUFFIXES)
+
+
+def _is_lt1_scene_file_name(filename: str) -> bool:
+    return str(filename or "").lower().startswith("lt1")
+
+
+def _is_lt1_meta_name(filename: str) -> bool:
+    lower = str(filename or "").lower()
+    return _is_lt1_scene_file_name(lower) and lower.endswith(".meta.xml")
+
+
+def _is_lt1_raster_name(filename: str) -> bool:
+    lower = str(filename or "").lower()
+    return _is_lt1_scene_file_name(lower) and lower.endswith(_LT1_RASTER_SUFFIXES)
+
+
+def _extract_yyyymmdd_from_name(filename: str) -> str:
+    match = re.search(r"(20\d{6})", str(filename or ""))
+    return match.group(1) if match else ""
+
+
+def _iter_lt1_scene_files(root_dir: str) -> List[str]:
+    normalized = os.path.normpath(os.path.abspath(str(root_dir or "")))
+    if not os.path.isdir(normalized):
+        return []
+    files: List[str] = []
+    for current_root, _, filenames in os.walk(normalized):
+        for filename in filenames:
+            if _is_lt1_scene_file_name(filename):
+                files.append(os.path.join(current_root, filename))
+    return sorted(files, key=lambda item: os.path.normcase(os.path.relpath(item, normalized)))
+
+
+def _link_or_copy_file(source_path: str, dest_path: str) -> str:
+    source = os.path.normpath(os.path.abspath(str(source_path or "")))
+    dest = os.path.normpath(os.path.abspath(str(dest_path or "")))
+    if not os.path.isfile(source):
+        raise FileNotFoundError(source)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if os.path.exists(dest):
+        try:
+            if os.path.samefile(source, dest):
+                return "exists"
+        except OSError:
+            pass
+        if os.path.isdir(dest):
+            raise IsADirectoryError(dest)
+        os.remove(dest)
+    try:
+        os.link(source, dest)
+        return "linked"
+    except OSError:
+        shutil.copy2(source, dest)
+        return "copied"
+
+
+def _list_direct_files(directory: str) -> List[str]:
+    if not os.path.isdir(directory):
+        return []
+    return sorted(
+        os.path.join(directory, entry.name)
+        for entry in os.scandir(directory)
+        if entry.is_file()
+    )
+
+
+def _flatten_lt1_side_inputs(side_dir: str) -> Dict[str, Any]:
+    normalized = os.path.normpath(os.path.abspath(str(side_dir or "")))
+    summary: Dict[str, Any] = {
+        "side_dir": normalized,
+        "lt1_source_file_count": 0,
+        "linked": 0,
+        "copied": 0,
+        "exists": 0,
+        "direct_meta_count": 0,
+        "direct_raster_count": 0,
+    }
+    if not os.path.isdir(normalized):
+        summary["status"] = "missing_side_dir"
+        return summary
+
+    source_files = _iter_lt1_scene_files(normalized)
+    summary["lt1_source_file_count"] = len(source_files)
+    for source in source_files:
+        dest = os.path.join(normalized, os.path.basename(source))
+        action = _link_or_copy_file(source, dest)
+        if action in {"linked", "copied", "exists"}:
+            summary[action] = int(summary.get(action, 0)) + 1
+
+    direct_files = _list_direct_files(normalized)
+    summary["direct_meta_count"] = sum(1 for path in direct_files if _is_lt1_meta_name(os.path.basename(path)))
+    summary["direct_raster_count"] = sum(1 for path in direct_files if _is_lt1_raster_name(os.path.basename(path)))
+    summary["status"] = "ready" if summary["direct_meta_count"] and summary["direct_raster_count"] else "no_lt1_direct_pair"
+    return summary
+
+
+def _select_lt1_meta_raster(side_dir: str, expected_date: Any = None) -> Dict[str, str]:
+    expected = re.sub(r"\D", "", str(expected_date or ""))[:8]
+    direct_files = _list_direct_files(side_dir)
+    metas = [path for path in direct_files if _is_lt1_meta_name(os.path.basename(path))]
+    rasters = [path for path in direct_files if _is_lt1_raster_name(os.path.basename(path))]
+
+    def sort_key(path: str) -> tuple[int, str]:
+        name = os.path.basename(path)
+        date_mismatch = 0 if expected and expected in name else 1 if expected else 0
+        return date_mismatch, name.lower()
+
+    metas.sort(key=sort_key)
+    rasters.sort(key=sort_key)
+    return {
+        "meta": metas[0] if metas else "",
+        "raster": rasters[0] if rasters else "",
+    }
+
+
+def _prepare_landsar_input_data(
+    task_dir: str,
+    master_selection: Dict[str, str],
+    slave_selection: Dict[str, str],
+) -> Dict[str, Any]:
+    input_dir = os.path.join(task_dir, "Input_Data")
+    copied: List[Dict[str, Any]] = []
+    for role, selection in (("master", master_selection), ("slave", slave_selection)):
+        for kind, source in (("meta", selection.get("meta")), ("raster", selection.get("raster"))):
+            if not source:
+                return {
+                    "status": "missing_selected_lt1_file",
+                    "input_data_dir": input_dir,
+                    "role": role,
+                    "kind": kind,
+                    "copied": copied,
+                }
+            dest = os.path.join(input_dir, os.path.basename(source))
+            action = _link_or_copy_file(source, dest)
+            copied.append(
+                {
+                    "role": role,
+                    "kind": kind,
+                    "source_path": source,
+                    "relative_path": os.path.relpath(dest, start=task_dir),
+                    "action": action,
+                }
+            )
+    return {
+        "status": "ready",
+        "input_data_dir": input_dir,
+        "copied": copied,
+    }
+
+
+def _landsar_input_data_ready(input_data_dir: str) -> bool:
+    if not os.path.isdir(input_data_dir):
+        return False
+    by_date: Dict[str, Dict[str, bool]] = {}
+    for path in _list_direct_files(input_data_dir):
+        name = os.path.basename(path)
+        if not _is_lt1_scene_file_name(name):
+            continue
+        lower_name = name.lower()
+        if lower_name.endswith(".meta.xml") or lower_name.endswith("_check.xml"):
+            continue
+        if lower_name.endswith(".xml") and "_slc" not in lower_name:
+            continue
+        date_text = _extract_yyyymmdd_from_name(name)
+        if not date_text:
+            continue
+        entry = by_date.setdefault(date_text, {"meta": False, "raster": False})
+        if lower_name.endswith(".xml"):
+            entry["xml"] = True
+        elif _is_lt1_raster_name(name):
+            entry["raster"] = True
+    return sum(1 for item in by_date.values() if item.get("xml") and item.get("raster")) >= 2
+
+
+def _lt1_side_direct_raw_ready(side_dir: str) -> bool:
+    direct_files = _list_direct_files(side_dir)
+    return (
+        any(_is_lt1_meta_name(os.path.basename(path)) for path in direct_files)
+        and any(_is_lt1_raster_name(os.path.basename(path)) for path in direct_files)
+    )
+
+
+def _prepare_dinsar_engine_inputs(task_dir: str, item: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    normalized = os.path.normpath(os.path.abspath(str(task_dir or "")))
+    payload = dict(item or {})
+    master_dir = os.path.join(normalized, "master")
+    slave_dir = os.path.join(normalized, "slave")
+    master_summary = _flatten_lt1_side_inputs(master_dir)
+    slave_summary = _flatten_lt1_side_inputs(slave_dir)
+    summary: Dict[str, Any] = {
+        "master": master_summary,
+        "slave": slave_summary,
+        "landsar": {"status": "skipped_non_lt1"},
+    }
+
+    has_lt1 = bool(master_summary.get("lt1_source_file_count")) or bool(slave_summary.get("lt1_source_file_count"))
+    if not has_lt1:
+        return summary
+
+    master_selection = _select_lt1_meta_raster(master_dir, payload.get("master_imaging_date"))
+    slave_selection = _select_lt1_meta_raster(slave_dir, payload.get("slave_imaging_date"))
+    summary["selected"] = {
+        "master": {
+            "meta": os.path.relpath(master_selection["meta"], start=normalized) if master_selection.get("meta") else "",
+            "raster": os.path.relpath(master_selection["raster"], start=normalized) if master_selection.get("raster") else "",
+        },
+        "slave": {
+            "meta": os.path.relpath(slave_selection["meta"], start=normalized) if slave_selection.get("meta") else "",
+            "raster": os.path.relpath(slave_selection["raster"], start=normalized) if slave_selection.get("raster") else "",
+        },
+    }
+    if not all(master_selection.values()) or not all(slave_selection.values()):
+        summary["landsar"] = {"status": "missing_lt1_meta_or_raster"}
+        return summary
+
+    summary["landsar"] = {
+        "status": "raw_ready_for_import",
+        "input_data_policy": "LandSAR 100016 import creates native landsar_input at run time.",
+    }
+    return summary
+
+
+def _normalize_source_bundle_archive_path(source_path: str) -> str:
+    normalized = os.path.normpath(os.path.abspath(str(source_path or "")))
+    if not os.path.exists(normalized):
+        raise FileNotFoundError(normalized)
+    if os.path.isdir(normalized):
+        raise ValueError(
+            "D-InSAR source bundle distribution requires source archive files; "
+            f"unpacked directories are retired: {normalized}"
+        )
+    if not os.path.isfile(normalized) or not _is_supported_archive(normalized):
+        raise ValueError(
+            "D-InSAR source bundle distribution requires .zip/.tar.gz/.tgz/.tar source archives: "
+            f"{normalized}"
+        )
+    return normalized
 
 
 def _safe_archive_member_name(member_name: str, archive_path: str) -> str:
@@ -104,10 +355,20 @@ def _extract_archive_to_dir(archive_path: str, dest_dir: str) -> int:
     raise ValueError(f"Unsupported archive format: {archive_path}")
 
 
-def _materialize_dinsar_source(source_path: str, dest_dir: str) -> Dict[str, Any]:
+def _materialize_dinsar_source(
+    source_path: str,
+    dest_dir: str,
+    *,
+    require_archive: bool = False,
+) -> Dict[str, Any]:
     normalized = os.path.normpath(os.path.abspath(str(source_path or "")))
     if not os.path.exists(normalized):
         raise FileNotFoundError(normalized)
+    if require_archive and (not os.path.isfile(normalized) or not _is_supported_archive(normalized)):
+        raise ValueError(
+            "D-InSAR production preparation requires source archive files; "
+            f"rebuild the batch from LT-1/Sentinel-1 archive assets: {normalized}"
+        )
 
     if os.path.isdir(normalized):
         shutil.copytree(normalized, dest_dir, dirs_exist_ok=True)
@@ -266,9 +527,16 @@ def _directory_has_entries(path: str) -> bool:
 
 
 def _is_existing_dinsar_folder_complete(task_dir: str) -> bool:
+    master_dir = os.path.join(task_dir, "master")
+    slave_dir = os.path.join(task_dir, "slave")
+    input_data_dir = os.path.join(task_dir, "Input_Data")
+    has_lt1_inputs = bool(_iter_lt1_scene_files(master_dir) or _iter_lt1_scene_files(slave_dir))
+    lt1_raw_ready = _lt1_side_direct_raw_ready(master_dir) and _lt1_side_direct_raw_ready(slave_dir)
+    input_data_ready = (not has_lt1_inputs) or lt1_raw_ready or _landsar_input_data_ready(input_data_dir)
     return (
-        _directory_has_entries(os.path.join(task_dir, "master"))
-        and _directory_has_entries(os.path.join(task_dir, "slave"))
+        _directory_has_entries(master_dir)
+        and _directory_has_entries(slave_dir)
+        and input_data_ready
     )
 
 
@@ -532,8 +800,7 @@ async def run_dinsar_source_bundle_items(
 
         candidate_tasks: List[Dict[str, Any]] = []
         for item in items:
-            task_name = item.get("task_name") or item.get("task_alias") or "task"
-            task_alias = item.get("task_alias") or task_name
+            task_name, task_alias = _resolve_dinsar_task_names(item)
             master_path = item.get("master_path")
             slave_path = item.get("slave_path")
             if not master_path or not slave_path:
@@ -749,7 +1016,7 @@ async def run_dinsar_source_bundle_items(
                     )
 
         def ensure_scene_entry(scene_path: str, role_item: Dict[str, Any], prefix: str) -> Dict[str, Any]:
-            source_path = os.path.normpath(os.path.abspath(str(scene_path)))
+            source_path = _normalize_source_bundle_archive_path(scene_path)
             source_key = os.path.normcase(source_path)
             relative_path = _bundle_relative_scene_path(source_path)
             existing = scene_entries_by_source.get(source_key) or scene_entries_by_relative.get(relative_path)
@@ -1100,8 +1367,7 @@ async def run_dinsar_copy_items(
 
         tasks: List[Dict[str, Any]] = []
         for item in items:
-            task_name = item.get("task_name") or item.get("task_alias") or "task"
-            task_alias = item.get("task_alias") or task_name
+            task_name, task_alias = _resolve_dinsar_task_names(item)
             master_path = item.get("master_path")
             slave_path = item.get("slave_path")
             if not master_path or not slave_path:
@@ -1195,11 +1461,13 @@ async def run_dinsar_copy_items(
                     _materialize_dinsar_source,
                     master_src_path,
                     master_dir,
+                    require_archive=True,
                 )
                 slave_materialization = await asyncio.to_thread(
                     _materialize_dinsar_source,
                     slave_src_path,
                     slave_dir,
+                    require_archive=True,
                 )
                 source_materialization = {
                     "master": {
@@ -1211,6 +1479,19 @@ async def run_dinsar_copy_items(
                         "target_relative_path": "slave",
                     },
                 }
+                engine_inputs = await asyncio.to_thread(
+                    _prepare_dinsar_engine_inputs,
+                    task_dir,
+                    item,
+                )
+                source_materialization["engine_inputs"] = engine_inputs
+                landsar_status = str(engine_inputs.get("landsar", {}).get("status") or "")
+                if landsar_status == "raw_ready_for_import":
+                    await _log_and_update(task_id, " -> LT-1 raw inputs ready; LandSAR will run 100016 import at production time")
+                elif landsar_status == "skipped_non_lt1":
+                    await _log_and_update(task_id, " -> Skipped LandSAR input preparation (non-LT1 source)")
+                else:
+                    await _log_and_update(task_id, f" -> LandSAR raw inputs not ready: {landsar_status or 'unknown'}")
                 orbit_entries = await _copy_dinsar_orbit_files(
                     task_id,
                     item,
@@ -1235,10 +1516,8 @@ async def run_dinsar_copy_items(
                     await _log_and_update(task_id, f" -> ZIP: {zip_path}")
                 elif not export_zip:
                     if os.path.exists(final_task_dir):
-                        raise CopyTaskExecutionError(
-                            "Destination folder already exists and cannot be atomically replaced: "
-                            f"{final_task_dir}"
-                        )
+                        await asyncio.to_thread(shutil.rmtree, final_task_dir)
+                        await _log_and_update(task_id, f" -> Replaced incomplete existing Task: {final_task_dir}")
                     await asyncio.to_thread(os.replace, task_dir, final_task_dir)
                     await _log_and_update(task_id, f" -> Folder: {final_task_dir}")
 

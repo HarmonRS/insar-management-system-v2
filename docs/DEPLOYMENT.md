@@ -97,13 +97,15 @@ NGINX_HEALTH_URL=http://127.0.0.1/
 UNPACK_SOURCE_DIRS=D:\Archives
 INSAR_STORAGE_DIRS=D:\LuTan1_Image_Pool
 MONITOR_RADAR_DIRS=D:\LuTan1_Image_Pool
-MONITOR_DINSAR_DIRS=D:\DInSARResult
+MONITOR_DINSAR_DIRS=D:\production_results\dinsar
 MONITOR_ORBIT_DIR=D:\LT1_data_lsarorbit
 
 ORBIT_POOL_ENVI=D:\orbit_pools\envi
-ORBIT_POOL_ISCE2=D:\orbit_pools\isce2
+ORBIT_POOL_ISCE2=
 ORBIT_POOL_LANDSAR=
 ```
+
+`ORBIT_SOURCE_DIRS` is the source asset layer. LT-1 orbit scans also synchronize the production TXT pool under `ORBIT_POOL_ENVI\LT1A|LT1B`. `PYINT_ORBIT_POOL_TXT` and `GAMMA_SBAS_ORBIT_ROOTS` should point to that same local TXT pool unless a separate Gamma pool is deliberately maintained. `ORBIT_POOL_ISCE2` is legacy and remains empty while `ISCE2_ENABLED=false`.
 
 ### 3.4 ENVI / SARscape
 
@@ -120,24 +122,25 @@ ENVI_TASK_TIMEOUT_SECONDS=21600
 GF3 当前主线是“ENVI/SARscape 生产原生 `_geo` 证据层，平台标准化成 GeoTIFF 后入库和供洪涝/水体算法消费”。旧 Python/GDAL L1A 预处理链路默认关闭。
 
 ```env
-GF3_ARCHIVE_SOURCE_DIRS=D:\production_inputs\gf3\archives
+GF3_TASK_POOL_ROOT=D:\GaoFen3_Pool\task_pool
+GF3_ARCHIVE_SOURCE_DIRS=D:\GaoFen3_Pool\archives
 GF3_LEGACY_GDAL_ENABLED=false
 GF3_SOURCE_DIRS=
-GF3_SARSCAPE_NATIVE_DIRS=D:\production_results\gf3\sarscape_native
-GF3_STORAGE_DIRS=D:\production_results\gf3\standard_l2
-GF3_SARSCAPE_RUNTIME_DIR=D:\production_runtime\gf3\sarscape_runtime
+GF3_SARSCAPE_NATIVE_DIRS=D:\GaoFen3_Pool\native_geo
+GF3_STORAGE_DIRS=D:\GaoFen3_Pool\catalog
+GF3_SARSCAPE_RUNTIME_DIR=D:\GaoFen3_Pool\task_pool\sarscape_runtime
 GF3_SARSCAPE_WRAPPER_EXE=D:\Code\Insar_management_system_v2\third_party\GF3_L1A_To_L2_pipeline\dist\windows\gf3wrapper.exe
 GF3_SARSCAPE_IDLRT_PATH=C:\Program Files\Harris\ENVI56\IDL88\bin\bin.x86_64\idlrt.exe
 GF3_SARSCAPE_DEM_PATH=D:\DEM\COPDEM_GLO30_China_4326_DEM
 GF3_SARSCAPE_POLARIZATIONS=HH,HV
-GF3_SARSCAPE_AUTO_STANDARDIZE=true
+GF3_SARSCAPE_AUTO_STANDARDIZE=false
 GF3_SARSCAPE_CLEAN_AFTER_SUCCESS=true
 ```
 
 说明：
 
 - `GF3_SARSCAPE_NATIVE_DIRS` 长期保留 `_geo`、`.hdr`、`.sml`、快视、KML、日志和 manifest。
-- `GF3_STORAGE_DIRS` 是标准 L2 GeoTIFF 池，后续入库、预览、洪涝/水体分析优先消费这里和 `SAR_ANALYSIS_READY_ROOT`。
+- `GF3_STORAGE_DIRS` 是标准目录池，后续入库、预览、洪涝/水体分析优先消费这里和 `SAR_ANALYSIS_READY_ROOT`。
 - `GF3_SARSCAPE_RUNTIME_DIR` 只放 wrapper 配置和运行时临时文件，不应混入原生结果池。
 - 如确需恢复旧 L1A 解包/预处理，需要同时设置 `GF3_LEGACY_GDAL_ENABLED=true` 和 `GF3_SOURCE_DIRS`。
 

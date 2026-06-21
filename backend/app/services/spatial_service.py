@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import and_, case, cast, func, or_
+from sqlalchemy import and_, case, cast, func, or_, text
 from sqlalchemy.orm import aliased
 
 from geoalchemy2 import Geography
@@ -24,6 +24,8 @@ from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
 from ..models import (
+    DinsarProductionRunItemORM,
+    DinsarProductionRunORM,
     HazardPoint,
     HazardPointORM,
     PairingNetworkEdgeORM,
@@ -43,7 +45,7 @@ from .dinsar_naming import build_pair_key, build_task_alias, ensure_unique_task_
 from .pairing_state_service import pairing_state_service
 
 
-PAIRING_POLICY_VERSION = "2026.05.raw-source.v2"
+PAIRING_POLICY_VERSION = "2026.06.dinsar-production.v1"
 PAIRING_WARNING_CANDIDATE_THRESHOLD = 3000
 PAIRING_ALL_STRATEGY_HARD_LIMIT = 20000
 logger = logging.getLogger(__name__)
@@ -145,10 +147,10 @@ class SpatialService:
             require_orbit_data=require_orbit_data,
         )
 
-        if effective_params.strategy == "all" and len(candidate_pool) > PAIRING_ALL_STRATEGY_HARD_LIMIT:
+        if len(candidate_pool) > PAIRING_ALL_STRATEGY_HARD_LIMIT:
             raise RuntimeError(
                 f"全部配对命中 {len(candidate_pool)} 条候选边，超过系统一次性返回上限 "
-                f"{PAIRING_ALL_STRATEGY_HARD_LIMIT}。请改用 SBAS/Sequential 策略，或收紧 AOI、日期范围、重叠率。"
+                f"{PAIRING_ALL_STRATEGY_HARD_LIMIT}。请收紧 AOI、日期范围、重叠率或中心距离阈值。"
             )
 
         if len(candidate_pool) > PAIRING_WARNING_CANDIDATE_THRESHOLD:
@@ -156,15 +158,21 @@ class SpatialService:
                 f"候选配对数超过 {PAIRING_WARNING_CANDIDATE_THRESHOLD}（当前: {len(candidate_pool)}），建议收紧参数或缩小 AOI。"
             )
 
-        selected_candidates, strategy_warnings = self._apply_strategy(
-            candidate_pool,
-            effective_params,
-            aoi_wkt=aoi_wkt,
-        )
+        selected_candidates, strategy_warnings = self._apply_dinsar_production_strategy(candidate_pool, effective_params)
         warnings.extend(strategy_warnings)
+        if not selected_candidates:
+            warnings.extend(
+                await self._build_empty_pairing_diagnostics(
+                    db,
+                    effective_params,
+                    aoi_wkt=aoi_wkt,
+                    require_orbit_data=require_orbit_data,
+                )
+            )
 
         for candidate in selected_candidates:
-            candidate.setdefault("selection_strategy", effective_params.strategy)
+            candidate["selection_strategy"] = "dinsar_production"
+            self._ensure_candidate_identity(candidate)
 
         network_run_id = await self._persist_network_run(
             db,
@@ -176,6 +184,7 @@ class SpatialService:
             selected_candidates=selected_candidates,
         )
 
+        await self._attach_dinsar_production_summaries(db, selected_candidates)
         result_pairs = self._generate_task_names(self._build_radar_pairs(selected_candidates))
         metadata = {
             "fallback_used": False,
@@ -227,13 +236,20 @@ class SpatialService:
                 PairingMetricCacheORM.status == "READY",
                 PairingMetricCacheORM.time_baseline_days >= params.time_baseline_min,
                 PairingMetricCacheORM.time_baseline_days <= params.time_baseline_max,
+                PairingMetricCacheORM.master_imaging_date < PairingMetricCacheORM.slave_imaging_date,
                 PairingMetricCacheORM.scene_overlap_ratio >= params.overlap_threshold,
                 PairingMetricCacheORM.same_look_direction.is_(True),
+                PairingMetricCacheORM.dinsar_readiness.in_(["RECOMMENDED", "CANDIDATE"]),
             )
         )
 
-        if params.limit_footprint_center_distance:
-            stmt = stmt.where(center_distance_expr <= params.spatial_baseline_max_meters)
+        stmt = stmt.where(center_distance_expr <= params.spatial_baseline_max_meters)
+        stmt = stmt.where(
+            or_(
+                and_(master_family_expr == "LT1", slave_family_expr == "LT1"),
+                and_(master_family_expr == "S1", slave_family_expr == "S1"),
+            )
+        )
 
         if require_orbit_data:
             stmt = stmt.where(
@@ -241,8 +257,7 @@ class SpatialService:
                 slave_alias.has_orbit_data.is_(True),
             )
 
-        if not params.cross_satellite_pairing:
-            stmt = stmt.where(PairingMetricCacheORM.same_satellite_family.is_(True))
+        stmt = stmt.where(PairingMetricCacheORM.same_satellite_family.is_(True))
 
         if params.require_same_imaging_mode:
             stmt = stmt.where(PairingMetricCacheORM.same_imaging_mode.is_(True))
@@ -259,20 +274,19 @@ class SpatialService:
         )
 
         if params.allowed_satellites:
-            allowed_satellites = [
-                str(item).strip().upper()
-                for item in params.allowed_satellites
-                if str(item).strip()
-            ]
+            allowed_satellites = []
+            for item in params.allowed_satellites:
+                compact = str(item).strip().upper().replace("-", "").replace("_", "").replace(" ", "")
+                if compact in {"LT1", "LT1A", "LT1B", "LUTAN1", "LUTAN1A", "LUTAN1B"}:
+                    allowed_satellites.append("LT1")
+                elif compact in {"S1", "S1A", "S1B", "S1C", "SENTINEL1", "SENTINEL1A", "SENTINEL1B", "SENTINEL1C"}:
+                    allowed_satellites.append("S1")
+            allowed_satellites = list(dict.fromkeys(allowed_satellites))
+            if not allowed_satellites:
+                return []
             stmt = stmt.where(
-                or_(
-                    func.upper(master_alias.satellite).in_(allowed_satellites),
-                    func.upper(master_alias.satellite_family).in_(allowed_satellites),
-                ),
-                or_(
-                    func.upper(slave_alias.satellite).in_(allowed_satellites),
-                    func.upper(slave_alias.satellite_family).in_(allowed_satellites),
-                ),
+                master_family_expr.in_(allowed_satellites),
+                slave_family_expr.in_(allowed_satellites),
             )
 
         if params.master_date_from:
@@ -286,23 +300,23 @@ class SpatialService:
 
         if aoi_wkt:
             aoi_geom = func.ST_GeomFromText(aoi_wkt, 4326)
+            aoi_geog = cast(aoi_geom, Geography)
+            aoi_area = func.nullif(ST_Area(aoi_geog), 0)
+            pair_overlap_geom = ST_Intersection(master_alias.geom, slave_alias.geom)
+            pair_aoi_geom = ST_Intersection(pair_overlap_geom, aoi_geom)
+            pair_aoi_overlap_expr = (ST_Area(cast(pair_aoi_geom, Geography)) / aoi_area).label("pair_aoi_overlap_ratio")
+            stmt = stmt.add_columns(pair_aoi_overlap_expr)
             stmt = stmt.where(
-                ST_Intersects(master_alias.geom, aoi_geom),
-                ST_Intersects(slave_alias.geom, aoi_geom),
+                ST_Intersects(pair_overlap_geom, aoi_geom),
             )
             if params.aoi_overlap_threshold is not None:
-                aoi_geog = cast(aoi_geom, Geography)
-                aoi_area = func.nullif(ST_Area(aoi_geog), 0)
-                master_inter_geog = cast(ST_Intersection(master_alias.geom, aoi_geom), Geography)
-                slave_inter_geog = cast(ST_Intersection(slave_alias.geom, aoi_geom), Geography)
-                stmt = stmt.where(
-                    ST_Area(master_inter_geog) / aoi_area >= params.aoi_overlap_threshold,
-                    ST_Area(slave_inter_geog) / aoi_area >= params.aoi_overlap_threshold,
-                )
+                stmt = stmt.where(pair_aoi_overlap_expr >= params.aoi_overlap_threshold)
 
         stmt = stmt.order_by(
             PairingMetricCacheORM.master_imaging_date.asc(),
             PairingMetricCacheORM.slave_imaging_date.asc(),
+            PairingMetricCacheORM.dinsar_quality_tier.asc(),
+            func.coalesce(PairingMetricCacheORM.dinsar_quality_score, 0).desc(),
             func.coalesce(PairingMetricCacheORM.scene_overlap_ratio, 0).desc(),
             center_distance_expr.asc(),
             PairingMetricCacheORM.pair_uid.asc(),
@@ -310,7 +324,9 @@ class SpatialService:
 
         result = await db.execute(stmt)
         candidate_pool: List[dict] = []
-        for metric_row, master_row, slave_row in result.all():
+        for row in result.all():
+            metric_row, master_row, slave_row = row[0], row[1], row[2]
+            pair_aoi_overlap_ratio = row[3] if len(row) > 3 else None
             center_distance = float(
                 metric_row.scene_center_distance_meters
                 if metric_row.scene_center_distance_meters is not None
@@ -328,16 +344,54 @@ class SpatialService:
                     "dist": center_distance,
                     "scene_center_distance_meters": center_distance,
                     "overlap_ratio": float(metric_row.scene_overlap_ratio or 0),
+                    "dinsar_quality_tier": metric_row.dinsar_quality_tier,
+                    "dinsar_quality_score": (
+                        float(metric_row.dinsar_quality_score)
+                        if metric_row.dinsar_quality_score is not None
+                        else None
+                    ),
+                    "dinsar_readiness": metric_row.dinsar_readiness,
+                    "dinsar_reasons": [
+                        str(item)
+                        for item in (metric_row.dinsar_reasons_json or [])
+                        if isinstance(item, str) and item.strip()
+                    ],
+                    "same_relative_orbit": bool(metric_row.same_relative_orbit),
+                    "master_relative_orbit": metric_row.master_relative_orbit,
+                    "slave_relative_orbit": metric_row.slave_relative_orbit,
+                    "pair_aoi_overlap_ratio": (
+                        float(pair_aoi_overlap_ratio)
+                        if pair_aoi_overlap_ratio is not None
+                        else None
+                    ),
                 }
             )
         return candidate_pool
+
+    def _ensure_candidate_identity(self, candidate: dict) -> Tuple[str, str]:
+        master = candidate["master"]
+        slave = candidate["slave"]
+        task_alias = str(candidate.get("task_alias") or "").strip() or build_task_alias(
+            master.imaging_date,
+            slave.imaging_date,
+        )
+        pair_key = str(candidate.get("pair_key") or "").strip() or build_pair_key(
+            master.file_path,
+            slave.file_path,
+            master.imaging_date,
+            slave.imaging_date,
+            master.satellite_family or slave.satellite_family or master.satellite or slave.satellite,
+        )
+        candidate["task_alias"] = task_alias
+        candidate["pair_key"] = pair_key
+        return task_alias, pair_key
 
     def _build_radar_pairs(self, selected_candidates: List[dict]) -> List[RadarPair]:
         result_pairs: List[RadarPair] = []
         for candidate in selected_candidates:
             master = candidate["master"]
             slave = candidate["slave"]
-            task_alias = build_task_alias(master.imaging_date, slave.imaging_date)
+            task_alias, pair_key = self._ensure_candidate_identity(candidate)
             selection_score = candidate.get("selection_score")
             result_pairs.append(
                 RadarPair(
@@ -345,13 +399,7 @@ class SpatialService:
                     slave=slave,
                     task_name=task_alias,
                     task_alias=task_alias,
-                    pair_key=build_pair_key(
-                        master.file_path,
-                        slave.file_path,
-                        master.imaging_date,
-                        slave.imaging_date,
-                        master.satellite_family or slave.satellite_family or master.satellite or slave.satellite,
-                    ),
+                    pair_key=pair_key,
                     pair_uid=candidate.get("pair_uid"),
                     metric_cache_ref_id=candidate.get("metric_cache_ref_id"),
                     network_run_id=candidate.get("network_run_id"),
@@ -367,9 +415,291 @@ class SpatialService:
                         if candidate.get("scene_center_distance_meters") is not None
                         else candidate.get("dist") or 0
                     ),
+                    scene_overlap_ratio=float(candidate.get("overlap_ratio") or 0.0),
+                    pair_aoi_overlap_ratio=(
+                        float(candidate["pair_aoi_overlap_ratio"])
+                        if candidate.get("pair_aoi_overlap_ratio") is not None
+                        else None
+                    ),
+                    dinsar_quality_tier=candidate.get("dinsar_quality_tier"),
+                    dinsar_quality_score=(
+                        float(candidate["dinsar_quality_score"])
+                        if candidate.get("dinsar_quality_score") is not None
+                        else None
+                    ),
+                    dinsar_readiness=candidate.get("dinsar_readiness"),
+                    dinsar_reasons=candidate.get("dinsar_reasons") or [],
+                    same_relative_orbit=bool(candidate.get("same_relative_orbit")),
+                    master_relative_orbit=candidate.get("master_relative_orbit"),
+                    slave_relative_orbit=candidate.get("slave_relative_orbit"),
+                    production_summary=candidate.get("production_summary"),
                 )
             )
         return result_pairs
+
+    async def _attach_dinsar_production_summaries(
+        self,
+        db: AsyncSession,
+        selected_candidates: List[dict],
+    ) -> None:
+        if not selected_candidates:
+            return
+
+        pair_uids: set[str] = set()
+        pair_keys: set[str] = set()
+        aliases: set[str] = set()
+        for candidate in selected_candidates:
+            task_alias, pair_key = self._ensure_candidate_identity(candidate)
+            pair_uid = str(candidate.get("pair_uid") or "").strip()
+            if pair_uid:
+                pair_uids.add(pair_uid)
+            if pair_key:
+                pair_keys.add(pair_key)
+            if task_alias:
+                aliases.add(task_alias)
+
+        run_conditions = []
+        if pair_uids:
+            run_conditions.append(DinsarProductionRunItemORM.pair_uid.in_(pair_uids))
+        if pair_keys:
+            run_conditions.append(DinsarProductionRunItemORM.pair_key.in_(pair_keys))
+        if aliases:
+            run_conditions.append(DinsarProductionRunItemORM.task_alias.in_(aliases))
+            run_conditions.append(DinsarProductionRunItemORM.task_name.in_(aliases))
+
+        product_conditions = []
+        if pair_uids:
+            product_conditions.append(ResultProductORM.pair_uid.in_(pair_uids))
+        if pair_keys:
+            product_conditions.append(ResultProductORM.pair_key.in_(pair_keys))
+        if aliases:
+            product_conditions.append(ResultProductORM.task_alias.in_(aliases))
+            product_conditions.append(ResultProductORM.task_name.in_(aliases))
+
+        run_rows = []
+        if run_conditions:
+            result = await db.execute(
+                select(DinsarProductionRunItemORM, DinsarProductionRunORM)
+                .join(DinsarProductionRunORM, DinsarProductionRunItemORM.run_id == DinsarProductionRunORM.run_id)
+                .where(or_(*run_conditions))
+                .order_by(
+                    DinsarProductionRunItemORM.updated_at.desc().nullslast(),
+                    DinsarProductionRunItemORM.id.desc(),
+                )
+            )
+            run_rows = result.all()
+
+        products = []
+        if product_conditions:
+            result = await db.execute(
+                select(ResultProductORM)
+                .where(ResultProductORM.catalog_name == "dinsar")
+                .where(or_(*product_conditions))
+                .order_by(
+                    ResultProductORM.published_at.desc().nullslast(),
+                    ResultProductORM.id.desc(),
+                )
+            )
+            products = result.scalars().all()
+
+        run_by_uid: Dict[str, List[Tuple[DinsarProductionRunItemORM, DinsarProductionRunORM]]] = defaultdict(list)
+        run_by_key: Dict[str, List[Tuple[DinsarProductionRunItemORM, DinsarProductionRunORM]]] = defaultdict(list)
+        run_by_alias: Dict[str, List[Tuple[DinsarProductionRunItemORM, DinsarProductionRunORM]]] = defaultdict(list)
+        for item, run in run_rows:
+            pair_uid = str(item.pair_uid or "").strip()
+            pair_key = str(item.pair_key or "").strip()
+            if pair_uid:
+                run_by_uid[pair_uid].append((item, run))
+            if pair_key:
+                run_by_key[pair_key].append((item, run))
+            for alias in {str(item.task_alias or "").strip(), str(item.task_name or "").strip()}:
+                if alias:
+                    run_by_alias[alias].append((item, run))
+
+        products_by_uid: Dict[str, List[ResultProductORM]] = defaultdict(list)
+        products_by_key: Dict[str, List[ResultProductORM]] = defaultdict(list)
+        products_by_alias: Dict[str, List[ResultProductORM]] = defaultdict(list)
+        for product in products:
+            pair_uid = str(product.pair_uid or "").strip()
+            pair_key = str(product.pair_key or "").strip()
+            if pair_uid:
+                products_by_uid[pair_uid].append(product)
+            if pair_key:
+                products_by_key[pair_key].append(product)
+            for alias in {str(product.task_alias or "").strip(), str(product.task_name or "").strip()}:
+                if alias:
+                    products_by_alias[alias].append(product)
+
+        for candidate in selected_candidates:
+            task_alias, pair_key = self._ensure_candidate_identity(candidate)
+            pair_uid = str(candidate.get("pair_uid") or "").strip()
+            exact_runs = self._dedupe_by_object_id(
+                [*run_by_uid.get(pair_uid, []), *run_by_key.get(pair_key, [])],
+                key=lambda row: getattr(row[0], "id", None),
+            )
+            alias_runs = self._dedupe_by_object_id(
+                run_by_alias.get(task_alias, []),
+                key=lambda row: getattr(row[0], "id", None),
+            )
+            exact_products = self._dedupe_by_object_id(
+                [*products_by_uid.get(pair_uid, []), *products_by_key.get(pair_key, [])],
+                key=lambda product: getattr(product, "id", None),
+            )
+            alias_products = self._dedupe_by_object_id(
+                products_by_alias.get(task_alias, []),
+                key=lambda product: getattr(product, "id", None),
+            )
+            matched_runs = exact_runs or alias_runs
+            matched_products = exact_products or alias_products
+            candidate["production_summary"] = self._summarize_dinsar_production(
+                matched_runs,
+                matched_products,
+                match_level="identity" if (exact_runs or exact_products) else ("task_alias" if (alias_runs or alias_products) else "none"),
+            )
+
+    def _summarize_dinsar_production(
+        self,
+        run_rows: List[Tuple[DinsarProductionRunItemORM, DinsarProductionRunORM]],
+        products: List[ResultProductORM],
+        *,
+        match_level: str = "none",
+    ) -> Dict[str, Any]:
+        latest_run_row = max(
+            run_rows,
+            key=lambda row: self._datetime_sort_key(
+                row[0].updated_at,
+                row[0].ended_at,
+                row[0].started_at,
+                row[0].created_at,
+            ),
+            default=None,
+        )
+        latest_product = max(
+            products,
+            key=lambda product: self._datetime_sort_key(
+                product.published_at,
+                product.produced_at,
+                product.updated_at,
+                product.registered_at,
+            ),
+            default=None,
+        )
+        ready_products = [product for product in products if self._is_ready_result_product(product)]
+        completed_statuses = {"COMPLETED", "READY", "SUCCESS", "PUBLISHED"}
+        failed_statuses = {"FAILED", "ERROR", "CANCELLED", "CANCELED"}
+        completed_run_count = sum(
+            1
+            for item, run in run_rows
+            if str(item.status or "").strip().upper() in completed_statuses
+            or str(run.status or "").strip().upper() in completed_statuses
+        )
+        failed_run_count = sum(
+            1
+            for item, run in run_rows
+            if str(item.status or "").strip().upper() in failed_statuses
+            or str(run.status or "").strip().upper() in failed_statuses
+        )
+
+        latest_item = latest_run_row[0] if latest_run_row else None
+        latest_run = latest_run_row[1] if latest_run_row else None
+        if ready_products and latest_product is not None:
+            latest_status = str(latest_product.status or "").strip().upper()
+        elif latest_item is not None or latest_run is not None:
+            latest_status = str(
+                (latest_item.status if latest_item is not None else None)
+                or (latest_run.status if latest_run is not None else None)
+                or ""
+            ).strip().upper()
+        elif latest_product is not None:
+            latest_status = str(latest_product.status or "").strip().upper()
+        else:
+            latest_status = ""
+        if ready_products:
+            status = "READY"
+        elif completed_run_count > 0:
+            status = "COMPLETED"
+        elif latest_status:
+            status = latest_status
+        else:
+            status = "MISSING"
+
+        engine_codes = sorted(
+            {
+                str(value or "").strip().lower()
+                for value in [
+                    *(product.engine_code for product in products),
+                    *(run.engine_code for _, run in run_rows),
+                ]
+                if str(value or "").strip()
+            }
+        )
+        return {
+            "has_record": bool(run_rows or products),
+            "is_produced": bool(ready_products or completed_run_count > 0),
+            "status": status,
+            "match_level": match_level,
+            "run_item_count": len(run_rows),
+            "completed_run_count": completed_run_count,
+            "failed_run_count": failed_run_count,
+            "product_count": len(products),
+            "ready_product_count": len(ready_products),
+            "engine_codes": engine_codes,
+            "latest_engine_code": (
+                str(latest_product.engine_code or "").strip().lower()
+                if latest_product is not None and latest_product.engine_code
+                else (
+                    str(latest_run.engine_code or "").strip().lower()
+                    if latest_run is not None and latest_run.engine_code
+                    else None
+                )
+            ),
+            "latest_run_id": latest_run.run_id if latest_run is not None else None,
+            "latest_run_status": latest_run.status if latest_run is not None else None,
+            "latest_item_status": latest_item.status if latest_item is not None else None,
+            "latest_output_dir": latest_item.latest_output_dir if latest_item is not None else None,
+            "latest_product_id": latest_product.id if latest_product is not None else None,
+            "latest_product_identifier": latest_product.product_id if latest_product is not None else None,
+            "latest_product_status": latest_product.status if latest_product is not None else None,
+            "latest_product_health": latest_product.health_status if latest_product is not None else None,
+            "latest_product_published_at": latest_product.published_at if latest_product is not None else None,
+            "updated_at": (
+                latest_item.updated_at
+                if latest_item is not None
+                else (
+                    latest_product.updated_at
+                    if latest_product is not None
+                    else None
+                )
+            ),
+        }
+
+    def _is_ready_result_product(self, product: ResultProductORM) -> bool:
+        status = str(product.status or "").strip().upper()
+        health = str(product.health_status or "").strip().upper()
+        return status in {"READY", "COMPLETED", "SUCCESS"} and health not in {"ERROR", "FAILED"}
+
+    def _datetime_sort_key(self, *values: Any) -> float:
+        for value in values:
+            if value is None:
+                continue
+            try:
+                return float(value.timestamp())
+            except Exception:
+                continue
+        return 0.0
+
+    def _dedupe_by_object_id(self, items: List[Any], *, key) -> List[Any]:
+        seen: set[Any] = set()
+        output: List[Any] = []
+        for item in items:
+            item_key = key(item)
+            if item_key is None:
+                item_key = id(item)
+            if item_key in seen:
+                continue
+            seen.add(item_key)
+            output.append(item)
+        return output
 
     async def _persist_network_run(
         self,
@@ -451,6 +781,8 @@ class SpatialService:
             "master_scene_uid": candidate.get("master_scene_uid"),
             "slave_scene_uid": candidate.get("slave_scene_uid"),
             "pair_uid": candidate.get("pair_uid"),
+            "pair_key": candidate.get("pair_key"),
+            "task_alias": candidate.get("task_alias"),
             "time_baseline_days": int(candidate.get("days") or 0),
             "spatial_baseline_meters": float(candidate.get("dist") or 0.0),
             "scene_center_distance_meters": float(
@@ -460,6 +792,11 @@ class SpatialService:
             ),
             "legacy_spatial_baseline_field": "scene_center_distance_meters",
             "scene_overlap_ratio": float(candidate.get("overlap_ratio") or 0.0),
+            "pair_aoi_overlap_ratio": (
+                float(candidate["pair_aoi_overlap_ratio"])
+                if candidate.get("pair_aoi_overlap_ratio") is not None
+                else None
+            ),
         }
 
     def _stable_sha1(self, value: Any) -> str:
@@ -813,6 +1150,226 @@ class SpatialService:
             "network_warnings": safe_network_warnings,
             "scenes": scene_payloads,
         }
+
+    def _apply_dinsar_production_strategy(
+        self,
+        candidate_pool: List[dict],
+        params: PairingRequest,
+    ) -> Tuple[List[dict], List[str]]:
+        if not candidate_pool:
+            return [], []
+
+        warnings: List[str] = []
+        rejected_count = sum(
+            1
+            for candidate in candidate_pool
+            if str(candidate.get("dinsar_readiness") or "").upper() == "NOT_RECOMMENDED"
+        )
+        if rejected_count:
+            warnings.append(f"{rejected_count}条候选因D-InSAR生产前置条件不足被过滤。")
+
+        selected = []
+        for candidate in candidate_pool:
+            readiness = str(candidate.get("dinsar_readiness") or "CANDIDATE").upper()
+            if readiness == "NOT_RECOMMENDED":
+                continue
+            tier = str(candidate.get("dinsar_quality_tier") or "C").upper()
+            quality_score = candidate.get("dinsar_quality_score")
+            selected.append(
+                {
+                    **candidate,
+                    "selection_reason": f"dinsar_{readiness.lower()}_{tier.lower()}",
+                    "selection_score": (
+                        float(quality_score)
+                        if quality_score is not None
+                        else self._score_pair_candidate(candidate, params)
+                    ),
+                }
+            )
+
+        selected.sort(
+            key=lambda item: (
+                {"A": 0, "B": 1, "C": 2}.get(str(item.get("dinsar_quality_tier") or "C").upper(), 9),
+                -float(item.get("selection_score") or 0),
+                int(item.get("days") or 0),
+                float(item.get("dist") or 0),
+                str(getattr(item.get("master"), "imaging_date", "") or ""),
+                str(getattr(item.get("slave"), "imaging_date", "") or ""),
+            )
+        )
+        return selected, warnings
+
+    async def _build_empty_pairing_diagnostics(
+        self,
+        db: AsyncSession,
+        params: PairingRequest,
+        *,
+        aoi_wkt: Optional[str],
+        require_orbit_data: bool,
+    ) -> List[str]:
+        allowed_families: List[str] = []
+        for item in params.allowed_satellites or []:
+            compact = str(item).strip().upper().replace("-", "").replace("_", "").replace(" ", "")
+            if compact in {"LT1", "LT1A", "LT1B", "LUTAN1", "LUTAN1A", "LUTAN1B"}:
+                allowed_families.append("LT1")
+            elif compact in {"S1", "S1A", "S1B", "S1C", "SENTINEL1", "SENTINEL1A", "SENTINEL1B", "SENTINEL1C"}:
+                allowed_families.append("S1")
+        allowed_families = list(dict.fromkeys(allowed_families))
+
+        sql = text(
+            """
+            WITH base AS (
+                SELECT
+                    pmc.*,
+                    m.satellite AS master_satellite_actual,
+                    s.satellite AS slave_satellite_actual,
+                    m.has_orbit_data AS master_has_orbit,
+                    s.has_orbit_data AS slave_has_orbit,
+                    COALESCE(pmc.scene_center_distance_meters, pmc.spatial_baseline_meters) AS center_m
+                FROM pairing_metric_cache pmc
+                JOIN radar_data m ON m.id = pmc.master_scene_ref_id
+                JOIN radar_data s ON s.id = pmc.slave_scene_ref_id
+                WHERE pmc.metric_version = :metric_version
+                  AND pmc.status = 'READY'
+                  AND pmc.master_imaging_date < pmc.slave_imaging_date
+                  AND pmc.same_look_direction IS TRUE
+                  AND pmc.same_satellite_family IS TRUE
+                  AND pmc.dinsar_readiness IN ('RECOMMENDED', 'CANDIDATE')
+                  AND (:require_orbit_data IS FALSE OR (m.has_orbit_data IS TRUE AND s.has_orbit_data IS TRUE))
+                  AND (:require_same_imaging_mode IS FALSE OR pmc.same_imaging_mode IS TRUE)
+                  AND (:require_same_polarization IS FALSE OR pmc.same_polarization IS TRUE)
+                  AND (
+                      :allowed_families_is_empty IS TRUE
+                      OR pmc.master_satellite_family = ANY(:allowed_families)
+                      OR pmc.master_satellite = ANY(:allowed_families)
+                  )
+                  AND (CAST(:master_date_from AS text) IS NULL OR pmc.master_imaging_date >= CAST(:master_date_from AS text))
+                  AND (CAST(:master_date_to AS text) IS NULL OR pmc.master_imaging_date <= CAST(:master_date_to AS text))
+                  AND (CAST(:slave_date_from AS text) IS NULL OR pmc.slave_imaging_date >= CAST(:slave_date_from AS text))
+                  AND (CAST(:slave_date_to AS text) IS NULL OR pmc.slave_imaging_date <= CAST(:slave_date_to AS text))
+                  AND (
+                      CAST(:aoi_wkt AS text) IS NULL
+                      OR ST_Intersects(
+                          ST_Intersection(m.geom, s.geom),
+                          ST_GeomFromText(CAST(:aoi_wkt AS text), 4326)
+                      )
+                  )
+            ),
+            time_ok AS (
+                SELECT * FROM base
+                WHERE time_baseline_days BETWEEN :time_baseline_min AND :time_baseline_max
+            ),
+            overlap_ok AS (
+                SELECT * FROM time_ok
+                WHERE scene_overlap_ratio >= :overlap_threshold
+            ),
+            center_ok AS (
+                SELECT * FROM overlap_ok
+                WHERE center_m <= :center_distance_max
+            )
+            SELECT
+                (SELECT count(*) FROM base) AS base_count,
+                (SELECT count(*) FROM time_ok) AS time_ok_count,
+                (SELECT count(*) FROM overlap_ok) AS overlap_ok_count,
+                (SELECT count(*) FROM center_ok) AS center_ok_count,
+                (
+                    SELECT json_build_object(
+                        'master_date', master_imaging_date,
+                        'slave_date', slave_imaging_date,
+                        'master_satellite', master_satellite_actual,
+                        'slave_satellite', slave_satellite_actual,
+                        'time_baseline_days', time_baseline_days,
+                        'center_meters', center_m,
+                        'overlap_ratio', scene_overlap_ratio,
+                        'quality_tier', dinsar_quality_tier,
+                        'readiness', dinsar_readiness
+                    )
+                    FROM base
+                    ORDER BY
+                        CASE
+                            WHEN time_baseline_days BETWEEN :time_baseline_min AND :time_baseline_max
+                            THEN 0 ELSE 1
+                        END,
+                        CASE WHEN scene_overlap_ratio >= :overlap_threshold THEN 0 ELSE 1 END,
+                        abs(time_baseline_days - :time_baseline_max),
+                        center_m ASC NULLS LAST
+                    LIMIT 1
+                ) AS nearest_candidate;
+            """
+        )
+        result = await db.execute(
+            sql,
+            {
+                "metric_version": pairing_state_service.metric_version,
+                "require_orbit_data": require_orbit_data,
+                "require_same_imaging_mode": bool(params.require_same_imaging_mode),
+                "require_same_polarization": bool(params.require_same_polarization),
+                "allowed_families": allowed_families or ["__NONE__"],
+                "allowed_families_is_empty": not allowed_families,
+                "master_date_from": params.master_date_from or None,
+                "master_date_to": params.master_date_to or None,
+                "slave_date_from": params.slave_date_from or None,
+                "slave_date_to": params.slave_date_to or None,
+                "aoi_wkt": aoi_wkt,
+                "time_baseline_min": int(params.time_baseline_min),
+                "time_baseline_max": int(params.time_baseline_max),
+                "overlap_threshold": float(params.overlap_threshold),
+                "center_distance_max": float(params.spatial_baseline_max_meters),
+            },
+        )
+        row = result.mappings().first()
+        if not row:
+            return ["未找到满足条件的 D-InSAR 配对；诊断查询未返回统计结果。"]
+
+        base_count = int(row.get("base_count") or 0)
+        time_ok_count = int(row.get("time_ok_count") or 0)
+        overlap_ok_count = int(row.get("overlap_ok_count") or 0)
+        center_ok_count = int(row.get("center_ok_count") or 0)
+        if base_count <= 0:
+            family_text = "、".join(allowed_families) if allowed_families else "LT-1/Sentinel-1"
+            return [
+                f"未找到 {family_text} 的可生产基础候选边。请检查数据体系、主从日期范围、AOI、精轨绑定和配对缓存状态。"
+            ]
+
+        messages = [
+            (
+                "当前筛选下基础候选 {base} 条；时间基线 {min_days}-{max_days} 天后剩 {time_ok} 条；"
+                "重叠率 >= {overlap:.2f} 后剩 {overlap_ok} 条；footprint 中心距离 <= {center:.0f} 米后剩 {center_ok} 条。"
+            ).format(
+                base=base_count,
+                min_days=int(params.time_baseline_min),
+                max_days=int(params.time_baseline_max),
+                time_ok=time_ok_count,
+                overlap=float(params.overlap_threshold),
+                overlap_ok=overlap_ok_count,
+                center=float(params.spatial_baseline_max_meters),
+                center_ok=center_ok_count,
+            )
+        ]
+        nearest = row.get("nearest_candidate")
+        if isinstance(nearest, str):
+            try:
+                nearest = json.loads(nearest)
+            except Exception:
+                nearest = None
+        if isinstance(nearest, dict):
+            messages.append(
+                (
+                    "最接近的一对是 {master_satellite} {master_date} -> {slave_satellite} {slave_date}，"
+                    "时间基线 {days} 天，中心距离 {center:.1f} 米，重叠率 {overlap:.3f}，质量 {tier}/{readiness}。"
+                ).format(
+                    master_satellite=nearest.get("master_satellite") or "?",
+                    master_date=nearest.get("master_date") or "?",
+                    slave_satellite=nearest.get("slave_satellite") or "?",
+                    slave_date=nearest.get("slave_date") or "?",
+                    days=int(nearest.get("time_baseline_days") or 0),
+                    center=float(nearest.get("center_meters") or 0.0),
+                    overlap=float(nearest.get("overlap_ratio") or 0.0),
+                    tier=nearest.get("quality_tier") or "?",
+                    readiness=nearest.get("readiness") or "?",
+                )
+            )
+        return messages
 
     def _apply_strategy(
         self,

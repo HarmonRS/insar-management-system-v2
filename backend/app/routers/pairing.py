@@ -40,10 +40,10 @@ router = APIRouter()
 
 def get_pairing_request_from_form(
     time_baseline_min: int = Form(1),
-    time_baseline_max: int = Form(90),
+    time_baseline_max: int = Form(30),
     overlap_threshold: float = Form(0.5),
-    spatial_baseline_max_meters: int = Form(3000),
-    limit_footprint_center_distance: bool = Form(False),
+    spatial_baseline_max_meters: int = Form(5000),
+    limit_footprint_center_distance: bool = Form(True),
     max_temporal_baseline_days: Optional[int] = Form(None),
     pair_footprint_overlap_min_ratio: Optional[float] = Form(None),
     footprint_center_distance_max_meters: Optional[int] = Form(None),
@@ -57,7 +57,7 @@ def get_pairing_request_from_form(
     master_date_to: Optional[str] = Form(None),
     slave_date_from: Optional[str] = Form(None),
     slave_date_to: Optional[str] = Form(None),
-    strategy: str = Form("all"),
+    strategy: str = Form("dinsar_production"),
     num_connections: int = Form(1),
     reference_image_id: Optional[int] = Form(None),
     allowed_satellites: Optional[str] = Form(None),  # JSON string
@@ -91,7 +91,7 @@ def get_pairing_request_from_form(
             master_date_to=master_date_to,
             slave_date_from=slave_date_from,
             slave_date_to=slave_date_to,
-            strategy=strategy,
+            strategy="dinsar_production",
             num_connections=num_connections,
             reference_image_id=reference_image_id,
             allowed_satellites=satellites_list,

@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import MiniCoverageMap from './components/MiniCoverageMap';
 
 import {
   auditSbasInsarStack,
@@ -387,6 +388,40 @@ function LocationSummaryPanel({ coverage }) {
   );
 }
 
+function StackCoverageMiniMap({ stack, coverage, title = 'SBAS序列范围预览' }) {
+  const source = coverage || stack || {};
+  const bbox = source.bbox || source.stack_bbox || stack?.bbox || stack?.bbox_intersection;
+  const intersection = source.bbox_intersection || stack?.bbox_intersection;
+  const sceneFootprints = source.scene_footprints_geojson || stack?.scene_footprints_geojson;
+  const coverageGeojson = source.geojson || stack?.geojson || sceneFootprints;
+  const bboxes = [
+    bbox && {
+      bbox,
+      label: 'stack bbox',
+      color: '#2563eb',
+      fillOpacity: 0.05,
+    },
+    intersection && {
+      bbox: intersection,
+      label: 'common overlap',
+      color: '#16a34a',
+      fillOpacity: 0.12,
+      dashArray: null,
+    },
+  ].filter(Boolean);
+  const sceneCount = (sceneFootprints?.features || []).length || source.scene_bbox_count || stack?.usable_scene_count || stack?.scene_count || 0;
+  return (
+    <MiniCoverageMap
+      title={title}
+      subtitle={sceneCount ? `${sceneCount} 景` : ''}
+      bboxes={bboxes}
+      geojson={coverageGeojson}
+      height={280}
+      emptyText="当前序列缺少可绘制范围。"
+    />
+  );
+}
+
 /*
 function UnusedSceneFootprintGeographicCoverageMap({ coverage }) {
   const mapElementRef = useRef(null);
@@ -628,7 +663,15 @@ function UnusedGeographicCoveragePanel({ coverage }) {
 }
 */
 
-export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart }) {
+const SBAS_FOCUS_TO_SECTION = {
+  planning: 'sbas-planning-section',
+  batches: 'sbas-run-section',
+  prepare: 'sbas-prepare-section',
+  runs: 'sbas-run-section',
+};
+
+export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart, initialFocus = 'planning' }) {
+  const lastAppliedFocusRef = useRef('');
   const [processorMode, setProcessorMode] = useState('landsar');
   const [capabilities, setCapabilities] = useState(null);
   const [runs, setRuns] = useState([]);
@@ -685,6 +728,34 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
   const [workflowJobLoading, setWorkflowJobLoading] = useState(false);
   const [workflowJob, setWorkflowJob] = useState(null);
   const [runDeleteLoading, setRunDeleteLoading] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const sectionId = SBAS_FOCUS_TO_SECTION[initialFocus] || SBAS_FOCUS_TO_SECTION.planning;
+    const focusToken = [
+      processorMode,
+      initialFocus,
+      selectedRunId,
+      selectedLandsarRunId,
+      stackCandidates.length,
+      runs.length,
+      landsarRuns.length,
+    ].join(':');
+    if (lastAppliedFocusRef.current === focusToken) return undefined;
+    lastAppliedFocusRef.current = focusToken;
+    const timer = window.setTimeout(() => {
+      document.getElementById(sectionId)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [
+    initialFocus,
+    landsarRuns.length,
+    processorMode,
+    runs.length,
+    selectedLandsarRunId,
+    selectedRunId,
+    stackCandidates.length,
+  ]);
 
   const stackDiscoveryPayload = useMemo(() => {
     const adminRegion = stackAdminRegionQuery.trim();
@@ -1387,7 +1458,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
           )}
         </section>
 
-        <section style={sectionStyle}>
+        <section id="sbas-planning-section" style={sectionStyle}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
             <div>
               <h3 style={{ margin: 0, fontSize: 15, color: '#0f172a' }}>SBAS 生产区域</h3>
@@ -1456,7 +1527,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginTop: 12 }}>
+          <div id="sbas-prepare-section" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginTop: 12 }}>
             <label style={{ display: 'grid', gap: 5, gridColumn: 'span 2' }}>
               <span style={labelStyle}>DEM 文件</span>
               <input value={landsarDemPath} onChange={event => setLandsarDemPath(event.target.value)} placeholder="D:\\DEM\\HeiLongJiang10M_DEM.tif" style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 10px', fontSize: 12 }} />
@@ -1554,6 +1625,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
                   )}
                   <StackIdentityNotice stack={selectedStack} />
                   <SceneNamePanel stack={selectedStack} />
+                  <StackCoverageMiniMap stack={selectedStack} title="LandSAR SBAS序列范围预览" />
                   <LocationSummaryPanel
                     coverage={{
                         bbox: selectedStack.bbox || selectedStack.bbox_intersection,
@@ -1602,7 +1674,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
           )}
         </section>
 
-        <section style={sectionStyle}>
+        <section id="sbas-run-section" style={sectionStyle}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
             <div>
               <h3 style={{ margin: 0, fontSize: 15, color: '#0f172a' }}>LandSAR Run</h3>
@@ -1673,7 +1745,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
 
   return (
     <div style={shellStyle}>
-      <section style={sectionStyle}>
+      <section id="sbas-prepare-section" style={sectionStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
           <div>
             <h2 style={{ margin: 0, fontSize: 20, color: '#0f172a' }}>SBAS-InSAR 生产</h2>
@@ -1731,7 +1803,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
         {activeGammaRunNotice}
       </section>
 
-      <section style={sectionStyle}>
+      <section id="sbas-planning-section" style={sectionStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
           <div>
             <h3 style={{ margin: 0, fontSize: 15, color: '#0f172a' }}>SBAS 生产区域</h3>
@@ -1898,6 +1970,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
                   )}
                   <StackIdentityNotice stack={selectedStack} />
                   <SceneNamePanel stack={selectedStack} />
+                  <StackCoverageMiniMap stack={selectedStack} title="Gamma SBAS序列范围预览" />
                   <LocationSummaryPanel
                     coverage={{
                       bbox: selectedStack.bbox || selectedStack.bbox_intersection,
@@ -1944,7 +2017,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
         )}
       </section>
 
-      <section style={sectionStyle}>
+      <section id="sbas-run-section" style={sectionStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
           <div>
             <h3 style={{ margin: 0, fontSize: 15, color: '#0f172a' }}>生产 Run 计划</h3>
@@ -2059,6 +2132,9 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
 
                 <details style={compactDetailsStyle}>
                   <summary style={compactSummaryStyle}>空间覆盖</summary>
+                  <div style={{ marginTop: 10 }}>
+                    <StackCoverageMiniMap coverage={runGeographicCoverage} title="Run覆盖范围预览" />
+                  </div>
                   <div style={{ marginTop: 10 }}>
                     <LocationSummaryPanel coverage={runGeographicCoverage} />
                   </div>

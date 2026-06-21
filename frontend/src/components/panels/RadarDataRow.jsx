@@ -13,7 +13,7 @@ function RadarDataRow({
     onToggleLayer,
 }) {
     return (
-        <li className="data-item" onClick={() => onFlyTo(item)}>
+        <li className="data-item radar-data-item" onClick={() => onFlyTo(item)}>
             <span className="data-item-name" title={item.displayName}>
                 {item.displayName}
             </span>

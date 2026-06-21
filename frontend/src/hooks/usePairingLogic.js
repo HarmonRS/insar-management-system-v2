@@ -1,8 +1,5 @@
 /**
- * usePairingLogic — pairing and PS stack business logic extracted from App.jsx
- *
- * Contains: findPairs, handleFindPsStack, createDinsarBatch, createPsBatch,
- * focusBatchAfterCreate, clearPsResults
+ * usePairingLogic - pairing and time-series stack business logic extracted from App.jsx.
  */
 import apiClient from '../api/client';
 import { getPairingHealth } from '../api/pairing';
@@ -14,9 +11,15 @@ import { getSelectedRegionTreeId } from '../utils/appUiHelpers';
 const compactDinsarBatchScene = (scene = {}) => ({
     file_path: scene.file_path || '',
     satellite: scene.satellite || null,
+    satellite_family: scene.satellite_family || null,
     imaging_date: scene.imaging_date || null,
     imaging_mode: scene.imaging_mode || null,
     polarization: scene.polarization || null,
+    orbit_direction: scene.orbit_direction || null,
+    relative_orbit: scene.relative_orbit || null,
+    absolute_orbit: scene.absolute_orbit || null,
+    has_orbit_data: scene.has_orbit_data ?? null,
+    orbit_file_path: scene.orbit_file_path || null,
 });
 
 const compactDinsarBatchPair = (pair = {}) => ({
@@ -31,9 +34,89 @@ const compactDinsarBatchPair = (pair = {}) => ({
     time_baseline_days: pair.time_baseline_days ?? null,
     spatial_baseline_meters: pair.spatial_baseline_meters ?? null,
     scene_center_distance_meters: pair.scene_center_distance_meters ?? pair.spatial_baseline_meters ?? null,
+    dinsar_quality_tier: pair.dinsar_quality_tier || null,
+    dinsar_quality_score: pair.dinsar_quality_score ?? null,
+    dinsar_readiness: pair.dinsar_readiness || null,
     master: compactDinsarBatchScene(pair.master),
     slave: compactDinsarBatchScene(pair.slave),
 });
+
+const normalizePairingFamilies = (values) => {
+    if (!Array.isArray(values)) return null;
+    const normalized = [];
+    values.forEach((value) => {
+        const compact = String(value || '').trim().toUpperCase().replace(/[-_\s]/g, '');
+        if (['LT1', 'LT1A', 'LT1B', 'LUTAN1', 'LUTAN1A', 'LUTAN1B'].includes(compact)) {
+            normalized.push('LT1');
+        } else if (['S1', 'S1A', 'S1B', 'S1C', 'SENTINEL1', 'SENTINEL1A', 'SENTINEL1B', 'SENTINEL1C'].includes(compact)) {
+            normalized.push('S1');
+        }
+    });
+    return [...new Set(normalized)];
+};
+
+const readPairingNumber = (params, key, label, { integer = false, min = -Infinity, max = Infinity, defaultValue = null } = {}) => {
+    const rawValue = params[key];
+    const text = String(rawValue ?? '').trim();
+    const parsed = text === '' && defaultValue !== null ? defaultValue : Number(text);
+    if (!Number.isFinite(parsed) || (integer && !Number.isInteger(parsed))) {
+        return { error: `${label}必须是${integer ? '整数' : '数字'}。` };
+    }
+    if (parsed < min || parsed > max) {
+        return { error: `${label}必须在 ${min} 到 ${max} 之间。` };
+    }
+    return { value: parsed };
+};
+
+const normalizePairingParamsForRequest = (params = {}) => {
+    const timeMin = readPairingNumber(params, 'time_baseline_min', '最小时间基线', {
+        integer: true,
+        min: 0,
+        max: 3650,
+        defaultValue: 1,
+    });
+    if (timeMin.error) return timeMin;
+    const timeMax = readPairingNumber(params, 'time_baseline_max', '最大时间基线', {
+        integer: true,
+        min: 1,
+        max: 3650,
+        defaultValue: 30,
+    });
+    if (timeMax.error) return timeMax;
+    if (timeMin.value > timeMax.value) {
+        return { error: '最小时间基线不能大于最大时间基线。' };
+    }
+    const overlap = readPairingNumber(params, 'overlap_threshold', '两景最小重叠率', {
+        min: 0,
+        max: 1,
+        defaultValue: 0.5,
+    });
+    if (overlap.error) return overlap;
+    const centerDistance = readPairingNumber(params, 'spatial_baseline_max_meters', 'footprint 中心距离上限', {
+        integer: true,
+        min: 0,
+        max: 20000000,
+        defaultValue: 5000,
+    });
+    if (centerDistance.error) return centerDistance;
+    const aoiOverlap = readPairingNumber(params, 'aoi_overlap_threshold', 'AOI 覆盖率阈值', {
+        min: 0,
+        max: 1,
+        defaultValue: 0,
+    });
+    if (aoiOverlap.error) return aoiOverlap;
+
+    return {
+        value: {
+            ...params,
+            time_baseline_min: timeMin.value,
+            time_baseline_max: timeMax.value,
+            overlap_threshold: overlap.value,
+            spatial_baseline_max_meters: centerDistance.value,
+            aoi_overlap_threshold: aoiOverlap.value,
+        },
+    };
+};
 
 export default function usePairingLogic({
     fetchRegionGeometry,
@@ -46,9 +129,10 @@ export default function usePairingLogic({
         pairingParams, pairingAoiMode,
         pairingFiles, setPairingFiles,
         pairingRegionSelection,
+        setPairingRegionError,
         setShowPairingModal, setFoundPairs, setPairingAlert,
         psAoiMode, psFiles, setPsFiles, psRegionSelection,
-        psParams, setShowPsModal, setPsResults,
+        psParams, setPsResults,
     } = usePairingStore();
     const { setAoiLayer } = useMapStore();
     const { setBatchTab, setSelectedBatchId, setBatchItems, setPendingTimeseriesBatchId } = useBatchStore();
@@ -144,7 +228,7 @@ export default function usePairingLogic({
             const batchPairs = selectedPairs.map(compactDinsarBatchPair);
             const response = await apiClient.post('/task-batches/dinsar', {
                 name: `DINSAR_${new Date().toISOString().slice(0, 10)}`,
-                pairs: batchPairs
+                pairs: batchPairs,
             });
             const batchId = response.data?.batch_id || '';
             addLog('success', `已创建 D-InSAR 批次: ${batchId || 'OK'}`);
@@ -161,41 +245,38 @@ export default function usePairingLogic({
         setPsResults(null);
         onClearAoiLayer();
         setAoiLayer(null);
-        addLog('info', '时序InSAR 候选栈结果已清空。');
+        addLog('info', '时序 InSAR 候选栈结果已清空。');
     };
 
-    const findPairs = async (e, externalRequireOrbitRef) => {
-        e.preventDefault();
+    const findPairs = async (e, externalRequireOrbitRef, overridePairingParams = null) => {
+        e?.preventDefault?.();
         if (!ensureCanOperate()) return;
         setIsLoading(true);
-        addLog('info', '开始寻找干涉对...');
+        addLog('info', '开始查找 D-InSAR 生产配对...');
         setPairingAlert({ warnings: [], fallbackUsed: false });
 
         const formData = new FormData();
-        const effectivePairingParams = { ...pairingParams };
-        if (!effectivePairingParams.strategy) {
-            effectivePairingParams.strategy = 'sbas';
+        const sourcePairingParams = overridePairingParams || pairingParams;
+        const normalizedParams = normalizePairingParamsForRequest(sourcePairingParams);
+        if (normalizedParams.error) {
+            addLog('error', normalizedParams.error);
+            setIsLoading(false);
+            return;
         }
-        if (effectivePairingParams.strategy === 'all') {
-            const hasDateWindow = Boolean(
-                effectivePairingParams.master_date_from
-                || effectivePairingParams.master_date_to
-                || effectivePairingParams.slave_date_from
-                || effectivePairingParams.slave_date_to
-            );
-            if (!hasDateWindow && pairingAoiMode !== 'region' && !pairingFiles?.length) {
-                addLog('warn', '全部配对可能返回大量结果。请先限定行政区、上传 AOI 或设置主/从影像时间范围。');
-                setIsLoading(false);
-                return;
-            }
-        }
+        const effectivePairingParams = {
+            ...normalizedParams.value,
+            strategy: 'dinsar_production',
+            limit_footprint_center_distance: true,
+            cross_satellite_pairing: false,
+        };
+        effectivePairingParams.allowed_satellites = normalizePairingFamilies(sourcePairingParams.allowed_satellites);
 
         try {
             const pairingHealth = await getPairingHealth();
             if (pairingHealth?.needs_rebuild || pairingHealth?.status !== 'READY') {
                 addLog(
                     'warn',
-                    `配对基础当前状态为 ${pairingHealth?.status || 'UNKNOWN'}，dirty 场景 ${Number(pairingHealth?.dirty_scene_count || 0)}。请先在“配对规划”页执行“修复配对基础”。`
+                    `配对基础当前状态为 ${pairingHealth?.status || 'UNKNOWN'}，dirty 场景 ${Number(pairingHealth?.dirty_scene_count || 0)}。请先在生产规划页执行“修复配对基础”。`
                 );
                 setIsLoading(false);
                 return;
@@ -208,10 +289,10 @@ export default function usePairingLogic({
 
         for (const key in effectivePairingParams) {
             const value = effectivePairingParams[key];
-            // 跳过 null/undefined 值
             if (value === null || value === undefined) continue;
-            // allowed_satellites 是数组，需要序列化为 JSON
+            if (typeof value === 'string' && value.trim() === '') continue;
             if (key === 'allowed_satellites' && Array.isArray(value)) {
+                if (value.length === 0) continue;
                 formData.append(key, JSON.stringify(value));
             } else {
                 formData.append(key, value);
@@ -229,25 +310,22 @@ export default function usePairingLogic({
             }
         } else {
             const selectedRegionTreeId = getSelectedRegionTreeId(pairingRegionSelection);
-            if (!selectedRegionTreeId) {
-                addLog('warn', '请选择行政区后再执行配对。');
-                setIsLoading(false);
-                return;
-            }
-            try {
-                const selectedAoiGeoJson = await fetchRegionGeometry(selectedRegionTreeId);
-                if (!selectedAoiGeoJson) {
-                    addLog('error', '未获取到行政区边界，请检查后端行政区边界数据。');
+            if (selectedRegionTreeId) {
+                try {
+                    const selectedAoiGeoJson = await fetchRegionGeometry(selectedRegionTreeId);
+                    if (!selectedAoiGeoJson) {
+                        addLog('error', '未获取到行政区边界，请检查后端行政区边界数据。');
+                        setIsLoading(false);
+                        return;
+                    }
+                    formData.append('aoi_geojson', JSON.stringify(selectedAoiGeoJson));
+                    setAoiLayer(selectedAoiGeoJson);
+                } catch (error) {
+                    const errorMessage = error.response?.data?.detail || error.message || '行政区边界加载失败';
+                    addLog('error', `加载行政区边界失败: ${errorMessage}`);
                     setIsLoading(false);
                     return;
                 }
-                formData.append('aoi_geojson', JSON.stringify(selectedAoiGeoJson));
-                setAoiLayer(selectedAoiGeoJson);
-            } catch (error) {
-                const errorMessage = error.response?.data?.detail || error.message || '行政区边界加载失败';
-                addLog('error', `加载行政区边界失败: ${errorMessage}`);
-                setIsLoading(false);
-                return;
             }
         }
 
@@ -261,30 +339,39 @@ export default function usePairingLogic({
             const policyVersion = response.data?.policy_version || response.data?.policyVersion;
             const candidateCount = Number(response.data?.candidate_count ?? response.data?.candidateCount ?? pairs.length ?? 0);
             const selectedEdgeCount = Number(response.data?.selected_edge_count ?? response.data?.selectedEdgeCount ?? pairs.length ?? 0);
-            setFoundPairs(pairs.map(p => ({ ...p, isSelected: true, isVis: false })));
+
+            setFoundPairs(Array.isArray(pairs) ? pairs.map(p => ({ ...p, isSelected: true, isVis: false })) : []);
+            setPairingAlert({ warnings, fallbackUsed });
+            if (!Array.isArray(pairs) || pairs.length === 0) {
+                const emptyMessage = `当前参数下没有满足条件的 D-InSAR 配对。候选 ${candidateCount}，入选 ${selectedEdgeCount}。`;
+                const detailText = warnings.length > 0
+                    ? warnings.join('\n')
+                    : '可以放宽时间基线、footprint 中心距离、重叠率、AOI，或检查配对缓存/精轨状态。';
+                addLog('warn', emptyMessage);
+                warnings.forEach(msg => addLog('warn', msg));
+                setPairingRegionError(`${emptyMessage}\n${detailText}`);
+                return;
+            }
             if (aoi_geojson) {
                 setAoiLayer(aoi_geojson);
             }
-            setPairingAlert({ warnings, fallbackUsed });
-            if (warnings.length > 0) {
-                warnings.forEach(msg => addLog('warn', msg));
-            }
+            warnings.forEach(msg => addLog('warn', msg));
             if (fallbackUsed && warnings.length === 0) {
                 addLog('warn', '配对进入回退路径，请检查数据库函数或收紧筛选条件。');
             }
             if (networkRunId) {
-                addLog('info', `配对网络已生成: ${networkRunId} (${policyVersion || 'unknown policy'})`);
+                addLog('info', `配对网络已生成 ${networkRunId} (${policyVersion || 'unknown policy'})`);
             }
             if (degraded) {
                 addLog('warn', '当前配对结果来自降级缓存状态，建议尽快执行缓存修复。');
             }
-            addLog('success', `成功找到 ${pairs.length} 个干涉对（候选 ${candidateCount}，入选 ${selectedEdgeCount}）。`);
+            addLog('success', `成功找到 ${pairs.length} 个 D-InSAR 生产配对（候选 ${candidateCount}，入选 ${selectedEdgeCount}）。`);
             setShowPairingModal(false);
             setPairingFiles(null);
             setLeftPanelTab('pairs');
         } catch (error) {
             const errorMessage = error.response?.data?.detail || error.message;
-            addLog('error', `寻找干涉对失败: ${errorMessage}`);
+            addLog('error', `查找 D-InSAR 配对失败: ${errorMessage}`);
         } finally {
             setIsLoading(false);
         }
@@ -295,7 +382,7 @@ export default function usePairingLogic({
         if (!ensureCanOperate()) return;
         if (psAoiMode === 'shp') {
             if (!psFiles || psFiles.length === 0) {
-                addLog('warn', '请先选择有效的Shapefile文件。');
+                addLog('warn', '请先选择有效的 Shapefile 文件。');
                 return;
             }
         } else {
@@ -306,9 +393,8 @@ export default function usePairingLogic({
             }
         }
 
-        setShowPsModal(false);
         setIsLoading(true);
-        addLog('info', '开始准备时序InSAR候选栈...');
+        addLog('info', '开始准备时序 InSAR 候选栈...');
 
         const formData = new FormData();
         for (const key in psParams) {
@@ -356,17 +442,17 @@ export default function usePairingLogic({
             setPsResults(processedResults);
 
             if (Object.keys(processedResults).length > 0) {
-                addLog('success', `成功找到 ${Object.keys(processedResults).length} 个时序InSAR候选栈。`);
+                addLog('success', `成功找到 ${Object.keys(processedResults).length} 个时序 InSAR 候选栈。`);
                 setLeftPanelTab('ps_results');
                 addLog('info', '候选栈仅作为预览结果保留；需要生产时请手动保存批次或送入生产。');
             } else {
-                addLog('info', '在给定的AOI和阈值下，未找到满足 SBAS 至少 3 景要求的时序影像栈。');
+                addLog('info', '在给定的 AOI 和阈值下，未找到满足 SBAS 至少 3 景要求的时序影像栈。');
                 setLeftPanelTab('ps_results');
             }
         } catch (error) {
-            console.error('时序InSAR候选栈准备失败:', error);
+            console.error('时序 InSAR 候选栈准备失败:', error);
             const errorMessage = error.response?.data?.detail || error.message || '未知错误';
-            addLog('error', `时序InSAR候选栈准备失败: ${errorMessage}`);
+            addLog('error', `时序 InSAR 候选栈准备失败: ${errorMessage}`);
         } finally {
             setIsLoading(false);
             setPsFiles(null);

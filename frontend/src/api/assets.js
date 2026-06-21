@@ -6,6 +6,9 @@ export const getAssetInventoryStatus = () =>
 export const scanAssetInventory = (payload = {}) =>
   apiClient.post('/assets/inventory/scan', payload).then(r => r.data);
 
+export const auditSourceArchiveIntegrity = (payload = {}) =>
+  apiClient.post('/assets/inventory/archive-integrity-audit', payload).then(r => r.data);
+
 export const listSourceAssets = (params = {}) =>
   apiClient.get('/assets/sources', { params }).then(r => r.data);
 

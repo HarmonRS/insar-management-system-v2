@@ -39,7 +39,7 @@ def get_unpack_config() -> Dict[str, Any]:
         "source_dirs": source_dirs,
         "insar_storage_dirs": insar_storage_dirs,
         "min_disk_space_gb": float(env.get("UNPACK_MIN_DISK_SPACE_GB", "50")),
-        "delete_archive": module.parse_bool(env.get("UNPACK_DELETE_ARCHIVE", "true")),
+        "delete_archive": False,
         "tmp_suffix": env.get("UNPACK_TMP_SUFFIX", ".unpack_tmp"),
         "archive_exts": archive_exts,
         "scan_workers": module.parse_int(

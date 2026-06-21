@@ -276,4 +276,4 @@ D:\Task_Pool\SBAS\<stack_task>
   └─ publish
 ```
 
-Source archives remain on UNC. Selected scenes and orbit files are materialized under the SBAS task directory before Gamma/LandSAR execution. Cleanup may remove `sources`, `orbits`, and `work` after result registration, but must preserve manifests, `publish`, previews, and catalog assets.
+LT-1 and Sentinel-1 source archives remain local. Selected scenes and orbit files are materialized under the SBAS task directory before Gamma/LandSAR execution. Cleanup may remove `sources`, `orbits`, and `work` after result registration, but must preserve manifests, `publish`, previews, and catalog assets.

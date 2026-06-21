@@ -237,15 +237,6 @@ def _build_root_specs_from_settings() -> List[RootSpec]:
     )
     specs.extend(
         _iter_multi_root_specs(
-            env_var="GF3_ARCHIVE_SOURCE_DIRS",
-            paths=split_env_paths(settings.GF3_ARCHIVE_SOURCE_DIRS),
-            root_role="source_pool_gf3_archive",
-            display_prefix="GF3 Archive Pool",
-            scan_mode="archive_walk",
-        )
-    )
-    specs.extend(
-        _iter_multi_root_specs(
             env_var="GF3_SOURCE_DIRS",
             paths=split_env_paths(settings.GF3_SOURCE_DIRS),
             root_role="source_pool_gf3_input",

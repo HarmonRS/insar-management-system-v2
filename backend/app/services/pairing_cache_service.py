@@ -52,11 +52,74 @@ def _same_satellite_family_expr(left_alias: str, right_alias: str) -> str:
     )
 
 
+def _supported_dinsar_family_pair_expr(left_alias: str, right_alias: str) -> str:
+    left_family = _satellite_family_expr(left_alias)
+    right_family = _satellite_family_expr(right_alias)
+    return (
+        f"(({left_family} = 'LT1' AND {right_family} = 'LT1') "
+        f"OR ({left_family} = 'S1' AND {right_family} = 'S1'))"
+    )
+
+
 def _same_look_direction_expr(left_alias: str, right_alias: str) -> str:
     return (
         f"(NULLIF({left_alias}.look_direction, '') IS NULL "
         f"OR NULLIF({right_alias}.look_direction, '') IS NULL "
         f"OR {left_alias}.look_direction = {right_alias}.look_direction)"
+    )
+
+
+def _relative_orbit_value_expr(alias: str) -> str:
+    return f"NULLIF(upper(trim(COALESCE({alias}.relative_orbit, ''))), '')"
+
+
+def _same_relative_orbit_expr(left_alias: str, right_alias: str) -> str:
+    left_rel = _relative_orbit_value_expr(left_alias)
+    right_rel = _relative_orbit_value_expr(right_alias)
+    return f"({left_rel} IS NOT NULL AND {right_rel} IS NOT NULL AND {left_rel} = {right_rel})"
+
+
+def _dinsar_quality_tier_expr(left_alias: str, right_alias: str, center_distance_expr: str) -> str:
+    same_rel = _same_relative_orbit_expr(left_alias, right_alias)
+    return (
+        "CASE "
+        f"WHEN {same_rel} AND {center_distance_expr} <= 5000 THEN 'A' "
+        f"WHEN {center_distance_expr} <= 5000 THEN 'B' "
+        f"WHEN {center_distance_expr} <= 12000 THEN 'C' "
+        "ELSE 'REJECT' END"
+    )
+
+
+def _dinsar_readiness_expr(left_alias: str, right_alias: str, center_distance_expr: str) -> str:
+    tier = _dinsar_quality_tier_expr(left_alias, right_alias, center_distance_expr)
+    return (
+        "CASE "
+        f"WHEN {tier} IN ('A', 'B') THEN 'RECOMMENDED' "
+        f"WHEN {tier} = 'C' THEN 'CANDIDATE' "
+        "ELSE 'NOT_RECOMMENDED' END"
+    )
+
+
+def _dinsar_quality_score_expr(left_alias: str, right_alias: str, center_distance_expr: str) -> str:
+    same_rel = _same_relative_orbit_expr(left_alias, right_alias)
+    return (
+        "GREATEST(0.0, LEAST(1.0, "
+        f"0.45 * COALESCE((ST_Area(ST_Intersection({left_alias}.geom, {right_alias}.geom)::geography) / "
+        f"NULLIF(GREATEST(ST_Area({left_alias}.geom::geography), ST_Area({right_alias}.geom::geography)), 0)), 0) + "
+        f"0.30 * CASE WHEN {same_rel} THEN 1 ELSE 0 END + "
+        f"0.25 * GREATEST(0.0, 1.0 - ({center_distance_expr} / 12000.0))"
+        "))"
+    )
+
+
+def _dinsar_reasons_expr(left_alias: str, right_alias: str, center_distance_expr: str) -> str:
+    same_rel = _same_relative_orbit_expr(left_alias, right_alias)
+    return (
+        "COALESCE(jsonb_path_query_array(jsonb_build_array("
+        f"CASE WHEN NOT ({same_rel}) THEN 'relative_orbit_missing_or_mismatch' END, "
+        f"CASE WHEN {center_distance_expr} > 5000 THEN 'center_distance_over_5km' END, "
+        f"CASE WHEN {center_distance_expr} > 12000 THEN 'center_distance_over_12km' END"
+        "), '$[*] ? (@ != null)')::json, '[]'::json)"
     )
 
 
@@ -82,6 +145,7 @@ def _hard_constraints_expr(left_alias: str, right_alias: str) -> str:
         f"AND {left_alias}.orbit_direction = {right_alias}.orbit_direction "
         f"AND COALESCE({left_alias}.insar_source_ready, false) "
         f"AND COALESCE({right_alias}.insar_source_ready, false) "
+        f"AND { _supported_dinsar_family_pair_expr(left_alias, right_alias) } "
         f"AND { _same_look_direction_expr(left_alias, right_alias) } "
         f"AND ST_Intersects({left_alias}.geom, {right_alias}.geom)"
     )
@@ -106,7 +170,15 @@ def _full_rebuild_insert_sql() -> str:
             spatial_baseline_meters,
             scene_center_distance_meters,
             scene_overlap_ratio,
+            pair_aoi_overlap_ratio,
             orbit_direction,
+            same_relative_orbit,
+            master_relative_orbit,
+            slave_relative_orbit,
+            dinsar_quality_tier,
+            dinsar_quality_score,
+            dinsar_readiness,
+            dinsar_reasons_json,
             same_satellite,
             same_satellite_family,
             same_look_direction,
@@ -144,7 +216,15 @@ def _full_rebuild_insert_sql() -> str:
                 ST_Area(ST_Intersection(m.geom, s.geom)::geography) /
                 NULLIF(GREATEST(ST_Area(m.geom::geography), ST_Area(s.geom::geography)), 0)
             )::double precision AS scene_overlap_ratio,
+            NULL::double precision AS pair_aoi_overlap_ratio,
             m.orbit_direction,
+            { _same_relative_orbit_expr('m', 's') } AS same_relative_orbit,
+            {_relative_orbit_value_expr('m')} AS master_relative_orbit,
+            {_relative_orbit_value_expr('s')} AS slave_relative_orbit,
+            { _dinsar_quality_tier_expr('m', 's', center_distance) } AS dinsar_quality_tier,
+            { _dinsar_quality_score_expr('m', 's', center_distance) } AS dinsar_quality_score,
+            { _dinsar_readiness_expr('m', 's', center_distance) } AS dinsar_readiness,
+            { _dinsar_reasons_expr('m', 's', center_distance) } AS dinsar_reasons_json,
             (m.satellite IS NOT NULL AND s.satellite IS NOT NULL AND m.satellite = s.satellite) AS same_satellite,
             { _same_satellite_family_expr('m', 's') } AS same_satellite_family,
             { _same_look_direction_expr('m', 's') } AS same_look_direction,
@@ -201,7 +281,15 @@ def _incremental_insert_sql() -> str:
             spatial_baseline_meters,
             scene_center_distance_meters,
             scene_overlap_ratio,
+            pair_aoi_overlap_ratio,
             orbit_direction,
+            same_relative_orbit,
+            master_relative_orbit,
+            slave_relative_orbit,
+            dinsar_quality_tier,
+            dinsar_quality_score,
+            dinsar_readiness,
+            dinsar_reasons_json,
             same_satellite,
             same_satellite_family,
             same_look_direction,
@@ -244,7 +332,15 @@ def _incremental_insert_sql() -> str:
                 ST_Area(ST_Intersection(d.geom, o.geom)::geography) /
                 NULLIF(GREATEST(ST_Area(d.geom::geography), ST_Area(o.geom::geography)), 0)
             )::double precision AS scene_overlap_ratio,
+            NULL::double precision AS pair_aoi_overlap_ratio,
             d.orbit_direction,
+            { _same_relative_orbit_expr('d', 'o') } AS same_relative_orbit,
+            CASE WHEN {dirty_is_master} THEN {_relative_orbit_value_expr('d')} ELSE {_relative_orbit_value_expr('o')} END AS master_relative_orbit,
+            CASE WHEN {dirty_is_master} THEN {_relative_orbit_value_expr('o')} ELSE {_relative_orbit_value_expr('d')} END AS slave_relative_orbit,
+            { _dinsar_quality_tier_expr('d', 'o', center_distance) } AS dinsar_quality_tier,
+            { _dinsar_quality_score_expr('d', 'o', center_distance) } AS dinsar_quality_score,
+            { _dinsar_readiness_expr('d', 'o', center_distance) } AS dinsar_readiness,
+            { _dinsar_reasons_expr('d', 'o', center_distance) } AS dinsar_reasons_json,
             (d.satellite IS NOT NULL AND o.satellite IS NOT NULL AND d.satellite = o.satellite) AS same_satellite,
             { _same_satellite_family_expr('d', 'o') } AS same_satellite_family,
             { _same_look_direction_expr('d', 'o') } AS same_look_direction,

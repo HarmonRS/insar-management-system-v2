@@ -3,8 +3,9 @@ import { useShallow } from 'zustand/react/shallow';
 import { usePairingStore, useAuthStore } from '../store';
 import VirtualizedList from '../components/common/VirtualizedList';
 import PairListRow from '../components/panels/PairListRow';
+import MiniCoverageMap from '../components/MiniCoverageMap';
 
-const PAIR_ROW_HEIGHT = 64;
+const PAIR_ROW_HEIGHT = 176;
 
 function PairsListPanel({
     onVisualizePair,
@@ -44,6 +45,29 @@ function PairsListPanel({
         () => foundPairs.filter((pair) => pair.isSelected).length,
         [foundPairs]
     );
+    const mapPreviewPairs = useMemo(() => {
+        const visible = foundPairs.filter((pair) => pair.isVis);
+        return visible.slice(0, 24);
+    }, [foundPairs]);
+    const previewPolygons = useMemo(() => (
+        mapPreviewPairs.flatMap((pair, index) => {
+            const taskLabel = pair.task_alias || pair.task_name || `Pair ${index + 1}`;
+            return [
+                {
+                    label: `${taskLabel} / master`,
+                    points: pair.master?.coverage_polygon,
+                    color: '#2563eb',
+                    fillOpacity: 0.08,
+                },
+                {
+                    label: `${taskLabel} / slave`,
+                    points: pair.slave?.coverage_polygon,
+                    color: '#16a34a',
+                    fillOpacity: 0.08,
+                },
+            ];
+        })
+    ), [mapPreviewPairs]);
 
     return (
         <>
@@ -67,38 +91,54 @@ function PairsListPanel({
                         )}
                     </div>
                 )}
-                {foundPairs.length === 0 ? (
-                    <p className="empty-state">未找到配对。</p>
-                ) : (
-                    <>
-                        <div className="list-toolbar">
-                            <input
-                                type="checkbox"
-                                checked={allPairsSelected}
-                                onChange={handleSelectAllPairs}
-                                id="select-all-pairs"
-                            />
-                            <label htmlFor="select-all-pairs">
-                                全选 ({selectedPairsCount} / {foundPairs.length} 已选择)
-                            </label>
-                        </div>
-                        <VirtualizedList
-                            items={foundPairs}
-                            itemHeight={PAIR_ROW_HEIGHT}
-                            getKey={(pair, index) => pair.task_name || `${pair.master?.id || 'm'}-${pair.slave?.id || 's'}-${index}`}
-                            renderItem={(pair, index, key) => (
-                                <PairListRow
-                                    key={key || `${pair.task_name}-${index}`}
-                                    pair={pair}
-                                    index={index}
-                                    onToggleSelected={handlePairSelectionChange}
-                                    onVisualizePair={onVisualizePair}
-                                    onTogglePairVisibility={onTogglePairVisibility}
+                <div className={`pair-planning-layout ${foundPairs.length ? 'with-map' : ''}`}>
+                    <div className="pair-planning-list-pane">
+                        {foundPairs.length === 0 ? (
+                            <p className="empty-state">未找到配对。</p>
+                        ) : (
+                            <>
+                                <div className="list-toolbar">
+                                    <input
+                                        type="checkbox"
+                                        checked={allPairsSelected}
+                                        onChange={handleSelectAllPairs}
+                                        id="select-all-pairs"
+                                    />
+                                    <label htmlFor="select-all-pairs">
+                                        全选 ({selectedPairsCount} / {foundPairs.length} 已选择)
+                                    </label>
+                                </div>
+                                <VirtualizedList
+                                    items={foundPairs}
+                                    itemHeight={PAIR_ROW_HEIGHT}
+                                    viewportClassName="pair-planning-list-viewport"
+                                    getKey={(pair, index) => pair.task_name || `${pair.master?.id || 'm'}-${pair.slave?.id || 's'}-${index}`}
+                                    renderItem={(pair, index, key) => (
+                                        <PairListRow
+                                            key={key || `${pair.task_name}-${index}`}
+                                            pair={pair}
+                                            index={index}
+                                            onToggleSelected={handlePairSelectionChange}
+                                            onVisualizePair={onVisualizePair}
+                                            onTogglePairVisibility={onTogglePairVisibility}
+                                        />
+                                    )}
                                 />
-                            )}
-                        />
-                    </>
-                )}
+                            </>
+                        )}
+                    </div>
+                    {foundPairs.length > 0 && (
+                        <div className="pair-planning-map-pane">
+                            <MiniCoverageMap
+                                title="候选配对范围"
+                                subtitle={`${mapPreviewPairs.length}/${foundPairs.length} 对显示`}
+                                polygons={previewPolygons}
+                                height={372}
+                                emptyText="点击左侧“显示”后在这里查看配对范围。"
+                            />
+                        </div>
+                    )}
+                </div>
             </div>
             <footer className="panel-footer">
                 <button
