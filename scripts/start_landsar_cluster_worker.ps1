@@ -86,6 +86,9 @@ if ($WorkerId) {
 
 $logDir = Join-Path $RepoRoot "logs\landsar_cluster_worker"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$runtimeDir = Join-Path $RepoRoot "runtime\landsar_cluster_worker"
+New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
+$pidFile = Join-Path $runtimeDir "worker.pid"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $stdoutLog = Join-Path $logDir "worker_$timestamp.log"
 $stderrLog = Join-Path $logDir "worker_$timestamp.err.log"
@@ -100,6 +103,12 @@ Write-Host "Mode:     $(if ($Background) { 'background' } else { 'foreground' })
 Set-Location $RepoRoot
 
 if ($Background) {
+    if (Test-Path -LiteralPath $pidFile) {
+        $existingPid = (Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+        if ($existingPid -and (Get-Process -Id ([int]$existingPid) -ErrorAction SilentlyContinue)) {
+            throw "LandSAR cluster worker already appears to be running. PID=$existingPid. Use scripts\stop_landsar_cluster_worker.ps1 first."
+        }
+    }
     $process = Start-Process `
         -FilePath $python `
         -ArgumentList @($workerScript) `
@@ -108,7 +117,9 @@ if ($Background) {
         -RedirectStandardError $stderrLog `
         -WindowStyle Hidden `
         -PassThru
+    Set-Content -LiteralPath $pidFile -Value $process.Id -Encoding ASCII
     Write-Host "Started background worker. PID=$($process.Id)"
+    Write-Host "PID file: $pidFile"
     return
 }
 

@@ -57,6 +57,11 @@
   - 支持前台运行和 `-Background` 后台运行
 - `scripts/start_landsar_cluster_worker.bat`
   - 远端双击启动入口，内部调用 PowerShell 启动器
+- `scripts/stop_landsar_cluster_worker.ps1`
+  - 停止后台 worker，默认使用 `runtime\landsar_cluster_worker\worker.pid`
+  - 加 `-All` 可清理所有命令行包含 `run_landsar_cluster_worker.py` 的 Python worker
+- `scripts/stop_landsar_cluster_worker.bat`
+  - 远端双击停止入口，内部调用 PowerShell 停止脚本
 
 主服务器网络准入脚本：
 
@@ -227,10 +232,34 @@ D:\Code\Insar_management_system_v2\scripts\start_landsar_cluster_worker.bat
 .\scripts\start_landsar_cluster_worker.ps1 -Background
 ```
 
+后台停止：
+
+```powershell
+.\scripts\stop_landsar_cluster_worker.ps1
+```
+
+如果需要强制清理全部 LandSAR cluster worker：
+
+```powershell
+.\scripts\stop_landsar_cluster_worker.ps1 -All
+```
+
+需要双击停止时，运行：
+
+```text
+D:\Code\Insar_management_system_v2\scripts\stop_landsar_cluster_worker.bat
+```
+
 启动日志在：
 
 ```text
 D:\Code\Insar_management_system_v2\logs\landsar_cluster_worker
+```
+
+后台 worker PID 文件在：
+
+```text
+D:\Code\Insar_management_system_v2\runtime\landsar_cluster_worker\worker.pid
 ```
 
 ## 远端连通性检查
