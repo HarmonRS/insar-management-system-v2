@@ -399,7 +399,7 @@ async def _build_archive_previews(
             summary["items"].append(item)
             continue
 
-        source_corner_mapping = DataService.get_radar_source_corner_mapping(record.file_path)
+        source_corner_mapping = DataService.get_radar_record_corner_mapping(record)
         ok_geo, geo_error = image_service.create_geocorrected_radar_cached_image(
             preview_source,
             geo_cache_path,

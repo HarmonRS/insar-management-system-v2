@@ -645,6 +645,21 @@ class DataService:
         return None
 
     @staticmethod
+    def get_radar_record_corner_mapping(record: Any) -> Optional[Dict[str, Any]]:
+        record_state = getattr(record, "__dict__", {}) if record is not None else {}
+        for metadata in (
+            getattr(record, "metadata_json", None),
+            getattr(record_state.get("source_product_asset"), "metadata_json", None),
+            getattr(record_state.get("source_archive_asset"), "metadata_json", None),
+        ):
+            if not isinstance(metadata, dict):
+                continue
+            corner_mapping = metadata.get("corner_pixel_mapping")
+            if isinstance(corner_mapping, dict):
+                return corner_mapping
+        return DataService.get_radar_source_corner_mapping(str(getattr(record, "file_path", "") or ""))
+
+    @staticmethod
     def _normalize_coverage_polygon(coverage_polygon: Any) -> Optional[List[Tuple[float, float]]]:
         if isinstance(coverage_polygon, list):
             points: List[Tuple[float, float]] = []
@@ -1102,6 +1117,7 @@ class DataService:
                         "max_lon": record.max_lon,
                         "max_lat": record.max_lat,
                         "preview_cache_version": record.preview_cache_version,
+                        "source_corner_mapping": DataService.get_radar_record_corner_mapping(record),
                     }
                 )
 
@@ -1164,10 +1180,7 @@ class DataService:
                     except (TypeError, ValueError):
                         bbox = None
 
-                    source_corner_mapping = await asyncio.to_thread(
-                        DataService.get_radar_source_corner_mapping,
-                        file_path,
-                    )
+                    source_corner_mapping = item.get("source_corner_mapping")
 
                     need_geo_rebuild = (
                         (not geo_cache_mtime)

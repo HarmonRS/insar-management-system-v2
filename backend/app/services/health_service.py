@@ -1136,7 +1136,7 @@ async def _check_product_packages() -> Dict[str, Any]:
                 status["missing_publish_dir_count"] += 1
             if not str(processor_code or "").strip():
                 status["missing_processor_count"] += 1
-            if engine_key in {"isce2", "pyint", "gamma"} and not str(runtime_id or "").strip():
+            if engine_key in {"pyint", "gamma"} and not str(runtime_id or "").strip():
                 status["missing_runtime_count"] += 1
             if not str(native_output_dir or "").strip():
                 status["missing_native_output_count"] += 1
@@ -1386,7 +1386,7 @@ async def _check_wsl_runtime() -> Dict[str, Any]:
     }
     try:
         required_by_engine = {
-            "isce2": bool(settings.ISCE2_ENABLED or settings.TIMESERIES_ENABLED),
+            "isce2": bool(settings.ISCE2_ENABLED),
             "pyint": bool(settings.PYINT_ENABLED),
             "gamma": bool(settings.GAMMA_SBAS_ENABLED),
         }

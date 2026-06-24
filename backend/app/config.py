@@ -235,9 +235,13 @@ class Settings(BaseSettings):
     RADAR_THUMBNAIL_MAX_SIZE: int = 1600
     RADAR_CACHE_WORKERS: int = 2
     RADAR_GEO_CACHE_WORKERS: int = 2
-    RADAR_GEO_CACHE_VERSION: str = "b1"
+    RADAR_GEO_CACHE_VERSION: str = "b2"
     RADAR_GEO_CACHE_QUALITY: int = 84
     RADAR_PREVIEW_BUILD_ON_DEMAND: bool = True
+    ASSET_SCAN_PARSE_WORKERS: int = 4
+    ASSET_SCAN_PARSE_INFLIGHT: int = 64
+    ASSET_SCAN_SKIP_UNCHANGED_FAILURES: bool = True
+    ASSET_SCAN_DB_BATCH_SIZE: int = 50
 
     WATER_RESULTS_DIR: str = ""
     GF3_WATER_DEM_PATH: str = ""
@@ -417,6 +421,7 @@ class Settings(BaseSettings):
     JOB_WORKER_STALE_RECOVER_INTERVAL: float = 15.0
     JOB_WORKER_STALE_RUNNING_SECONDS: int = 300
     JOB_WORKER_HEARTBEAT_INTERVAL: float = 5.0
+    JOB_WORKER_ALLOWED_TYPES: str = ""
 
     TIMESERIES_ENABLED: bool = False
     TIMESERIES_WSL_DISTRO: str = ""
@@ -495,6 +500,13 @@ class Settings(BaseSettings):
         )
         if not self.SRTM_DEM_DIR:
             object.__setattr__(self, "SRTM_DEM_DIR", os.path.join(backend_dir, "dem_data"))
+        object.__setattr__(self, "ASSET_SCAN_PARSE_WORKERS", max(1, int(self.ASSET_SCAN_PARSE_WORKERS or 1)))
+        object.__setattr__(
+            self,
+            "ASSET_SCAN_PARSE_INFLIGHT",
+            max(self.ASSET_SCAN_PARSE_WORKERS, int(self.ASSET_SCAN_PARSE_INFLIGHT or self.ASSET_SCAN_PARSE_WORKERS)),
+        )
+        object.__setattr__(self, "ASSET_SCAN_DB_BATCH_SIZE", max(1, int(self.ASSET_SCAN_DB_BATCH_SIZE or 1)))
         if not self.GF3_ARCHIVE_SOURCE_DIRS:
             object.__setattr__(
                 self,

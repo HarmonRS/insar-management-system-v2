@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import apiClient from '../api/client';
 import { getHealth } from '../api/health';
 
-const HEALTH_POLL_INTERVAL_MS = 30000;
+const HEALTH_POLL_INTERVAL_MS = 5 * 60 * 1000;
 const STARTUP_RETRY_DELAYS_MS = [750, 1500, 3000];
 
 const sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -95,6 +95,8 @@ export default function useAppAuthLifecycle({
     if (userFromLogin) {
       setCurrentUser(userFromLogin);
       setAuthChecked(true);
+      void fetchCurrentUser({ clearOnFailure: false });
+      return;
     }
     await fetchCurrentUser({ clearOnFailure: !userFromLogin });
   }, [fetchCurrentUser, setCurrentUser, setAuthChecked]);
@@ -236,11 +238,16 @@ export default function useAppAuthLifecycle({
   }, [fetchCurrentUser, fetchLicenseStatus]);
 
   useEffect(() => {
-    void fetchHealthStatus();
+    const startupTimer = setTimeout(() => {
+      void fetchHealthStatus({ silent: true });
+    }, 1500);
     const interval = setInterval(() => {
       void fetchHealthStatus({ silent: true });
     }, HEALTH_POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(startupTimer);
+      clearInterval(interval);
+    };
   }, [fetchHealthStatus]);
 
   return {

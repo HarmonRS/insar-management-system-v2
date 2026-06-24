@@ -10,6 +10,7 @@ const getStatusLabel = (lang) => lang === 'en'
   ? { PENDING: 'Pending', RUNNING: 'Processing', DONE: 'Done', FAILED: 'Failed' }
   : { PENDING: '等待中', RUNNING: '处理中', DONE: '完成', FAILED: '失败' };
 const STATUS_COLOR = { PENDING: '#64748b', RUNNING: '#2563eb', DONE: '#16a34a', FAILED: '#dc2626' };
+const ACTIVE_SCENE_REFRESH_INTERVAL_MS = 15000;
 
 const UI_COLORS = {
   pageText: '#0f172a',
@@ -468,7 +469,7 @@ export default function WaterMonitorPanel({ readOnly, onShowOnMap, onShowFloodOn
     const timer = setInterval(() => {
       loadScenes(scenesPageRef.current);
       loadStatusIds();
-    }, 5000);
+    }, ACTIVE_SCENE_REFRESH_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [activeRadarIds, tab, loadScenes, loadStatusIds]);
 

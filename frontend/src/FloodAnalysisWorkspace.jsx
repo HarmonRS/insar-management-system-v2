@@ -31,6 +31,7 @@ import { RADAR_SEARCH_DEFAULTS } from './config/appConstants';
 
 const SEARCH_PAGE_SIZE = 30;
 const LIST_PAGE_SIZE = 20;
+const ACTIVE_WORKSPACE_REFRESH_INTERVAL_MS = 15000;
 
 const VIEWS = [
   { key: 'extract', label: '水体提取' },
@@ -649,7 +650,7 @@ export default function FloodAnalysisWorkspace({
     if (!runningCount) return undefined;
     const timer = window.setInterval(() => {
       refreshAll();
-    }, 6000);
+    }, ACTIVE_WORKSPACE_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [refreshAll, runningCount]);
 

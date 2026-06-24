@@ -40,7 +40,6 @@ const statusColors = {
   ERROR: '#dc2626',
 };
 
-const panelStyle = { display: 'grid', gap: 12 };
 const sectionStyle = {
   background: '#ffffff',
   border: '1px solid #d8dee8',
@@ -203,11 +202,11 @@ const assetRoleInfo = {
   },
   product_summary: {
     label: '产品摘要',
-    description: '旧版托管产品摘要；专家 Gamma 模式下不再作为必需产物。',
+    description: '托管产品摘要；专家 Gamma 模式下不作为必需产物。',
   },
   quality_summary: {
     label: '质量摘要',
-    description: '旧版质量统计摘要；专家 Gamma 模式下统计由 GeoTIFF 派生。',
+    description: '质量统计摘要；专家 Gamma 模式下统计由 GeoTIFF 派生。',
   },
   monitor_points_summary: {
     label: '监测点摘要',
@@ -271,7 +270,7 @@ const assetRoleInfo = {
   },
   alternate_geotiff: {
     label: 'LOS 反向约定 GeoTIFF',
-    description: '旧版 away-from-radar 符号约定下的备用速率栅格。',
+    description: 'away-from-radar 符号约定下的备用速率栅格。',
   },
   quality_geotiff: {
     label: 'LOS Sigma GeoTIFF',
@@ -1528,6 +1527,18 @@ export default function SbasInsarProductsPanel({ readOnly = false, onJobQueued }
   const sigmaStats = quality.los_sigma_mm_per_year_rdc || quality.los_sigma_m_per_year_rdc || {};
   const hasSigmaStats = Object.keys(sigmaStats || {}).length > 0;
   const catalogColor = statusColors[catalogStatus?.status] || '#64748b';
+  const catalogStatusValue = catalogStatus?.status || 'UNKNOWN';
+  const catalogIssueCount = catalogStatus?.issue_count ?? 0;
+  const productCount = products.length;
+  const catalogTone = catalogStatusValue === 'READY'
+    ? 'ready'
+    : catalogStatusValue === 'ERROR'
+      ? 'error'
+      : catalogStatusValue === 'REBUILDING'
+        ? 'info'
+        : catalogStatusValue === 'UNKNOWN'
+          ? 'neutral'
+          : 'warn';
   const openAssetLightbox = useCallback((title, asset) => {
     if (!detail?.id || !asset) return;
     setLightboxImage({
@@ -1538,17 +1549,18 @@ export default function SbasInsarProductsPanel({ readOnly = false, onJobQueued }
   }, [detail?.id]);
 
   return (
-    <div style={panelStyle}>
+    <div className="sbas-products-page">
       <ImageLightbox image={lightboxImage} onClose={() => setLightboxImage(null)} />
-      <section style={sectionStyle}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+      <section className="sbas-products-header">
+        <div className="sbas-products-header-main">
           <div>
-            <h3 style={{ margin: 0, color: '#0f172a', fontSize: 18 }}>SBAS-InSAR 结果管理</h3>
-            <div style={{ ...mutedStyle, marginTop: 5 }}>
+            <h3>SBAS-InSAR 结果目录</h3>
+            <p>
               管理 Gamma SBAS 生产结果、重要预览图、GeoTIFF、监测点曲线和发布资产。
-            </div>
+              这里用于成果登记、资产复核和目录重建，生产提交仍归入 SBAS 运行视图。
+            </p>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div className="sbas-products-actions">
             <button type="button" onClick={loadCatalog} disabled={loading || actionLoading} style={buttonStyle}>
               {loading ? '刷新中...' : '刷新'}
             </button>
@@ -1558,7 +1570,26 @@ export default function SbasInsarProductsPanel({ readOnly = false, onJobQueued }
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginTop: 12 }}>
+        <div className="sbas-products-signals" aria-label="SBAS-InSAR 结果目录状态摘要">
+          <div className={`dinsar-production-signal tone-${readOnly ? 'warn' : 'ready'}`}>
+            <span>操作模式</span>
+            <strong>{readOnly ? '只读' : '可维护'}</strong>
+          </div>
+          <div className={`dinsar-production-signal tone-${catalogTone}`}>
+            <span>目录状态</span>
+            <strong>{catalogStatusValue}</strong>
+          </div>
+          <div className={`dinsar-production-signal tone-${productCount > 0 ? 'ready' : 'neutral'}`}>
+            <span>登记产品</span>
+            <strong>{productCount}</strong>
+          </div>
+          <div className={`dinsar-production-signal tone-${catalogIssueCount > 0 ? 'warn' : 'ready'}`}>
+            <span>问题数</span>
+            <strong>{catalogIssueCount}</strong>
+          </div>
+        </div>
+
+        <div className="sbas-products-metrics">
           <Metric label="目录状态" value={<StatusBadge value={catalogStatus?.status || 'UNKNOWN'} />} accent={catalogColor} />
           <Metric label="需要重建" value={catalogStatus?.needs_rebuild ? '是' : '否'} accent={catalogStatus?.needs_rebuild ? '#dc2626' : '#15803d'} />
           <Metric label="Run / DB" value={`${catalogStatus?.run_count ?? catalogStatus?.manifest_count ?? 0} / ${catalogStatus?.db_count ?? 0}`} />
@@ -1575,7 +1606,14 @@ export default function SbasInsarProductsPanel({ readOnly = false, onJobQueued }
         )}
       </section>
 
-      <section style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 380px) minmax(0, 1fr)', gap: 12, alignItems: 'start' }}>
+      <div className="sbas-products-section-head">
+        <div>
+          <strong>结果检索与资产复核</strong>
+          <span>左侧筛选已登记结果，右侧查看预览图、位置摘要、统计、下载资产和目录问题。</span>
+        </div>
+      </div>
+
+      <section className="sbas-products-workspace">
         <div style={sectionStyle}>
           <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
             <input

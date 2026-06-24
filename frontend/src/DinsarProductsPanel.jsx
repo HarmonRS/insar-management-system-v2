@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { scanDinsarResults } from './api/dinsar';
+import { listTaskRoots } from './api/dinsarProduction';
 import { extractDispResults } from './api/idl';
 import { clearTaskLogs, deleteTaskLog, getTaskLogs } from './api/tasks';
 import DinsarCatalogPanel from './components/DinsarCatalogPanel';
@@ -8,14 +9,10 @@ import useTaskMonitor from './hooks/useTaskMonitor';
 
 const PRODUCT_TASK_TYPES = [
   'SCAN_DINSAR',
-  'PUBLISH_DINSAR_PRODUCTS',
-  'REBUILD_DINSAR_CATALOG',
 ];
 
 const TASK_TYPE_LABEL = {
   SCAN_DINSAR: 'D-InSAR 结果扫描',
-  PUBLISH_DINSAR_PRODUCTS: 'D-InSAR 产物发布',
-  REBUILD_DINSAR_CATALOG: 'D-InSAR 目录重建',
 };
 
 const STATUS_LABEL = {
@@ -48,13 +45,12 @@ function getLogTone(level) {
 }
 
 export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
-  const [extractRootDir, setExtractRootDir] = useState('');
-  const [extractDestDir, setExtractDestDir] = useState('');
+  const [productionRoot, setProductionRoot] = useState('');
+  const [productionRootReady, setProductionRootReady] = useState(false);
   const [extractResult, setExtractResult] = useState(null);
-  const [extracting, setExtracting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [actionMessage, setActionMessage] = useState('');
   const [actionError, setActionError] = useState(false);
-  const [scanning, setScanning] = useState(false);
 
   const [taskLogs, setTaskLogs] = useState([]);
   const [taskLogsLoading, setTaskLogsLoading] = useState(false);
@@ -62,13 +58,17 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
   const [taskLogDeletingId, setTaskLogDeletingId] = useState(null);
   const taskMonitor = useTaskMonitor({
     taskTypes: PRODUCT_TASK_TYPES,
-    showRecent: true,
-    recentLimit: 1,
+    showRecent: false,
   });
   const monitoredTask = taskMonitor.latestTask;
   const logTaskId = monitoredTask?.task_id || '';
-  const showingRecentTask = !taskMonitor.isBusy && !!monitoredTask;
   const actionTone = getMessageTone(actionMessage, actionError);
+  const activeTaskCount = taskMonitor.activeTasks?.length || 0;
+  const catalogSourceState = productionRootReady ? '已配置' : '未配置';
+  const taskStateLabel = activeTaskCount > 0
+    ? `${activeTaskCount} 个运行中`
+    : '空闲';
+  const taskStateTone = activeTaskCount > 0 ? 'warn' : 'ready';
 
   const loadTaskLogs = useCallback(async (taskId) => {
     if (!taskId) {
@@ -87,14 +87,40 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
   }, []);
 
   const refreshMonitor = useCallback(async () => {
-    const nextRecentTasks = await taskMonitor.refreshRecentTasks();
-    const nextTaskId = taskMonitor.activeTasks[0]?.task_id || nextRecentTasks[0]?.task_id || logTaskId;
+    const nextTaskId = taskMonitor.activeTasks[0]?.task_id || logTaskId;
     await loadTaskLogs(nextTaskId);
   }, [loadTaskLogs, logTaskId, taskMonitor]);
 
   useEffect(() => {
     loadTaskLogs(logTaskId);
   }, [loadTaskLogs, logTaskId]);
+
+  useEffect(() => {
+    if (!taskMonitor.isBusy || !logTaskId) return undefined;
+    const timer = window.setInterval(() => {
+      void loadTaskLogs(logTaskId);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [loadTaskLogs, logTaskId, taskMonitor.isBusy]);
+
+  useEffect(() => {
+    let canceled = false;
+    listTaskRoots()
+      .then((data) => {
+        if (canceled) return;
+        const root = String(data?.root || '').trim();
+        setProductionRoot(root);
+        setProductionRootReady(Boolean(root && data?.root_exists));
+      })
+      .catch(() => {
+        if (canceled) return;
+        setProductionRoot('');
+        setProductionRootReady(false);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, []);
 
   const handleDeleteTaskLog = useCallback(async (logId) => {
     const taskId = logTaskId;
@@ -132,63 +158,70 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
     }
   }, [logTaskId, loadTaskLogs, taskLogActionLoading, taskLogs.length]);
 
-  const handleExtract = async () => {
-    if (!extractRootDir.trim()) return;
-    setExtracting(true);
+  const handleExtractAndScan = async () => {
+    if (readOnly || !productionRootReady || !productionRoot.trim()) return;
+    setSyncing(true);
     setExtractResult(null);
     setActionMessage('');
     setActionError(false);
     try {
-      const result = await extractDispResults(extractRootDir.trim(), extractDestDir.trim() || null);
+      const result = await extractDispResults(productionRoot.trim(), null);
       setExtractResult(result);
-    } catch (err) {
-      setExtractResult({ error: err?.response?.data?.detail || err.message });
-    } finally {
-      setExtracting(false);
-    }
-  };
-
-  const handleScan = async () => {
-    if (readOnly) return;
-    setScanning(true);
-    setActionMessage('');
-    setActionError(false);
-    try {
-      const result = await scanDinsarResults();
-      setActionMessage(result?.message || `D-InSAR 结果扫描任务已入队：${result?.task_id || '-'}`);
-      if (result?.task_id) {
-        onJobQueued?.(result.task_id);
+      const scanResult = await scanDinsarResults();
+      setActionMessage(scanResult?.message || `D-InSAR 结果登记任务已提交：${scanResult?.task_id || '-'}`);
+      if (scanResult?.task_id) {
+        onJobQueued?.(scanResult.task_id);
       }
       await refreshMonitor();
     } catch (err) {
       setActionError(true);
-      setActionMessage(err?.response?.data?.detail || err.message || 'D-InSAR 结果扫描失败');
+      const message = err?.response?.data?.detail || err.message || 'D-InSAR 结果提取与登记失败';
+      setActionMessage(message);
+      setExtractResult((current) => current || { error: message });
     } finally {
-      setScanning(false);
+      setSyncing(false);
     }
   };
 
   const monitorTone = useMemo(() => {
     if (!monitoredTask) return 'neutral';
-    if (showingRecentTask) return 'info';
     return String(monitoredTask.status || '').toUpperCase() === 'RUNNING' ? 'warn' : 'neutral';
-  }, [monitoredTask, showingRecentTask]);
+  }, [monitoredTask]);
 
   return (
     <div className="dinsar-products-page">
       <div className="dinsar-products-hero">
         <div>
-          <strong>D-InSAR 结果提取与标准目录</strong>
+          <strong>D-InSAR 结果目录</strong>
           <p>
-            这里负责把生产目录中的位移结果提取为标准成果包，并触发统一扫描、发布和编目。
-            生产运行与参数配置现已收口到“生产管理”工作台中的 “D-InSAR 运行” 子视图。
+            将生产目录中的位移结果提取为标准成果包，并触发结果登记和目录编目。
+            生产参数与运行提交已归入“D-InSAR 运行”，这里专注成果归档与资产登记。
           </p>
         </div>
-        <div className="dinsar-products-hero-badges">
-          <span className={`dinsar-status-pill tone-${readOnly ? 'warn' : 'ready'}`}>
-            {readOnly ? '只读模式' : '可执行写操作'}
-          </span>
-          <span className="dinsar-status-pill tone-info">日志改为手动刷新</span>
+        <div className="dinsar-products-signals" aria-label="D-InSAR 结果目录状态摘要">
+          <div className={`dinsar-production-signal tone-${readOnly ? 'warn' : 'ready'}`}>
+            <span>操作模式</span>
+            <strong>{readOnly ? '只读' : '可维护'}</strong>
+          </div>
+          <div className={`dinsar-production-signal tone-${taskStateTone}`}>
+            <span>产物任务</span>
+            <strong>{taskStateLabel}</strong>
+          </div>
+          <div className={`dinsar-production-signal tone-${productionRootReady ? 'ready' : 'neutral'}`}>
+            <span>提取源</span>
+            <strong>{catalogSourceState}</strong>
+          </div>
+          <div className="dinsar-production-signal tone-info">
+            <span>日志</span>
+            <strong>手动刷新</strong>
+          </div>
+        </div>
+      </div>
+
+      <div className="dinsar-products-section-head">
+        <div>
+          <strong>成果提取与任务监控</strong>
+          <span>左侧执行受控提取与登记，右侧核对后台任务与日志。</span>
         </div>
       </div>
 
@@ -196,46 +229,27 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
         <section className="dinsar-products-card">
           <div className="dinsar-products-card-head">
             <div>
-              <strong>结果提取与重扫</strong>
-              <span>先提取标准结果包，再按统一目录登记</span>
+              <strong>D-InSAR 结果提取与登记</strong>
+              <span>将已完成的生产成果归入标准结果目录</span>
             </div>
           </div>
 
-          <div className="dinsar-products-form-grid">
-            <label className="dinsar-products-field dinsar-products-field-wide">
-              <span>结果根目录</span>
-              <input
-                value={extractRootDir}
-                onChange={(event) => setExtractRootDir(event.target.value)}
-                placeholder="例如：D:\\Task_Pool\\DInSAR"
-              />
-            </label>
-            <label className="dinsar-products-field">
-              <span>目标目录（可选）</span>
-              <input
-                value={extractDestDir}
-                onChange={(event) => setExtractDestDir(event.target.value)}
-                placeholder="留空则使用系统默认"
-              />
-            </label>
+          <div className="dinsar-products-controlled-source">
+            <span>成果来源</span>
+            <strong>{productionRootReady ? '生产目录已就绪' : '生产目录待完善'}</strong>
+            <p>{productionRootReady ? '可将当前生产成果提取并登记为标准结果包。' : '请先完成 D-InSAR 生产目录配置。'}</p>
           </div>
 
           <div className="dinsar-products-actions">
             <button
               type="button"
               className="primary"
-              onClick={handleExtract}
-              disabled={extracting || !extractRootDir.trim()}
+              onClick={handleExtractAndScan}
+              disabled={readOnly || syncing || !productionRootReady}
             >
-              {extracting ? '提取中...' : '提取位移结果'}
+              {syncing ? '处理中...' : '提取并登记结果'}
             </button>
-            <button
-              type="button"
-              onClick={handleScan}
-              disabled={readOnly || scanning}
-            >
-              {scanning ? '重扫中...' : '重扫结果'}
-            </button>
+            {!productionRootReady && <span className="dinsar-products-action-hint">请先在后端配置 D-InSAR 生产根目录。</span>}
           </div>
 
           {actionMessage && (
@@ -270,7 +284,7 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
           <div className="dinsar-products-card-head">
             <div>
               <strong>产物任务监控</strong>
-              <span>当前不轮询，按需手动刷新</span>
+              <span>任务运行时自动更新，空闲时按需刷新</span>
             </div>
             <button type="button" onClick={refreshMonitor}>刷新</button>
           </div>
@@ -281,7 +295,7 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
             <div className="dinsar-monitor-card">
               <div className="dinsar-monitor-top">
                 <div>
-                  <strong>{showingRecentTask ? '最近一次任务' : '当前任务'}</strong>
+                  <strong>当前任务</strong>
                   <span>{formatTaskType(monitoredTask.task_type)}</span>
                 </div>
                 <StatusSummary status={monitoredTask.status} />
@@ -303,7 +317,7 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
               )}
 
               <div className="dinsar-monitor-log-head">
-                <strong>{showingRecentTask ? '最近一次任务日志' : '当前任务日志'}</strong>
+                <strong>当前任务日志</strong>
                 {!readOnly && (
                   <button
                     type="button"
@@ -354,11 +368,17 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
         </section>
       </div>
 
-      <DinsarCatalogPanel
-        readOnly={readOnly}
-        initialSourceDir={extractRootDir}
-        onTaskQueued={onJobQueued}
-      />
+      <section className="dinsar-products-catalog-section">
+        <div className="dinsar-products-section-head">
+          <div>
+            <strong>标准目录与资产详情</strong>
+            <span>核对 AOI、时间范围、资产文件、发布状态和目录一致性。</span>
+          </div>
+        </div>
+        <DinsarCatalogPanel
+          readOnly={readOnly}
+        />
+      </section>
     </div>
   );
 }

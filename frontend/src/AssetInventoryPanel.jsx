@@ -5,7 +5,6 @@ import {
   listAssetIssues,
   listOrbitAssets,
   listSourceAssets,
-  scanAssetInventory,
 } from './api/assets';
 
 const PAGE_SIZE = 100;
@@ -58,7 +57,6 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
   const [activeTab, setActiveTab] = useState('sources');
   const [family, setFamily] = useState('all');
   const [loading, setLoading] = useState(false);
-  const [scanLoading, setScanLoading] = useState(false);
   const [auditLoading, setAuditLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -89,35 +87,6 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
   useEffect(() => {
     refresh();
   }, [refresh]);
-
-  const handleScan = async (scanPayload = {}, label = '源数据/精轨资产扫描') => {
-    if (readOnly || scanLoading) return;
-    setScanLoading(true);
-    setMessage('');
-    setError('');
-    const requestPayload =
-      scanPayload && typeof scanPayload === 'object' && scanPayload.nativeEvent
-        ? {}
-        : scanPayload;
-    try {
-      const result = await scanAssetInventory({
-        inventory_types: [],
-        root_ids: [],
-        bind_orbits: true,
-        families: INVENTORY_FAMILIES,
-        ...requestPayload,
-      });
-      setMessage(`资产扫描任务已入队: ${result.task_id}`);
-      onTaskStart?.(result.task_id, '源数据/精轨资产扫描已入队', {
-        taskType: 'SCAN_ASSET_INVENTORY',
-        nonBlocking: true,
-      });
-    } catch (err) {
-      setError(err?.response?.data?.detail || err.message || '启动资产扫描失败');
-    } finally {
-      setScanLoading(false);
-    }
-  };
 
   const handleArchiveIntegrityAudit = async (auditPayload = {}, label = '压缩包完整性审计') => {
     if (readOnly || auditLoading) return;
@@ -169,7 +138,7 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
       <div className="asset-toolbar">
         <div>
           <h3>源数据与精轨资产</h3>
-          <p>Sentinel-1 与 LT-1 的源产品、精密轨道和绑定状态</p>
+          <p>查看 Sentinel-1 与 LT-1 的源产品、精密轨道、绑定状态和开放问题；资产登记由数据接入与运维流程维护。</p>
         </div>
         <div className="asset-actions">
           <select value={family} onChange={(e) => setFamily(e.target.value)} disabled={loading}>
@@ -178,12 +147,6 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
             <option value="LT1">LT-1</option>
           </select>
           <button type="button" onClick={() => refresh()} disabled={loading}>刷新</button>
-          <button type="button" onClick={() => handleScan({ families: INVENTORY_FAMILIES }, '全部资产扫描')} disabled={readOnly || scanLoading}>全部扫描</button>
-          <button type="button" onClick={() => handleScan({ families: ['LT1'] }, 'LT-1资产扫描')} disabled={readOnly || scanLoading}>LT-1扫描</button>
-          <button type="button" onClick={() => handleScan({ families: ['S1'] }, 'Sentinel-1资产扫描')} disabled={readOnly || scanLoading}>S1扫描</button>
-          <button type="button" onClick={() => handleScan({ inventory_types: ['orbit_asset'], families: INVENTORY_FAMILIES }, '全部精轨扫描')} disabled={readOnly || scanLoading}>全部精轨</button>
-          <button type="button" onClick={() => handleScan({ inventory_types: ['orbit_asset'], families: ['LT1'] }, 'LT-1精轨扫描')} disabled={readOnly || scanLoading}>LT-1精轨</button>
-          <button type="button" onClick={() => handleScan({ inventory_types: ['orbit_asset'], families: ['S1'] }, 'Sentinel-1精轨扫描')} disabled={readOnly || scanLoading}>S1精轨</button>
           <button type="button" onClick={() => handleArchiveIntegrityAudit()} disabled={readOnly || auditLoading}>
             {auditLoading ? '审计启动中' : '压缩包完整性审计'}
           </button>

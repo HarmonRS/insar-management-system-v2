@@ -318,10 +318,7 @@ async def _build_radar_preview_cache(
                     geo_error = "invalid_bbox"
                     has_geo_cache = False
                 else:
-                    source_corner_mapping = await asyncio.to_thread(
-                        data_service.get_radar_source_corner_mapping,
-                        record.file_path,
-                    )
+                    source_corner_mapping = data_service.get_radar_record_corner_mapping(record)
                     ok_geo, geo_error = await asyncio.to_thread(
                         image_service.create_geocorrected_radar_cached_image,
                         preview_source,
@@ -408,6 +405,7 @@ async def _get_cached_radar_preview(data_id: int, db: AsyncSession):
     raw_cache_path, geo_cache_path = _radar_preview_paths(record)
     if (
         (record.preview_cache_status or "NONE") == "READY"
+        and (record.preview_cache_version or "") == settings.RADAR_GEO_CACHE_VERSION
         and record.preview_cache_path
         and str(record.preview_cache_path).lower().endswith(".webp")
         and os.path.exists(record.preview_cache_path)
@@ -418,7 +416,7 @@ async def _get_cached_radar_preview(data_id: int, db: AsyncSession):
             headers={"Cache-Control": "public, max-age=31536000"},
         )
 
-    if os.path.exists(geo_cache_path):
+    if os.path.exists(geo_cache_path) and (record.preview_cache_version or "") == settings.RADAR_GEO_CACHE_VERSION:
         return FileResponse(
             geo_cache_path,
             media_type="image/webp",
@@ -523,7 +521,6 @@ async def search_radar_data_endpoint(
     product_unique_id: Optional[str] = Form(None),
     orbit_direction: Optional[str] = Form(None),
     has_orbit_data: Optional[bool] = Form(None),
-    is_envi_processed: Optional[bool] = Form(None),
     imaging_date_from: Optional[str] = Form(None),
     imaging_date_to: Optional[str] = Form(None),
     region_tree_id: Optional[str] = Form(None),
@@ -609,8 +606,6 @@ async def search_radar_data_endpoint(
         filters.append(RadarDataORM.orbit_direction.ilike(f"%{n_orbit_direction}%"))
     if has_orbit_data is not None:
         filters.append(RadarDataORM.has_orbit_data == has_orbit_data)
-    if is_envi_processed is not None:
-        filters.append(RadarDataORM.is_envi_processed == is_envi_processed)
     if n_date_from:
         filters.append(RadarDataORM.imaging_date >= n_date_from)
     if n_date_to:

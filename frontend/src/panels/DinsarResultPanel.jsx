@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useDinsarStore, useHazardStore, useUiStore, useAuthStore } from '../store';
 import { useI18n } from '../i18n/I18nContext';
 import VirtualizedList from '../components/common/VirtualizedList';
 import DinsarResultRow from '../components/panels/DinsarResultRow';
-import ResultExportModal from '../components/ResultExportModal';
 import { PAGE_SIZE_OPTIONS } from '../config/appConstants';
 import { getPageHintText } from '../utils/appUiHelpers';
 import {
@@ -36,6 +35,7 @@ export default function DinsarResultPanel({
     onToggleVisibility,
     onLabel,
     onAnalyze,
+    onOpenResultExtraction,
 }) {
     const { language } = useI18n();
     const {
@@ -76,8 +76,6 @@ export default function DinsarResultPanel({
     })));
     const { currentUser } = useAuthStore();
     const isReadOnlyUser = !!currentUser && currentUser.role !== 'admin';
-    const [showExportModal, setShowExportModal] = useState(false);
-
     const strategyOptions = useMemo(
         () => buildDinsarStrategyOptions(dinsarResults),
         [dinsarResults]
@@ -261,11 +259,11 @@ export default function DinsarResultPanel({
                                             : (language === 'en' ? 'Show Dates' : '显示日期')}
                                     </button>
                                     <button
-                                        onClick={() => setShowExportModal(true)}
-                                        disabled={isLoading || filteredResults.length === 0}
+                                        onClick={onOpenResultExtraction}
+                                        disabled={isLoading || !onOpenResultExtraction}
                                         title={language === 'en'
-                                            ? 'Export visible results in the current filter scope'
-                                            : '按当前筛选范围导出结果文件'}
+                                            ? 'Open the unified result extraction workspace'
+                                            : '进入统一结果提取工作台'}
                                     >
                                         {language === 'en' ? 'Export...' : '提取结果...'}
                                     </button>
@@ -450,12 +448,6 @@ export default function DinsarResultPanel({
                 </>
             )}
 
-            {showExportModal && (
-                <ResultExportModal
-                    results={filteredResults}
-                    onClose={() => setShowExportModal(false)}
-                />
-            )}
         </div>
     );
 }

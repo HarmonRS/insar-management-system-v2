@@ -95,6 +95,68 @@ def _ordered_closed_polygon_from_corner_details(corner_details: Dict[str, Dict[s
 
     return _ordered_closed_polygon([(value["lon"], value["lat"]) for value in (corner_details or {}).values()])
 
+
+def build_corner_pixel_mapping(corner_details: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if len(corner_details or {}) < 4:
+        return None
+
+    entries: List[Tuple[str, Dict[str, Any]]] = []
+    ref_rows = []
+    ref_cols = []
+    for name, info in (corner_details or {}).items():
+        if info.get("lon") is None or info.get("lat") is None:
+            return None
+        if info.get("ref_row") is None or info.get("ref_col") is None:
+            return None
+        try:
+            ref_row = int(float(info["ref_row"]))
+            ref_col = int(float(info["ref_col"]))
+        except (TypeError, ValueError):
+            return None
+        normalized = dict(info)
+        normalized["ref_row"] = ref_row
+        normalized["ref_col"] = ref_col
+        entries.append((str(name), normalized))
+        ref_rows.append(ref_row)
+        ref_cols.append(ref_col)
+
+    min_row, max_row = min(ref_rows), max(ref_rows)
+    min_col, max_col = min(ref_cols), max(ref_cols)
+    remaining = entries[:]
+
+    def pick(target_row: int, target_col: int) -> Optional[Tuple[float, float]]:
+        if not remaining:
+            return None
+        ranked = []
+        for index, (name, info) in enumerate(remaining):
+            row = int(info["ref_row"])
+            col = int(info["ref_col"])
+            score = abs(row - target_row) + abs(col - target_col)
+            ranked.append((score, abs(row - target_row), abs(col - target_col), name, index))
+        ranked.sort()
+        chosen_index = ranked[0][4]
+        _, chosen = remaining.pop(chosen_index)
+        try:
+            return float(chosen["lon"]), float(chosen["lat"])
+        except (TypeError, ValueError):
+            return None
+
+    top_left = pick(min_row, min_col)
+    top_right = pick(min_row, max_col)
+    bottom_left = pick(max_row, min_col)
+    bottom_right = pick(max_row, max_col)
+
+    if not all([top_left, top_right, bottom_left, bottom_right]):
+        return None
+
+    return {
+        "top_left": [top_left[0], top_left[1]],
+        "top_right": [top_right[0], top_right[1]],
+        "bottom_left": [bottom_left[0], bottom_left[1]],
+        "bottom_right": [bottom_right[0], bottom_right[1]],
+        "source": "xml_ref_row_col",
+    }
+
 # --- Sentinel-1 (S1A/S1B/S1C) Parsers ---
 
 def _radar_meta_base() -> Dict[str, Any]:
@@ -446,54 +508,6 @@ def parse_xml_metadata(
             except (TypeError, ValueError):
                 return None
 
-        def _build_corner_pixel_mapping(corner_details: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-            if len(corner_details) < 4:
-                return None
-
-            ref_rows = []
-            ref_cols = []
-            for info in corner_details.values():
-                if info.get("ref_row") is None or info.get("ref_col") is None:
-                    return None
-                ref_rows.append(int(info["ref_row"]))
-                ref_cols.append(int(info["ref_col"]))
-
-            min_row, max_row = min(ref_rows), max(ref_rows)
-            min_col, max_col = min(ref_cols), max(ref_cols)
-            remaining = set(corner_details.keys())
-
-            def pick(target_row: int, target_col: int) -> Optional[Tuple[float, float]]:
-                if not remaining:
-                    return None
-                ranked = []
-                for name in remaining:
-                    info = corner_details[name]
-                    row = int(info["ref_row"])
-                    col = int(info["ref_col"])
-                    score = abs(row - target_row) + abs(col - target_col)
-                    ranked.append((score, abs(row - target_row), abs(col - target_col), name))
-                ranked.sort()
-                chosen_name = ranked[0][3]
-                remaining.remove(chosen_name)
-                chosen = corner_details[chosen_name]
-                return float(chosen["lon"]), float(chosen["lat"])
-
-            top_left = pick(min_row, min_col)
-            top_right = pick(min_row, max_col)
-            bottom_left = pick(max_row, min_col)
-            bottom_right = pick(max_row, max_col)
-
-            if not all([top_left, top_right, bottom_left, bottom_right]):
-                return None
-
-            return {
-                "top_left": [top_left[0], top_left[1]],
-                "top_right": [top_right[0], top_right[1]],
-                "bottom_left": [bottom_left[0], bottom_left[1]],
-                "bottom_right": [bottom_right[0], bottom_right[1]],
-                "source": "xml_ref_row_col",
-            }
-
         corners = ['bottomLeft', 'bottomRight', 'topRight', 'topLeft']
         polygon = []
 
@@ -652,7 +666,7 @@ def parse_xml_metadata(
             if not ordered_polygon:
                 return None, None
             polygon = ordered_polygon
-            corner_pixel_mapping = _build_corner_pixel_mapping(corner_details)
+            corner_pixel_mapping = build_corner_pixel_mapping(corner_details)
             meta = {
                 "orbit_direction": orbit_direction,
                 "imaging_mode": imaging_mode,

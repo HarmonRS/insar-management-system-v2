@@ -4,7 +4,6 @@ import { useShallow } from 'zustand/react/shallow';
 import 'leaflet/dist/leaflet.css';
 import './App.css';
 import LoginPage from './LoginPage';
-import AppLogPanel from './components/app/AppLogPanel';
 import AppMapWorkspace from './components/app/AppMapWorkspace';
 import AppOverlays from './components/app/AppOverlays';
 import AppSidePanel from './components/app/AppSidePanel';
@@ -18,7 +17,6 @@ import {
 } from './store';
 import useAppAuthLifecycle from './hooks/useAppAuthLifecycle';
 import useGlobalTaskControl from './hooks/useGlobalTaskControl';
-import usePanelResize from './hooks/usePanelResize';
 import useRegionAoiHandlers from './hooks/useRegionAoiHandlers';
 import usePaginationControls from './hooks/usePaginationControls';
 import useRadarSearch from './hooks/useRadarSearch';
@@ -222,20 +220,13 @@ function App() {
         setPendingTaskIds: state.setPendingTaskIds,
     })));
     const {
-        leftPanelTab, setLeftPanelTab, leftPanelWidth, setLeftPanelWidth,
-        rightPanelWidth, setRightPanelWidth, isResizing, setIsResizing,
-        setShowStats, setShowDataInfo, setSelectedDataInfo, showDates,
+        leftPanelTab, setLeftPanelTab, leftPanelWidth,
+        setShowDataInfo, setSelectedDataInfo, showDates,
         baseLayerKey, setBaseLayerKey, isLoading, setIsLoading, addLog,
     } = useUiStore(useShallow((state) => ({
         leftPanelTab: state.leftPanelTab,
         setLeftPanelTab: state.setLeftPanelTab,
         leftPanelWidth: state.leftPanelWidth,
-        setLeftPanelWidth: state.setLeftPanelWidth,
-        rightPanelWidth: state.rightPanelWidth,
-        setRightPanelWidth: state.setRightPanelWidth,
-        isResizing: state.isResizing,
-        setIsResizing: state.setIsResizing,
-        setShowStats: state.setShowStats,
         setShowDataInfo: state.setShowDataInfo,
         setSelectedDataInfo: state.setSelectedDataInfo,
         showDates: state.showDates,
@@ -423,7 +414,6 @@ function App() {
     const hazardLayersRef = useRef({});
     const dinsarResultLayersRef = useRef({});
     const sbasAnalysisLayersRef = useRef({});
-    const resizeStateRef = useRef({ side: null, startX: 0, startLeft: 0, startRight: 0 });
     const allDataRef = useRef(allData);
     const dinsarResultsRef = useRef(dinsarResults);
     const mapBatchRef = useRef({ frameId: null, token: 0 });
@@ -446,7 +436,7 @@ function App() {
             cancelAnimationFrame(frameId);
             window.clearTimeout(timeoutId);
         };
-    }, [isStandaloneLeftPage, leftPanelWidth, rightPanelWidth]);
+    }, [isStandaloneLeftPage, leftPanelWidth]);
 
     const getVisibleLayerRefs = useCallback(() => ({
         activeLayersRef: activeLayersRef.current,
@@ -715,16 +705,6 @@ function App() {
         setShowPairingModal,
         psAoiMode,
         setShowPsModal,
-    });
-
-    const { startResize } = usePanelResize({
-        isResizing,
-        setIsResizing,
-        leftPanelWidth,
-        rightPanelWidth,
-        setLeftPanelWidth,
-        setRightPanelWidth,
-        resizeStateRef,
     });
 
     const {
@@ -1238,7 +1218,7 @@ function App() {
             ? '-'
             : `${(Number(result.ai_score) * 100).toFixed(0)}%`;
         const engine = getDinsarEngineMeta(result.engine_code);
-        const strategy = escapeHtml(result.selection_strategy || 'legacy');
+        const strategy = escapeHtml(result.selection_strategy || '标准选择');
         const taskAlias = escapeHtml(result.task_alias || result.task_name || result.name || '-');
         const pairKey = escapeHtml(result.pair_key || '-');
         const pairUid = escapeHtml(result.pair_uid || '-');
@@ -2027,10 +2007,6 @@ function App() {
         fetchHealthStatus({ refresh: true });
     }, [fetchHealthStatus]);
 
-    const openStatisticsDashboard = useCallback(() => {
-        setShowStats(true);
-    }, [setShowStats]);
-
     const refreshDinsarResults = useCallback(() => {
         fetchDinsarResults({ offset: 0 });
     }, [fetchDinsarResults]);
@@ -2046,7 +2022,6 @@ function App() {
         showRadarPageInputError,
         radarPageInputValidationError,
         onSearchAll: searchAllRadarData,
-        onShowStats: openStatisticsDashboard,
         onSearch: applyRadarSearch,
         onReset: resetRadarSearch,
         onAoiModeChange: handleRadarSearchAoiModeChange,
@@ -2179,12 +2154,6 @@ function App() {
                 />
 
                 <div
-                    className="panel-resizer"
-                    onMouseDown={(event) => startResize('left', event)}
-                    style={{ display: isStandaloneLeftPage ? 'none' : undefined }}
-                />
-
-                <div
                     style={{
                         display: isStandaloneLeftPage ? 'none' : 'flex',
                         flex: '1 1 auto',
@@ -2212,15 +2181,6 @@ function App() {
                     />
                 </div>
 
-                <div
-                    className="panel-resizer"
-                    onMouseDown={(event) => startResize('right', event)}
-                    style={{ display: isStandaloneLeftPage ? 'none' : undefined }}
-                />
-
-                <div style={{ display: isStandaloneLeftPage ? 'none' : undefined }}>
-                    <AppLogPanel width={rightPanelWidth} />
-                </div>
             </div>
 
             <AppOverlays

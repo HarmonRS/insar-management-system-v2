@@ -96,11 +96,6 @@ const renderOrbitSourceIssueDetails = (item, en, formatPathText) => {
           {en ? 'ENVI: ' : 'ENVI：'}{formatPathText(item.envi_path)}
         </div>
       )}
-      {item?.isce2_path && (
-        <div style={{ color: '#64748b' }}>
-          {en ? 'ISCE2: ' : 'ISCE2：'}{formatPathText(item.isce2_path)}
-        </div>
-      )}
       {hasNulDetails && (
         <div style={{ color: '#64748b' }}>
           {en ? 'NUL bytes: ' : 'NUL 字节：'}{formatIntegerText(nulCount)}
@@ -201,10 +196,10 @@ const buildConsistencySummary = (stats, en = false) => {
   };
 };
 
-const HEALTH_PANEL_POLL_INTERVAL_MS = 30000;
+const HEALTH_PANEL_POLL_INTERVAL_MS = 5 * 60 * 1000;
 
-const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
-  const en = language === 'en';
+const HealthCheckPanel = ({ currentUser }) => {
+  const en = false;
   const isAdmin = currentUser?.role === 'admin';
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -222,8 +217,6 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   const [wslChecking, setWslChecking] = useState(false);
   const [orbitStatus, setOrbitStatus] = useState(null);
   const [orbitSyncing, setOrbitSyncing] = useState(false);
-  const [orbitRepairing, setOrbitRepairing] = useState(false);
-  const [orbitQuarantining, setOrbitQuarantining] = useState(false);
   const [orbitSyncResult, setOrbitSyncResult] = useState(null);
   const statusFetchInFlightRef = useRef(false);
 
@@ -233,7 +226,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
       setOrbitStatus(data);
     } catch (err) {
       setOrbitStatus(null);
-      setOrbitSyncResult({ error: err.response?.data?.detail || err.message || (en ? 'Failed to fetch orbit status' : '精轨状态获取失败') });
+      setOrbitSyncResult({ error: err.response?.data?.detail || err.message || '精轨状态获取失败' });
     }
   }, [en]);
 
@@ -266,7 +259,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
         setStatus(healthData);
         setLastChecked(new Date());
       } catch (err) {
-        setError(err.response?.data?.detail || err.message || (en ? 'Health check failed' : '运维自检失败'));
+      setError(err.response?.data?.detail || err.message || '运维自检失败');
         setStatus(null);
       }
 
@@ -276,19 +269,17 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
         setConsistencyError('');
       } catch (err) {
         setConsistencySummary(null);
-        setConsistencyError(err.response?.data?.detail || err.message || (en ? 'Failed to fetch consistency stats' : '一致性统计获取失败'));
+      setConsistencyError(err.response?.data?.detail || err.message || '一致性统计获取失败');
       }
 
       // 引擎状态独立加载，不影响主健康检查。
       await refreshEngineStatus();
 
-      // 轨道目录状态由专门接口维护，失败时由 refreshOrbitStatus 自己写回 UI。
-      await refreshOrbitStatus();
     } finally {
       setLoading(false);
       statusFetchInFlightRef.current = false;
     }
-  }, [en, refreshEngineStatus, refreshOrbitStatus]);
+  }, [en, refreshEngineStatus]);
 
   useEffect(() => {
     void fetchStatus();
@@ -297,9 +288,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
         syncLoading ||
         cleanupLoading ||
         wslChecking ||
-        orbitSyncing ||
-        orbitRepairing ||
-        orbitQuarantining
+        orbitSyncing
       ) {
         return;
       }
@@ -309,8 +298,6 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   }, [
     cleanupLoading,
     fetchStatus,
-    orbitQuarantining,
-    orbitRepairing,
     orbitSyncing,
     syncLoading,
     wslChecking,
@@ -320,6 +307,14 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
     <span className={`health-badge ${ok ? 'ok' : 'fail'}`}>
       {ok ? (en ? 'OK' : '正常') : (en ? 'Error' : '异常')}{label ? ` · ${label}` : ''}
     </span>
+  );
+
+  const renderSignal = (ok, label, detail = '') => (
+    <div className={`health-signal ${ok ? 'ok' : 'fail'}`}>
+      <span className="health-signal-label">{label}</span>
+      <strong>{ok ? '正常' : '异常'}</strong>
+      {detail && <span className="health-signal-detail">{detail}</span>}
+    </div>
   );
 
   const formatIso = (iso) => {
@@ -342,6 +337,14 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
     typeof timeseriesResultCatalog.needs_rebuild === 'boolean' ? timeseriesResultCatalog.needs_rebuild : null;
   const sourceRoots = asObject(status?.source_roots);
   const productPackages = asObject(status?.product_packages);
+  const assetInventory = asObject(status?.asset_inventory);
+  const hasAssetInventory = Boolean(status?.asset_inventory);
+  const assetSourceRoots = asObject(assetInventory.source_roots);
+  const assetOrbitRoots = asObject(assetInventory.orbit_roots);
+  const sourceAssets = asObject(assetInventory.source_assets);
+  const orbitAssets = asObject(assetInventory.orbit_assets);
+  const orbitBindings = asObject(assetInventory.bindings);
+  const assetIssues = asObject(assetInventory.issues);
   const wslRuntime = asObject(status?.wsl_runtime);
   const wslRuntimeItems = asArray(wslRuntime.runtimes);
   const pairingSystem = asObject(status?.pairing_system);
@@ -374,58 +377,60 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
   const orbitPools = orbitStatus?.pools || {};
   const orbitConsistency = orbitStatus?.consistency || {};
   const orbitDatabase = orbitStatus?.database || {};
-  const orbitIsce2Enabled = Boolean(orbitPools.isce2?.enabled || orbitConsistency.isce2?.enabled || orbitDatabase.isce2_enabled);
   const orbitMismatchCount = toNumber(orbitConsistency.mismatch_count);
   const orbitDbMissingEnviCount = toNumber(orbitDatabase.stems_missing_in_envi_count);
-  const orbitDbMissingIsce2Count = orbitIsce2Enabled ? toNumber(orbitDatabase.stems_missing_in_isce2_count) : 0;
   const orbitDbMissingPathCount = toNumber(orbitDatabase.db_missing_path_count);
   const orbitDbFlagIssueCount =
     toNumber(orbitDatabase.has_orbit_but_missing_path_count) +
     toNumber(orbitDatabase.without_orbit_but_path_present_count);
   const orbitScanErrorCount =
     (orbitSource.errors?.length || 0) +
-    (orbitPools.envi?.errors?.length || 0) +
-    (orbitIsce2Enabled ? (orbitPools.isce2?.errors?.length || 0) : 0);
+    (orbitPools.envi?.errors?.length || 0);
   const orbitDuplicateCount =
     toNumber(orbitSource.duplicate_count) +
-    toNumber(orbitPools.envi?.duplicate_count) +
-    (orbitIsce2Enabled ? toNumber(orbitPools.isce2?.duplicate_count) : 0);
+    toNumber(orbitPools.envi?.duplicate_count);
   const orbitSuspectBadCount = toNumber(orbitSource.suspect_bad_count);
   const orbitSourceWithoutEnviCount = toNumber(orbitSource.source_without_envi_count);
   const orbitEnviWithoutSourceCount = toNumber(orbitSource.envi_without_source_count);
-  const orbitIsce2WithoutSourceCount = orbitIsce2Enabled ? toNumber(orbitSource.isce2_without_source_count) : 0;
-  const orbitQuarantinePath = orbitSource.quarantine_path || orbitStatus?.source_gaps?.quarantine_path;
   const orbitBadSourceSamples = asArray(orbitSource.bad_source_samples).filter(hasOrbitCorruptionSignal);
-  const orbitSuspectBadSamples = asArray(orbitSource.suspect_bad_samples);
-  const orbitSuspectWithoutCorruptionSamples = orbitSuspectBadSamples.filter(
-    (item) => !orbitBadSourceSamples.some((badItem) => badItem.name === item.name)
-  );
   const orbitBadSourceSampleCount = toNumber(orbitSource.bad_source_sample_count || orbitBadSourceSamples.length);
   const orbitOverallHealthy = Boolean(
     orbitStatus &&
     orbitMismatchCount === 0 &&
     orbitDbMissingEnviCount === 0 &&
-    orbitDbMissingIsce2Count === 0 &&
     orbitDbMissingPathCount === 0 &&
     orbitDbFlagIssueCount === 0 &&
     orbitScanErrorCount === 0 &&
     orbitSuspectBadCount === 0 &&
     orbitSourceWithoutEnviCount === 0 &&
-    orbitEnviWithoutSourceCount === 0 &&
-    orbitIsce2WithoutSourceCount === 0
+    orbitEnviWithoutSourceCount === 0
   );
+  const assetInventoryHealthy = Boolean(hasAssetInventory && assetInventory.ok);
+  const orbitAssetRiskCount =
+    toNumber(orbitAssets.parse_failed_count) +
+    toNumber(orbitBindings.missing_count) +
+    toNumber(orbitBindings.ambiguous_count);
+
+  const productionBlockingCount = [
+    !status?.ok,
+    !status?.database?.ok,
+    !status?.database?.schema_ok,
+    !status?.worker?.ok,
+    consistencySummary && consistencySummary.critical > 0,
+    hasAssetInventory && !assetInventoryHealthy,
+  ].filter(Boolean).length;
 
   return (
     <div className="health-panel">
       <div className="health-header">
         <div>
-          <div className="health-title">{en ? 'System Health' : '运维自检'}</div>
+          <div className="health-title">运行维护</div>
           <div className="health-subtitle">
-            {lastChecked ? `${en ? 'Last check: ' : '上次检查：'}${lastChecked.toLocaleString()}` : (en ? 'Not checked yet' : '尚未检查')}
+            面向生产环境的系统健康、数据一致性和维护操作入口
           </div>
         </div>
         <button className="health-refresh" onClick={() => fetchStatus({ force: true })} disabled={loading}>
-          {loading ? (en ? 'Checking...' : '检查中...') : (en ? 'Refresh' : '刷新')}
+          {loading ? '检查中...' : '刷新自检'}
         </button>
       </div>
 
@@ -439,23 +444,37 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
         <>
           <div className="health-summary">
             <div className="health-summary-item">
-              <span>{en ? 'Overall Status' : '总体状态'}</span>
-              {renderBadge(status.ok)}
+              <span>生产就绪</span>
+              {renderBadge(status.ok && productionBlockingCount === 0, productionBlockingCount > 0 ? `${productionBlockingCount} 个阻断项` : '可运行')}
             </div>
             <div className="health-summary-item">
-              <span>{en ? 'Timestamp' : '时间戳'}</span>
-              <span>{formatIso(status.timestamp)}</span>
+              <span>最近检查</span>
+              <span>{lastChecked ? lastChecked.toLocaleString() : formatIso(status.timestamp)}</span>
             </div>
             <div className="health-summary-item">
-              <span>{en ? 'Consistency Issues' : '一致性异常'}</span>
+              <span>一致性异常</span>
               {renderBadge(
                 !consistencySummary || consistencySummary.total === 0,
-                consistencySummary ? `${consistencySummary.total} ${en ? 'items' : '项'}` : (en ? 'Unknown' : '未知')
+                consistencySummary ? `${consistencySummary.total} 项` : '未知'
               )}
+            </div>
+            <div className="health-signal-row">
+              {renderSignal(!!status.database?.ok && !!status.database?.schema_ok, '数据库')}
+              {renderSignal(!!status.worker?.ok, 'Worker', `${status.worker?.worker_count ?? 0} 个`)}
+              {renderSignal(!!status.idl?.ok, 'IDL/ENVI')}
+              {renderSignal(!!status.nginx?.ok, 'Nginx')}
             </div>
           </div>
 
-          <div className="health-grid">
+          <div className="health-sections">
+            <section className="health-section">
+              <div className="health-section-header">
+                <div>
+                  <h3>核心服务</h3>
+                  <p>判断系统是否具备基础生产能力：数据库、PostGIS、schema 和任务执行器。</p>
+                </div>
+              </div>
+              <div className="health-grid">
             <div className="health-card">
               <div className="health-card-title">{en ? 'Database' : '数据库'}</div>
               <div className="health-card-row">
@@ -587,7 +606,17 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                 </div>
               )}
             </div>
+              </div>
+            </section>
 
+            <section className="health-section">
+              <div className="health-section-header">
+                <div>
+                  <h3>结果目录与生产索引</h3>
+                  <p>检查 D-InSAR、时序 InSAR、配对基础表和兼容视图是否能支撑结果查询与生产流转。</p>
+                </div>
+              </div>
+              <div className="health-grid">
             <div className="health-card">
               <div className="health-card-title">{en ? 'D-InSAR Result Catalog' : 'D-InSAR 结果目录'}</div>
               <div className="health-card-row">
@@ -758,7 +787,7 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
               </div>
               {bridgeIssueCount === 0 ? (
                 <div className="health-card-note ok">
-                  {en ? 'Catalog-first reads and legacy compat rows are aligned.' : '目录事实源与旧兼容视图当前一致。'}
+                  {en ? 'Catalog reads and compatibility rows are aligned.' : '目录事实源与兼容视图当前一致。'}
                 </div>
               ) : (
                 <>
@@ -805,7 +834,17 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                 </div>
               )}
             </div>
+              </div>
+            </section>
 
+            <section className="health-section">
+              <div className="health-section-header">
+                <div>
+                  <h3>数据资产与运行时</h3>
+                  <p>检查受管源路径、标准结果包、WSL runtime、IDL/ENVI、D-InSAR 引擎、Ollama 和 Nginx。</p>
+                </div>
+              </div>
+              <div className="health-grid">
             <div className="health-card">
               <div className="health-card-title">{en ? 'Managed Source Roots' : '受管源路径'}</div>
               <div className="health-card-row">
@@ -1037,7 +1076,115 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                 </div>
               )}
             </div>
+              </div>
+            </section>
 
+            <section className="health-section">
+              <div className="health-section-header">
+                <div>
+                  <h3>数据资产与精轨</h3>
+                  <p>当前生产以 XML 抽取后的源产品、精轨资产和场景绑定为准；旧精轨池核对仅作为过渡诊断。</p>
+                </div>
+              </div>
+              <div className="health-grid health-grid--ops">
+            <div className="health-card">
+              <div className="health-card-title">源产品资产</div>
+              <div className="health-card-row">
+                <span>总体状态</span>
+                {renderBadge(
+                  assetInventoryHealthy,
+                  assetInventory ? `${toNumber(sourceAssets.total_count)} 项` : '未知'
+                )}
+              </div>
+              <div className="health-card-row">
+                <span>LT-1 / Sentinel-1</span>
+                <span>{toNumber(sourceAssets.lt1_count)} / {toNumber(sourceAssets.s1_count)}</span>
+              </div>
+              <div className="health-card-row">
+                <span>解析异常</span>
+                <span>{toNumber(sourceAssets.parse_failed_count)}</span>
+              </div>
+              <div className="health-card-row">
+                <span>源数据根</span>
+                <span>{toNumber(assetSourceRoots.accessible_count)} / {toNumber(assetSourceRoots.configured_count)}</span>
+              </div>
+              <div className="health-card-row">
+                <span>需复扫</span>
+                <span>{toNumber(assetSourceRoots.needs_rescan_count)}</span>
+              </div>
+              {toNumber(sourceAssets.parse_failed_count) > 0 ? (
+                <div className="health-card-note error">
+                  存在源产品解析异常，请在“数据资产”中查看开放问题并复扫相关目录。
+                </div>
+              ) : (
+                <div className="health-card-note ok">
+                  源产品资产已按 XML/元数据登记。
+                </div>
+              )}
+            </div>
+
+            <div className="health-card">
+              <div className="health-card-title">精轨资产状态</div>
+              <div className="health-card-row">
+                <span>总体状态</span>
+                {renderBadge(
+                  orbitAssetRiskCount === 0 && assetInventoryHealthy,
+                  orbitAssetRiskCount > 0 ? `${orbitAssetRiskCount} 个风险项` : `${toNumber(orbitAssets.total_count)} 项`
+                )}
+              </div>
+              <div className="health-card-row">
+                <span>LT-1 / Sentinel-1</span>
+                <span>{toNumber(orbitAssets.lt1_count)} / {toNumber(orbitAssets.s1_count)}</span>
+              </div>
+              <div className="health-card-row">
+                <span>解析异常</span>
+                <span>{toNumber(orbitAssets.parse_failed_count)}</span>
+              </div>
+              <div className="health-card-row">
+                <span>精轨根</span>
+                <span>{toNumber(assetOrbitRoots.accessible_count)} / {toNumber(assetOrbitRoots.configured_count)}</span>
+              </div>
+              <div className="health-card-row">
+                <span>需复扫</span>
+                <span>{toNumber(assetOrbitRoots.needs_rescan_count)}</span>
+              </div>
+              <div className="health-card-note">
+                精轨可用性以资产登记和时间窗绑定结果为准，不再以 ISCE2 XML 池作为生产判断。
+              </div>
+            </div>
+
+            <div className="health-card">
+              <div className="health-card-title">场景精轨绑定</div>
+              <div className="health-card-row">
+                <span>已绑定场景</span>
+                <span>{toNumber(orbitBindings.matched_count)} / {toNumber(orbitBindings.scene_count)}</span>
+              </div>
+              <div className="health-card-row">
+                <span>缺失精轨</span>
+                <span>{toNumber(orbitBindings.missing_count)}</span>
+              </div>
+              <div className="health-card-row">
+                <span>候选歧义</span>
+                <span>{toNumber(orbitBindings.ambiguous_count)}</span>
+              </div>
+              <div className="health-card-row">
+                <span>开放问题</span>
+                <span>{toNumber(assetIssues.open_count)}</span>
+              </div>
+              <div className="health-card-row">
+                <span>错误 / 警告</span>
+                <span>{toNumber(assetIssues.error_count)} / {toNumber(assetIssues.warning_count)}</span>
+              </div>
+              {orbitAssetRiskCount > 0 ? (
+                <div className="health-card-note warn">
+                  请在“数据资产”中复核缺失或歧义精轨；生产配对会优先使用已选定的精轨资产。
+                </div>
+              ) : (
+                <div className="health-card-note ok">
+                  当前开放问题未显示精轨绑定风险。
+                </div>
+              )}
+            </div>
             <div className="health-card">
               <div className="health-card-title">{en ? 'Consistency Check' : '一致性检测'}</div>
               <div className="health-card-row">
@@ -1103,12 +1250,30 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                 </div>
               )}
             </div>
-          </div>
 
-          {/* 精轨管理 */}
           {isAdmin && (
-            <div className="health-card">
-              <div className="health-card-title">{en ? 'Precise Orbit Management' : '精轨管理'}</div>
+            <details className="health-card health-legacy-diagnostic">
+              <summary>
+                <span>旧精轨池核对</span>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    void refreshOrbitStatus();
+                  }}
+                  disabled={orbitSyncing}
+                  className="health-inline-button"
+                >
+                  {orbitStatus ? '重新核对' : '加载诊断'}
+                </button>
+              </summary>
+              <div className="health-card-note">
+                该诊断仅核对源精轨目录与 ENVI/Gamma 生产 TXT 池，用于排查历史目录；生产判断以资产登记与场景绑定为准。
+              </div>
+              {orbitStatus ? (
+                <>
+              <div className="health-card-title">{en ? 'Precise Orbit Management' : '文件池状态'}</div>
               <div className="health-card-row">
                 <span>{en ? 'Overall' : '总体状态'}</span>
                 {renderBadge(
@@ -1120,14 +1285,10 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
               </div>
               <div className="health-card-row">
                 <span>
-                  {orbitIsce2Enabled
-                    ? (en ? 'Source / ENVI-Gamma TXT / ISCE2 XML' : '源目录 / ENVI-Gamma TXT / ISCE2 XML')
-                    : (en ? 'Source / ENVI-Gamma TXT' : '源目录 / ENVI-Gamma TXT')}
+                  {en ? 'Source / production TXT' : '源目录 / 生产 TXT'}
                 </span>
                 <span>
-                  {orbitIsce2Enabled
-                    ? `${toNumber(orbitSource.total_source)} / ${toNumber(orbitPools.envi?.total)} / ${toNumber(orbitPools.isce2?.total)}`
-                    : `${toNumber(orbitSource.total_source)} / ${toNumber(orbitPools.envi?.total)}`}
+                  {`${toNumber(orbitSource.total_source)} / ${toNumber(orbitPools.envi?.total)}`}
                 </span>
               </div>
               <div className="health-card-row">
@@ -1140,24 +1301,17 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                 <span>{en ? 'Pool mismatches' : '池不一致'}</span>
                 <span>{orbitMismatchCount}</span>
               </div>
-              {orbitIsce2Enabled ? (
-                <div className="health-card-row">
-                  <span>{en ? 'Suspect bad TXT / source-only' : '疑似坏 TXT / 仅源存在'}</span>
-                  <span>{orbitSuspectBadCount} / {orbitSourceWithoutEnviCount}</span>
-                </div>
-              ) : (
-                <div className="health-card-row">
-                  <span>{en ? 'Source-only' : '仅源存在'}</span>
-                  <span>{orbitSourceWithoutEnviCount}</span>
-                </div>
-              )}
               <div className="health-card-row">
-                <span>{orbitIsce2Enabled ? (en ? 'TXT-only / ISCE2-only' : '仅 TXT / 仅 ISCE2') : (en ? 'TXT-only' : '仅 TXT')}</span>
-                <span>{orbitIsce2Enabled ? `${orbitEnviWithoutSourceCount} / ${orbitIsce2WithoutSourceCount}` : orbitEnviWithoutSourceCount}</span>
+                <span>{en ? 'Source-only' : '仅源存在'}</span>
+                <span>{orbitSourceWithoutEnviCount}</span>
               </div>
               <div className="health-card-row">
-                <span>{orbitIsce2Enabled ? (en ? 'DB missing in TXT / ISCE2' : '数据库在 TXT / ISCE2 缺失') : (en ? 'DB missing in TXT' : '数据库在 TXT 缺失')}</span>
-                <span>{orbitIsce2Enabled ? `${orbitDbMissingEnviCount} / ${orbitDbMissingIsce2Count}` : orbitDbMissingEnviCount}</span>
+                <span>{en ? 'Production TXT only' : '仅生产 TXT 存在'}</span>
+                <span>{orbitEnviWithoutSourceCount}</span>
+              </div>
+              <div className="health-card-row">
+                <span>{en ? 'DB missing in production TXT' : '数据库在生产 TXT 缺失'}</span>
+                <span>{orbitDbMissingEnviCount}</span>
               </div>
               <div className="health-card-row">
                 <span>{en ? 'Duplicate stems / scan errors' : '重复 stem / 扫描异常'}</span>
@@ -1166,21 +1320,11 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
 
               <div className="health-card-note" style={{ marginTop: 4 }}>
                 {en
-                  ? (orbitIsce2Enabled
-                    ? 'LT-1 orbit scans synchronize the production TXT pool and the legacy ISCE2 XML pool. S1 EOF files remain registered as source orbit assets.'
-                    : 'LT-1 orbit scans synchronize the production TXT pool for ENVI/SARscape and Gamma. S1 EOF files remain registered as source orbit assets; ISCE2 XML is disabled.')
-                  : (orbitIsce2Enabled
-                    ? 'LT-1 精轨扫描会同步生产 TXT 池和 legacy ISCE2 XML 池；S1 EOF 只登记为源精轨资产。'
-                    : 'LT-1 精轨扫描会同步 ENVI/SARscape 与 Gamma 共用的生产 TXT 池；S1 EOF 只登记为源精轨资产，ISCE2 XML 已停用。')}
+                  ? 'LT-1 orbit scans synchronize the production TXT pool for ENVI/SARscape and Gamma. S1 EOF files remain registered as source orbit assets.'
+                  : 'LT-1 精轨扫描会同步 ENVI/SARscape 与 Gamma 共用的生产 TXT 池；S1 EOF 只登记为源精轨资产。'}
               </div>
               <div className="health-card-note">{en ? 'Source path: ' : '源目录路径：'}{formatPathText(orbitSource.path)}</div>
               <div className="health-card-note">{en ? 'Production TXT pool: ' : '生产 TXT 池：'}{formatPathText(orbitPools.envi?.path)}</div>
-              {orbitIsce2Enabled && (
-                <>
-                  <div className="health-card-note">{en ? 'Legacy ISCE2 pool: ' : 'Legacy ISCE2 池：'}{formatPathText(orbitPools.isce2?.path)}</div>
-                  <div className="health-card-note">{en ? 'Quarantine path: ' : '隔离目录：'}{formatPathText(orbitQuarantinePath)}</div>
-                </>
-              )}
 
               {orbitDuplicateCount > 0 && (
                 <div className="health-card-note warn">
@@ -1203,13 +1347,6 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                     : `数据库 orbit_file_path 指向不存在文件：${orbitDbMissingPathCount} / ${toNumber(orbitDatabase.distinct_orbit_path_count)}`}
                 </div>
               )}
-              {orbitIsce2Enabled && orbitSuspectBadCount > 0 && (
-                <div className="health-card-note warn">
-                  {en
-                    ? `Suspect bad source TXT (source exists but ISCE2 XML missing): ${orbitSuspectBadCount}`
-                    : `疑似坏源 TXT（源文件存在但 ISCE2 XML 缺失）：${orbitSuspectBadCount}`}
-                </div>
-              )}
               {orbitBadSourceSampleCount > 0 && (
                 <div className="health-card-note error">
                   {en
@@ -1223,21 +1360,9 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                   {orbitDatabase.sample_missing_in_envi.slice(0, 5).join(', ')}
                 </div>
               )}
-              {orbitIsce2Enabled && orbitDatabase.sample_missing_in_isce2?.length > 0 && (
-                <div className="health-card-note error">
-                  {en ? 'DB expected but ISCE2 pool missing: ' : '数据库期望但 ISCE2 池缺失：'}
-                  {orbitDatabase.sample_missing_in_isce2.slice(0, 5).join(', ')}
-                </div>
-              )}
               {orbitBadSourceSamples.slice(0, 5).map((item) => (
                 <div key={`orbit-bad-source-${item.name}`} className="health-card-note error">
                   {item.name} - {item.error || (en ? 'Corruption signal detected' : '检测到损坏信号')}
-                  {renderOrbitSourceIssueDetails(item, en, formatPathText)}
-                </div>
-              ))}
-              {orbitIsce2Enabled && orbitSuspectWithoutCorruptionSamples.slice(0, 5).map((item) => (
-                <div key={`orbit-suspect-bad-${item.name}`} className="health-card-note warn">
-                  {item.name}
                   {renderOrbitSourceIssueDetails(item, en, formatPathText)}
                 </div>
               ))}
@@ -1247,11 +1372,6 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                   {item.envi_path && (
                     <div style={{ color: '#64748b' }}>
                       {en ? 'ENVI: ' : 'ENVI：'}{formatPathText(item.envi_path)}
-                    </div>
-                  )}
-                  {item.isce2_path && (
-                    <div style={{ color: '#64748b' }}>
-                      {en ? 'ISCE2: ' : 'ISCE2：'}{formatPathText(item.isce2_path)}
                     </div>
                   )}
                 </div>
@@ -1278,11 +1398,6 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                   {en ? 'ENVI pool scan error: ' : 'ENVI 池扫描异常：'}{item}
                 </div>
               ))}
-              {orbitIsce2Enabled && (orbitPools.isce2?.errors || []).slice(0, 3).map((item, index) => (
-                <div key={`orbit-isce2-error-${index}`} className="health-card-note error">
-                  {en ? 'ISCE2 pool scan error: ' : 'ISCE2 池扫描异常：'}{item}
-                </div>
-              ))}
 
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
                 <button
@@ -1299,53 +1414,11 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                       setOrbitSyncing(false);
                     }
                   }}
-                  disabled={orbitSyncing || orbitRepairing || orbitQuarantining}
+                  disabled={orbitSyncing}
                   style={{ padding: '4px 12px', background: '#1890ff', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
                 >
                   {orbitSyncing ? (en ? 'Checking...' : '检查中...') : (en ? 'Check Consistency' : '精轨一致性检查')}
                 </button>
-                {orbitIsce2Enabled && (
-                  <>
-                    <button
-                      onClick={async () => {
-                        setOrbitRepairing(true);
-                        setOrbitSyncResult(null);
-                        try {
-                          const result = await syncOrbitPools({ repair: true });
-                          setOrbitSyncResult(result);
-                          await refreshOrbitStatus();
-                        } catch (e) {
-                          setOrbitSyncResult({ error: e.response?.data?.detail || e.message });
-                        } finally {
-                          setOrbitRepairing(false);
-                        }
-                      }}
-                      disabled={orbitSyncing || orbitRepairing || orbitQuarantining}
-                      style={{ padding: '4px 12px', background: '#0f766e', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
-                    >
-                      {orbitRepairing ? (en ? 'Repairing...' : '修复中...') : (en ? 'Repair Missing XML' : '修复缺失 XML')}
-                    </button>
-                    <button
-                      onClick={async () => {
-                        setOrbitQuarantining(true);
-                        setOrbitSyncResult(null);
-                        try {
-                          const result = await syncOrbitPools({ quarantine_bad: true });
-                          setOrbitSyncResult(result);
-                          await refreshOrbitStatus();
-                        } catch (e) {
-                          setOrbitSyncResult({ error: e.response?.data?.detail || e.message });
-                        } finally {
-                          setOrbitQuarantining(false);
-                        }
-                      }}
-                      disabled={orbitSyncing || orbitRepairing || orbitQuarantining}
-                      style={{ padding: '4px 12px', background: '#b45309', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
-                    >
-                      {orbitQuarantining ? (en ? 'Quarantining...' : '隔离中...') : (en ? 'Quarantine Bad TXT' : '隔离坏精轨')}
-                    </button>
-                  </>
-                )}
               </div>
 
               {orbitSyncResult && (
@@ -1354,176 +1427,89 @@ const HealthCheckPanel = ({ language = 'zh', currentUser }) => {
                     <div className="health-card-note error">{orbitSyncResult.error}</div>
                   ) : (
                     <>
-                      {'confirmed_bad_count' in orbitSyncResult ? (
-                        <>
-                          <div className={`health-card-note ${toNumber(orbitSyncResult.confirmed_bad_count) === 0 ? 'ok' : 'warn'}`}>
-                            {en
-                              ? `Quarantine finished. Confirmed bad TXT: ${toNumber(orbitSyncResult.confirmed_bad_count)} / validated ${toNumber(orbitSyncResult.validated_count)}`
-                              : `隔离完成。已确认坏 TXT ${toNumber(orbitSyncResult.confirmed_bad_count)} 项 / 已校验 ${toNumber(orbitSyncResult.validated_count)} 项`}
-                          </div>
-                          <div className="health-card-note">
-                            {en
-                              ? `Quarantine root: ${formatPathText(orbitSyncResult.quarantine_root)}`
-                              : `隔离目录：${formatPathText(orbitSyncResult.quarantine_root)}`}
-                          </div>
-                          {(orbitSyncResult.confirmed_bad || []).slice(0, 5).map((item, index) => (
-                            <div key={`orbit-quarantine-bad-${index}`} className="health-card-note error">
-                              {item.name} - {item.error}
-                              {renderOrbitSourceIssueDetails(item, en, formatPathText)}
-                              {item.quarantined_source && (
-                                <div style={{ color: '#64748b' }}>
-                                  {en ? 'Moved source to: ' : '源文件已移至：'}{formatPathText(item.quarantined_source)}
-                                </div>
-                              )}
-                              {item.quarantined_envi && (
-                                <div style={{ color: '#64748b' }}>
-                                  {en ? 'Moved ENVI to: ' : 'ENVI 已移至：'}{formatPathText(item.quarantined_envi)}
-                                </div>
-                              )}
-                              {item.quarantined_isce2 && (
-                                <div style={{ color: '#64748b' }}>
-                                  {en ? 'Moved ISCE2 to: ' : 'ISCE2 已移至：'}{formatPathText(item.quarantined_isce2)}
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                          {(orbitSyncResult.skipped_valid || []).slice(0, 3).map((item, index) => (
-                            <div key={`orbit-quarantine-skip-${index}`} className="health-card-note ok">
-                              {item.name} - {item.reason}
-                            </div>
-                          ))}
-                          {(orbitSyncResult.errors || []).slice(0, 5).map((item, index) => (
-                            <div key={`orbit-quarantine-error-${index}`} className="health-card-note error">
-                              {item.name} - {item.scope} - {item.error}
-                            </div>
-                          ))}
-                        </>
-                      ) : 'before' in orbitSyncResult ? (
-                        <>
-                          <div className={`health-card-note ${orbitSyncResult.healthy ? 'ok' : 'warn'}`}>
-                            {en
-                              ? `Repair finished. Before mismatches: ${toNumber(orbitSyncResult.before?.mismatch_count)}, after mismatches: ${toNumber(orbitSyncResult.after?.mismatch_count)}`
-                              : `修复完成。修复前不一致 ${toNumber(orbitSyncResult.before?.mismatch_count)} 项，修复后不一致 ${toNumber(orbitSyncResult.after?.mismatch_count)} 项`}
-                          </div>
-                          <div className="health-card-note">
-                            {en
-                              ? `Recovered from ENVI TXT: ${(orbitSyncResult.repaired_from_envi || []).length}, repair errors: ${toNumber(orbitSyncResult.repair_error_count)}`
-                              : `从 ENVI TXT 补转成功 ${(orbitSyncResult.repaired_from_envi || []).length} 项，修复失败 ${toNumber(orbitSyncResult.repair_error_count)} 项`}
-                          </div>
-                          <div className="health-card-note">
-                            {en
-                              ? `Source scan ${toNumber(orbitSyncResult.sync_result?.total_source)}, TXT copied ${(orbitSyncResult.sync_result?.envi?.copied || []).length}, TXT refreshed ${(orbitSyncResult.sync_result?.envi?.updated || []).length}${orbitSyncResult.isce2_enabled ? `, ISCE2 converted ${(orbitSyncResult.sync_result?.isce2?.converted || []).length}, ISCE2 refreshed ${(orbitSyncResult.sync_result?.isce2?.reconverted || []).length}` : ', ISCE2 disabled'}`
-                              : `源目录扫描 ${toNumber(orbitSyncResult.sync_result?.total_source)} 项，TXT 新增 ${(orbitSyncResult.sync_result?.envi?.copied || []).length} 项、刷新 ${(orbitSyncResult.sync_result?.envi?.updated || []).length} 项${orbitSyncResult.isce2_enabled ? `，ISCE2 新增转换 ${(orbitSyncResult.sync_result?.isce2?.converted || []).length} 项、重转 ${(orbitSyncResult.sync_result?.isce2?.reconverted || []).length} 项` : '，ISCE2 已停用'}`}
-                          </div>
-                          {(orbitSyncResult.repaired_from_envi || []).slice(0, 5).length > 0 && (
-                            <div className="health-card-note ok">
-                              {en ? 'Recovered stems: ' : '已补转 stem：'}
-                              {(orbitSyncResult.repaired_from_envi || []).slice(0, 5).join(', ')}
+                      <div className={`health-card-note ${orbitSyncResult.healthy ? 'ok' : 'error'}`}>
+                        {orbitSyncResult.healthy
+                          ? (en ? 'Pools are consistent.' : '本地池一致。')
+                          : (en ? `Detected ${toNumber(orbitSyncResult.mismatch_count)} mismatches.` : `检测到 ${toNumber(orbitSyncResult.mismatch_count)} 项不一致。`)}
+                      </div>
+                      <div className="health-card-note">
+                        {en
+                          ? `TXT ${toNumber(orbitSyncResult.envi?.total)}, scan errors ${toNumber(orbitSyncResult.error_count)}`
+                          : `TXT ${toNumber(orbitSyncResult.envi?.total)} 项，扫描异常 ${toNumber(orbitSyncResult.error_count)} 项`}
+                      </div>
+                      {(orbitSyncResult.mismatches || []).slice(0, 5).map((item, index) => (
+                        <div key={`orbit-check-mismatch-${index}`} className="health-card-note error">
+                          {item.name} - {item.issue}
+                          {item.envi_path && (
+                            <div style={{ color: '#64748b' }}>
+                              {en ? 'ENVI: ' : 'ENVI：'}{formatPathText(item.envi_path)}
                             </div>
                           )}
-                          {(orbitSyncResult.repair_errors || []).slice(0, 3).map((item, index) => (
-                            <div key={`orbit-repair-error-${index}`} className="health-card-note error">
-                              {item.name} - {item.error}
-                              {renderOrbitSourceIssueDetails(item, en, formatPathText)}
-                            </div>
-                          ))}
-                          {(orbitSyncResult.sync_result?.source?.errors || []).slice(0, 3).map((item, index) => (
-                            <div key={`orbit-repair-source-error-${index}`} className="health-card-note error">
-                              {en ? 'Source scan error: ' : '源目录扫描异常：'}{item}
-                            </div>
-                          ))}
-                          {(orbitSyncResult.sync_result?.invalid_sources || []).slice(0, 5).map((item, index) => (
-                            <div key={`orbit-repair-invalid-${index}`} className="health-card-note error">
-                              {item.name} - {item.error}
-                              {renderOrbitSourceIssueDetails(item, en, formatPathText)}
-                            </div>
-                          ))}
-                          {(orbitSyncResult.sync_result?.isce2?.errors || []).slice(0, 3).map((item, index) => (
-                            <div key={`orbit-repair-isce2-error-${index}`} className="health-card-note error">
-                              {item.file} - {item.error}
-                            </div>
-                          ))}
-                        </>
-                      ) : (
-                        <>
-                          <div className={`health-card-note ${orbitSyncResult.healthy ? 'ok' : 'error'}`}>
-                            {orbitSyncResult.healthy
-                              ? (en ? 'Pools are consistent.' : '本地池一致。')
-                              : (en ? `Detected ${toNumber(orbitSyncResult.mismatch_count)} mismatches.` : `检测到 ${toNumber(orbitSyncResult.mismatch_count)} 项不一致。`)}
-                          </div>
-                          <div className="health-card-note">
-                            {en
-                              ? `TXT ${toNumber(orbitSyncResult.envi?.total)}${orbitSyncResult.isce2?.enabled ? `, ISCE2 ${toNumber(orbitSyncResult.isce2?.total)}` : ', ISCE2 disabled'}, scan errors ${toNumber(orbitSyncResult.error_count)}`
-                              : `TXT ${toNumber(orbitSyncResult.envi?.total)} 项${orbitSyncResult.isce2?.enabled ? `，ISCE2 ${toNumber(orbitSyncResult.isce2?.total)} 项` : '，ISCE2 已停用'}，扫描异常 ${toNumber(orbitSyncResult.error_count)} 项`}
-                          </div>
-                          {(orbitSyncResult.mismatches || []).slice(0, 5).map((item, index) => (
-                            <div key={`orbit-check-mismatch-${index}`} className="health-card-note error">
-                              {item.name} - {item.issue}
-                              {item.envi_path && (
-                                <div style={{ color: '#64748b' }}>
-                                  {en ? 'ENVI: ' : 'ENVI：'}{formatPathText(item.envi_path)}
-                                </div>
-                              )}
-                              {item.isce2_path && (
-                                <div style={{ color: '#64748b' }}>
-                                  {en ? 'ISCE2: ' : 'ISCE2：'}{formatPathText(item.isce2_path)}
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                          {(orbitSyncResult.errors || []).slice(0, 3).map((item, index) => (
-                            <div key={`orbit-check-error-${index}`} className="health-card-note error">
-                              {item}
-                            </div>
-                          ))}
-                        </>
-                      )}
+                        </div>
+                      ))}
+                      {(orbitSyncResult.errors || []).slice(0, 3).map((item, index) => (
+                        <div key={`orbit-check-error-${index}`} className="health-card-note error">
+                          {item}
+                        </div>
+                      ))}
                     </>
                   )}
                 </div>
               )}
-            </div>
+                </>
+              ) : (
+                <div className="health-card-note">展开后点击“加载诊断”获取旧精轨池状态。</div>
+              )}
+            </details>
           )}
+              </div>
+            </section>
 
           {/* 系统维护 */}
-          {isAdmin && (
-            <div className="health-card">
-              <div className="health-card-title">{en ? 'System Maintenance' : '系统维护'}</div>
-              <div className="health-card-row" style={{ alignItems: 'center' }}>
-                <span>{en ? 'Expired Sessions' : '过期会话清理'}</span>
-                <button
-                  onClick={async () => {
-                    setCleanupLoading(true);
-                    setCleanupResult(null);
-                    try {
-                      const data = await cleanupSessions();
-                      setCleanupResult({ ok: true, message: data.message || `已清理 ${data.deleted_count} 条` });
-                    } catch (e) {
-                      setCleanupResult({ ok: false, message: e.message || '清理失败' });
-                    } finally {
-                      setCleanupLoading(false);
-                    }
-                  }}
-                  disabled={cleanupLoading}
-                  style={{ padding: '4px 12px', background: '#1890ff', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
-                >
-                  {cleanupLoading ? (en ? 'Cleaning...' : '清理中...') : (en ? 'Clean Up' : '清理')}
-                </button>
-              </div>
-              {cleanupResult && (
-                <div className={`health-card-note ${cleanupResult.ok ? 'ok' : 'error'}`} style={{ marginTop: 4 }}>
-                  {cleanupResult.message}
+            <section className="health-section">
+              <div className="health-section-header">
+                <div>
+                  <h3>维护与审计</h3>
+                  <p>低频维护动作与日志审计集中管理，避免与实时健康状态混杂。</p>
                 </div>
-              )}
-              <div className="health-card-note" style={{ marginTop: 4, color: '#94a3b8' }}>
-                {en ? 'Delete expired and revoked session records from the database.' : '删除数据库中已过期和已撤销的会话记录，释放空间。'}
               </div>
-            </div>
-          )}
+              <div className="health-maintenance-stack">
+                {isAdmin && (
+                  <div className="health-action-card">
+                    <div>
+                      <h4>会话记录维护</h4>
+                      <p>清理已过期或已撤销的登录会话，不影响当前有效登录。</p>
+                      {cleanupResult && (
+                        <div className={`health-card-note ${cleanupResult.ok ? 'ok' : 'error'}`}>
+                          {cleanupResult.message}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      className="health-action-button"
+                      onClick={async () => {
+                        setCleanupLoading(true);
+                        setCleanupResult(null);
+                        try {
+                          const data = await cleanupSessions();
+                          setCleanupResult({ ok: true, message: data.message || `已清理 ${data.deleted_count} 条` });
+                        } catch (e) {
+                          setCleanupResult({ ok: false, message: e.message || '清理失败' });
+                        } finally {
+                          setCleanupLoading(false);
+                        }
+                      }}
+                      disabled={cleanupLoading}
+                    >
+                      {cleanupLoading ? '清理中...' : '执行清理'}
+                    </button>
+                  </div>
+                )}
 
-          {/* 日志管理 */}
-          <div className="health-card">
-            <LogManagementPanel isAdmin={isAdmin} />
+                {/* 日志管理 */}
+                <LogManagementPanel isAdmin={isAdmin} />
+              </div>
+            </section>
           </div>
         </>
       )}

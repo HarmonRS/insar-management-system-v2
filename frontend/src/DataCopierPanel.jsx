@@ -53,7 +53,7 @@ const DataCopierPanel = ({ apiEndpoint, readOnly = false, onJobQueued }) => {
     if (taskId && status === 'RUNNING') {
       logIntervalRef.current = setInterval(() => {
         fetchLogsRef.current?.();
-      }, 1000);
+      }, 3000);
     } else if (logIntervalRef.current) {
       clearInterval(logIntervalRef.current);
       if (taskId) fetchLogsRef.current?.();

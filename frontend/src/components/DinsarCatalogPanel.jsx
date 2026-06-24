@@ -6,8 +6,6 @@ import {
   getDinsarProductDetail,
   getDinsarProductCleanupPlan,
   listDinsarProductPairs,
-  queueDinsarCatalogRebuild,
-  queueDinsarProductPublish,
 } from '../api/dinsarProducts';
 import {
   DINSAR_ENGINE_ALL,
@@ -52,15 +50,6 @@ function formatBytes(value) {
   return `${next.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
-function parseDirectoryList(value) {
-  return [...new Set(
-    String(value || '')
-      .split(/[\r\n,;]+/)
-      .map((item) => item.trim())
-      .filter(Boolean)
-  )];
-}
-
 function getMessageTone(message) {
   return /失败|error|Error|ERROR/.test(String(message || '')) ? 'error' : 'success';
 }
@@ -91,8 +80,6 @@ function MetaField({ label, value, multiline = false }) {
 export default function DinsarCatalogPanel({
   readOnly = false,
   compact = false,
-  initialSourceDir = '',
-  onTaskQueued,
 }) {
   const [catalogStatus, setCatalogStatus] = useState(null);
   const [products, setProducts] = useState([]);
@@ -104,26 +91,13 @@ export default function DinsarCatalogPanel({
   const [cleanupPlanLoading, setCleanupPlanLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [actionLoading, setActionLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState('');
-  const [sourceDirectoriesText, setSourceDirectoriesText] = useState(initialSourceDir || '');
-  const [publishRoot, setPublishRoot] = useState('');
   const [engineFilter, setEngineFilter] = useState(DINSAR_ENGINE_ALL);
   const [queryDraft, setQueryDraft] = useState('');
   const [queryApplied, setQueryApplied] = useState('');
 
-  const listLimit = compact ? 8 : 24;
+  const listLimit = compact ? 8 : 18;
   const previewBaseUrl = apiClient.defaults.baseURL || '/api';
-
-  useEffect(() => {
-    if (!initialSourceDir) return;
-    setSourceDirectoriesText((current) => (current.trim() ? current : initialSourceDir));
-  }, [initialSourceDir]);
-
-  const sourceDirectories = useMemo(
-    () => parseDirectoryList(sourceDirectoriesText),
-    [sourceDirectoriesText]
-  );
 
   const engineOptions = useMemo(
     () => buildDinsarEngineOptions([], { includeKnown: true }),
@@ -210,6 +184,11 @@ export default function DinsarCatalogPanel({
     }
   }, []);
 
+  const handleSelectProduct = useCallback((pairKey, productId) => {
+    setSelectedPairKey(pairKey);
+    setSelectedProductId((current) => (current === productId ? current : productId || null));
+  }, []);
+
   const loadCleanupPlan = useCallback(async () => {
     if (!selectedProductId) return;
     setCleanupPlanLoading(true);
@@ -243,45 +222,6 @@ export default function DinsarCatalogPanel({
     setQueryApplied('');
   }, []);
 
-  const handleQueuePublish = async () => {
-    if (readOnly || sourceDirectories.length === 0) return;
-    setActionLoading(true);
-    setActionMessage('');
-    try {
-      const result = await queueDinsarProductPublish({
-        source_directories: sourceDirectories,
-        publish_root: publishRoot.trim() || null,
-        rebuild_catalog: true,
-      });
-      setActionMessage(`结果包发布任务已入队：${result.task_id}`);
-      onTaskQueued?.(result.task_id);
-      await loadCatalog();
-    } catch (error) {
-      setActionMessage(`结果包发布失败：${error?.response?.data?.detail || error.message}`);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleQueueRebuild = async () => {
-    if (readOnly) return;
-    setActionLoading(true);
-    setActionMessage('');
-    try {
-      const result = await queueDinsarCatalogRebuild({
-        publish_root: publishRoot.trim() || null,
-        full_rebuild: true,
-      });
-      setActionMessage(`结果目录重建任务已入队：${result.task_id}`);
-      onTaskQueued?.(result.task_id);
-      await loadCatalog();
-    } catch (error) {
-      setActionMessage(`结果目录重建失败：${error?.response?.data?.detail || error.message}`);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
   const catalogTone = STATUS_TONE_MAP[catalogStatus?.status] || 'neutral';
   const actionTone = getMessageTone(actionMessage);
   const selectedIssues = Array.isArray(selectedProduct?.issues) ? selectedProduct.issues : [];
@@ -311,7 +251,7 @@ export default function DinsarCatalogPanel({
               {selectedEngineMeta.shortLabel}
             </span>
           )}
-          <button onClick={loadCatalog} disabled={loading || actionLoading}>
+          <button onClick={loadCatalog} disabled={loading}>
             {loading ? '刷新中...' : '刷新'}
           </button>
         </div>
@@ -349,49 +289,6 @@ export default function DinsarCatalogPanel({
       {actionMessage && (
         <div className={`dinsar-catalog-message tone-${actionTone}`}>
           {actionMessage}
-        </div>
-      )}
-
-      {!compact && (
-        <div className="dinsar-catalog-manage">
-          <div className="dinsar-catalog-manage-copy">
-            <strong>手动发布与目录重建</strong>
-            <p>
-              这里用于把既有结果目录重新发布为标准结果包，并按最新规则重建目录索引。
-              同一对影像的 ENVI/SARscape、LandSAR、Gamma/PyINT 结果会按任务聚合展示，底层仍依赖 `engine_code` 与 `run_key` 分别登记。
-            </p>
-          </div>
-          <div className="dinsar-catalog-manage-form">
-            <textarea
-              value={sourceDirectoriesText}
-              onChange={(event) => setSourceDirectoriesText(event.target.value)}
-              placeholder="输入一个或多个结果源目录，支持换行、逗号或分号分隔"
-              disabled={readOnly || actionLoading}
-            />
-            <input
-              value={publishRoot}
-              onChange={(event) => setPublishRoot(event.target.value)}
-              placeholder="可选：自定义标准结果包根目录，留空使用系统配置"
-              disabled={readOnly || actionLoading}
-            />
-            <div className="dinsar-catalog-manage-actions">
-              <button
-                type="button"
-                className="primary"
-                onClick={handleQueuePublish}
-                disabled={readOnly || actionLoading || sourceDirectories.length === 0}
-              >
-                {actionLoading ? '处理中...' : '发布结果包并重建'}
-              </button>
-              <button
-                type="button"
-                onClick={handleQueueRebuild}
-                disabled={readOnly || actionLoading}
-              >
-                仅重建目录
-              </button>
-            </div>
-          </div>
         </div>
       )}
 
@@ -456,10 +353,7 @@ export default function DinsarCatalogPanel({
                     key={rowKey}
                     type="button"
                     className={`dinsar-catalog-list-item ${selectedPairKey === rowKey ? 'active' : ''}`}
-                    onClick={() => {
-                      setSelectedPairKey(rowKey);
-                      setSelectedProductId(item.primary_product_id || null);
-                    }}
+                    onClick={() => handleSelectProduct(rowKey, item.primary_product_id)}
                   >
                     <div className="dinsar-catalog-list-item-top">
                       <strong>{item.task_alias || item.task_name || item.pair_key || '未命名任务'}</strong>

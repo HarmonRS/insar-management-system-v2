@@ -85,6 +85,8 @@ const SCAN_TASK_TYPES = new Set([
   'GF3_SARSCAPE_SYNC',
   'GF3_QUICKLOOK_WEBP',
 ]);
+const MONITOR_REFRESH_MS = 10000;
+const ACTIVE_TASK_LOG_REFRESH_MS = 3000;
 
 const TASK_TYPE_LABELS = {
   SCAN_ASSET_INVENTORY: 'LT/S1 资产索引',
@@ -270,7 +272,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
     };
 
     fetchLogsAndTasks();
-    const intervalId = setInterval(fetchLogsAndTasks, 2000);
+    const intervalId = setInterval(fetchLogsAndTasks, MONITOR_REFRESH_MS);
 
     return () => {
       canceled = true;
@@ -282,6 +284,8 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
     displayActiveTasks.filter((task) => SCAN_TASK_TYPES.has(task.task_type)),
     recentScanTasks
   ).slice(0, 8);
+  const selectedTask = displayedScanTasks.find((task) => task.task_id === selectedTaskId) || displayedScanTasks[0] || null;
+  const selectedTaskActive = ['PENDING', 'RUNNING'].includes(String(selectedTask?.status || '').toUpperCase());
 
   useEffect(() => {
     if (!enabled) {
@@ -315,20 +319,23 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
       }
     };
     fetchTaskLogs();
-    const intervalId = setInterval(fetchTaskLogs, 2000);
+    if (!selectedTaskActive) {
+      return () => {
+        canceled = true;
+      };
+    }
+    const intervalId = setInterval(fetchTaskLogs, ACTIVE_TASK_LOG_REFRESH_MS);
     return () => {
       canceled = true;
       clearInterval(intervalId);
     };
-  }, [apiEndpoint, enabled, selectedTaskId]);
+  }, [apiEndpoint, enabled, selectedTaskActive, selectedTaskId]);
 
   useEffect(() => {
     if (logEndRef.current) {
       logEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [logs, selectedTaskLogs]);
-
-  const selectedTask = displayedScanTasks.find((task) => task.task_id === selectedTaskId) || displayedScanTasks[0] || null;
 
   const sourceInventoryDirs = uniquePaths([...config.s1_source_dirs, ...config.s1_storage_dirs]);
   const orbitInventoryDirs = uniquePaths([
@@ -344,6 +351,10 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const canRunSourceProductScan = !readOnly && configLoaded && hasSourceProductDirs;
   const canRunOrbitAssetScan = !readOnly && configLoaded && hasOrbitAssetDirs;
   const canRunGf3SarscapeProduce = !readOnly && configLoaded && hasGf3SarscapeNativeDirs && hasGf3StorageDirs;
+  const activeIngestTaskCount = displayedScanTasks.filter((task) =>
+    ['PENDING', 'RUNNING'].includes(String(task.status || '').toUpperCase())
+  ).length;
+  const availableStorageCount = config.storage_roots.filter((item) => ['ok', 'warning'].includes(String(item.status || '').toLowerCase())).length;
 
   const handleClearScanTaskHistory = async () => {
     if (readOnly) {
@@ -511,10 +522,9 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
   const sectionStyle = {
     marginBottom: '12px',
     padding: '10px 12px',
-    borderRadius: '10px',
+    borderRadius: '8px',
     background: 'var(--color-panel-bg)',
     border: '1px solid var(--color-border)',
-    boxShadow: 'var(--shadow-soft)',
   };
   const labelStyle = { minWidth: '100px', color: 'var(--color-text-muted)', flexShrink: 0 };
   const rowStyle = { display: 'flex', gap: '8px' };
@@ -532,38 +542,43 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
 
   return (
     <div
-      className="monitor-panel"
-      style={{
-        padding: '15px',
-        backgroundColor: 'var(--color-panel-bg)',
-        borderTop: '1px solid var(--color-border)',
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        overflow: 'hidden',
-      }}
+      className="monitor-panel data-ingest-panel"
     >
-      <h3 style={{ marginTop: 0, marginBottom: '8px', fontSize: '1.1em', flexShrink: 0 }}>数据监控面板</h3>
+      <div className="data-ingest-header">
+        <div>
+          <h3>数据接入</h3>
+          <p>集中管理源数据、精密轨道、GF3 回传成果和接入任务记录，确保生产前数据资产可追溯。</p>
+        </div>
+        <div className="data-ingest-signals" aria-label="数据接入状态摘要">
+          <div className={`dinsar-production-signal tone-${configLoaded ? 'ready' : 'warn'}`}>
+            <span>配置状态</span>
+            <strong>{configLoaded ? '已加载' : '未加载'}</strong>
+          </div>
+          <div className={`dinsar-production-signal tone-${activeIngestTaskCount > 0 ? 'warn' : 'ready'}`}>
+            <span>接入任务</span>
+            <strong>{activeIngestTaskCount > 0 ? `${activeIngestTaskCount} 个运行中` : '空闲'}</strong>
+          </div>
+          <div className={`dinsar-production-signal tone-${hasSourceProductDirs ? 'ready' : 'neutral'}`}>
+            <span>源数据池</span>
+            <strong>{sourceInventoryDirs.length}</strong>
+          </div>
+          <div className={`dinsar-production-signal tone-${availableStorageCount > 0 ? 'ready' : 'neutral'}`}>
+            <span>可用存储</span>
+            <strong>{availableStorageCount}/{config.storage_roots.length || 0}</strong>
+          </div>
+        </div>
+      </div>
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingRight: '4px' }}>
-        <div
-          style={{
-            margin: '0 0 12px',
-            padding: '10px 12px',
-            borderRadius: '8px',
-            background: 'linear-gradient(90deg, var(--color-accent-soft) 0%, #fff 70%)',
-            border: '1px solid #c7ddff',
-            color: 'var(--color-accent-strong)',
-            fontSize: '0.9em',
-          }}
-        >
+        <div className={`data-ingest-notice ${configLoaded ? 'ok' : 'warn'}`}>
           {configLoaded
-            ? '仅手动模式。路径从 .env 读取；如需修改请更新 .env 并重启后端。'
-            : '未加载到监控状态，请检查后端 /api/monitor/status。'}
+            ? '接入路径由环境配置统一管理；本页仅触发登记、审计和任务复核，不直接修改生产目录。'
+            : '未加载到接入状态，请检查后端运行维护接口。'}
         </div>
 
-        <div style={sectionStyle}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>路径摘要</div>
+        <details className="data-ingest-directory" style={sectionStyle}>
+          <summary>接入路径与生产目录</summary>
+          <p>以下为服务器部署目录，仅用于核对环境配置；日常接入操作不需要展开。</p>
           <div style={gridStyle}>
             <div style={rowStyle}><span style={labelStyle}>精轨源资产</span><span style={{ wordBreak: 'break-all' }}>{formatList(orbitInventoryDirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>LT-1 生产 TXT 池</span><span style={{ wordBreak: 'break-all' }}>{config.orbit_production_txt_pool || '未配置'}</span></div>
@@ -576,10 +591,10 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
             <div style={rowStyle}><span style={labelStyle}>D-InSAR 结果</span><span style={{ wordBreak: 'break-all' }}>{config.dinsar_product_dir || '未配置'}</span></div>
             <div style={rowStyle}><span style={labelStyle}>SBAS 结果</span><span style={{ wordBreak: 'break-all' }}>{config.sbas_product_root || '未配置'}</span></div>
           </div>
-        </div>
+        </details>
 
         <div style={sectionStyle}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>本机存储感知</div>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>本机存储状态</div>
           <div style={{ ...gridStyle, rowGap: '8px' }}>
             {config.storage_roots.length ? config.storage_roots.map((item, index) => (
               <div
@@ -608,7 +623,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
         </div>
 
         <div style={sectionStyle}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>LT-1 / Sentinel-1 压缩包资产索引</div>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--color-text-primary)' }}>LT-1 / Sentinel-1 源数据与精轨登记</div>
           <div style={{ ...gridStyle, marginBottom: '8px' }}>
             <div style={rowStyle}><span style={labelStyle}>压缩包源池</span><span style={{ wordBreak: 'break-all' }}>{formatList(sourceInventoryDirs)}</span></div>
             <div style={rowStyle}><span style={labelStyle}>精轨源资产</span><span style={{ wordBreak: 'break-all' }}>{formatList(orbitInventoryDirs)}</span></div>
@@ -619,42 +634,42 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
             <button
               onClick={() => handleAssetInventoryScan(
                 { inventory_types: ['source_product'], families: ['LT1', 'S1'] },
-                'LT-1 / Sentinel-1 源压缩包扫描'
+                'LT-1 / Sentinel-1 源压缩包登记'
               )}
               disabled={s1ScanLoading || !canRunSourceProductScan}
               style={actionBtnStyle(s1ScanLoading, !canRunSourceProductScan)}
             >
-              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描压缩包')}
+              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '登记源压缩包')}
             </button>
             <button
               onClick={() => handleAssetInventoryScan(
                 { inventory_types: ['orbit_asset'], families: ['LT1', 'S1'] },
-                'LT-1 / Sentinel-1 精轨扫描'
+                'LT-1 / Sentinel-1 精轨登记'
               )}
               disabled={s1ScanLoading || !canRunOrbitAssetScan}
               style={actionBtnStyle(s1ScanLoading, !canRunOrbitAssetScan)}
             >
-              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描全部精轨')}
+              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '登记全部精轨')}
             </button>
             <button
               onClick={() => handleAssetInventoryScan(
                 { inventory_types: ['orbit_asset'], families: ['S1'] },
-                'Sentinel-1 精轨扫描'
+                'Sentinel-1 精轨登记'
               )}
               disabled={s1ScanLoading || !canRunOrbitAssetScan}
               style={actionBtnStyle(s1ScanLoading, !canRunOrbitAssetScan)}
             >
-              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '扫描 S1 EOF')}
+              {s1ScanLoading ? '运行中...' : (readOnly ? '只读模式' : '登记 S1 EOF')}
             </button>
             <button
               onClick={() => handleAssetInventoryScan(
                 { inventory_types: ['orbit_asset'], families: ['LT1'] },
-                'LT-1 精轨扫描'
+                'LT-1 精轨登记'
               )}
               disabled={s1ScanLoading || !canRunOrbitAssetScan}
               style={actionBtnStyle(s1ScanLoading, !canRunOrbitAssetScan)}
             >
-              {readOnly ? '只读模式' : '扫描 LT-1 TXT'}
+              {readOnly ? '只读模式' : '登记 LT-1 TXT'}
             </button>
             <button
               onClick={handleArchiveIntegrityAudit}
@@ -703,7 +718,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
 
         <div style={sectionStyle}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', marginBottom: '8px' }}>
-            <div style={{ fontWeight: 'bold', color: 'var(--color-text-primary)' }}>扫描任务状态</div>
+            <div style={{ fontWeight: 'bold', color: 'var(--color-text-primary)' }}>接入任务记录</div>
             <button
               type="button"
               onClick={handleClearScanTaskHistory}
@@ -718,7 +733,7 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
                 fontSize: '0.8em',
               }}
             >
-              {clearScanHistoryLoading ? '清空中...' : '清空日志'}
+              {clearScanHistoryLoading ? '清空中...' : '清空记录'}
             </button>
           </div>
           {clearScanHistoryMessage && (
@@ -761,7 +776,6 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
                           width: `${progress}%`,
                           height: '100%',
                           background: statusColor(task.status),
-                          transition: 'width 0.2s ease',
                         }}
                       />
                     </div>
@@ -784,7 +798,10 @@ const DataMonitorPanel = ({ apiEndpoint, onTaskStart, readOnly = false, enabled 
 
       <div style={{ flexShrink: 0, borderTop: '1px solid var(--color-border)', paddingTop: '10px', marginTop: '6px' }}>
         <div style={{ fontWeight: 'bold', marginBottom: '6px', color: 'var(--color-text-primary)' }}>
-          {selectedTask ? `${taskTitle(selectedTask)} 日志` : '实时日志'}
+          {selectedTask ? `${taskTitle(selectedTask)} 任务日志` : '实时执行日志'}
+          <span style={{ marginLeft: '8px', color: 'var(--color-text-muted)', fontWeight: 400, fontSize: '0.82em' }}>
+            日志用于追踪执行步骤，issue 为本次解析已发现的问题计数。
+          </span>
         </div>
         <div
           style={{

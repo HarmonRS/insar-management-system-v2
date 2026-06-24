@@ -9,8 +9,10 @@ import re
 import shutil
 import tarfile
 import zipfile
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from geoalchemy2.shape import from_shape
@@ -35,6 +37,7 @@ from ..models import (
     SourceProductAssetORM,
 )
 from ..utils import (
+    build_corner_pixel_mapping,
     find_xml_file,
     normalize_satellite_family,
     parse_gf3_l2_dirname,
@@ -55,6 +58,9 @@ LT1_ORBIT_MATCH_RULE_VERSION = "lt1_orbit_day_v1"
 ASSET_SCAN_LOG_INTERVAL = 100
 ASSET_SCAN_DETAILED_PARSE_LOG_LIMIT = 200
 ARCHIVE_INTEGRITY_LOG_INTERVAL = 10
+DEFAULT_ASSET_SCAN_PARSE_WORKERS = 4
+DEFAULT_ASSET_SCAN_PARSE_INFLIGHT = 64
+DEFAULT_ASSET_SCAN_DB_BATCH_SIZE = 50
 
 _WINDOWS_DRIVE_RE = re.compile(r"^[a-zA-Z]:[\\/]")
 _S1_SOURCE_RE = re.compile(
@@ -458,32 +464,60 @@ def _archive_read_first_matching(path: str, predicate: Callable[[str], bool]) ->
     return None, None, members
 
 
-def _archive_list_matching(path: str, predicate: Callable[[str], bool], *, limit: int = 20) -> List[str]:
-    matches: List[str] = []
+def _archive_collect_members(
+    path: str,
+    *,
+    content_predicate: Callable[[str], bool],
+    list_predicate: Callable[[str], bool],
+    list_limit: int = 20,
+) -> Tuple[Optional[str], Optional[bytes], List[str], List[str]]:
+    content_name: Optional[str] = None
+    content_data: Optional[bytes] = None
+    listed: List[str] = []
+    scanned: List[str] = []
+    target_list_count = max(0, int(list_limit))
 
-    def _visit(name: str) -> None:
-        if predicate(name):
-            matches.append(name)
+    def _visit(name: str, reader: Callable[[], bytes]) -> None:
+        nonlocal content_name, content_data
+        scanned.append(name)
+        if list_predicate(name) and len(listed) < target_list_count:
+            listed.append(name)
+        if content_name is None and content_predicate(name):
+            content_name = name
+            content_data = reader()
+
+    def _done() -> bool:
+        return content_name is not None and len(listed) >= target_list_count
 
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as archive:
             for info in archive.infolist():
                 if info.is_dir():
                     continue
-                _visit(info.filename)
-                if len(matches) >= limit:
+                _visit(info.filename, lambda info=info: archive.read(info))
+                if _done():
                     break
-        return matches
+        return content_name, content_data, listed, scanned
 
     if tarfile.is_tarfile(path):
         with tarfile.open(path, "r:*") as archive:
             for member in archive:
                 if not member.isfile():
                     continue
-                _visit(member.name)
-                if len(matches) >= limit:
+
+                def _read(member=member) -> bytes:
+                    source = archive.extractfile(member)
+                    if source is None:
+                        return b""
+                    with source:
+                        return source.read()
+
+                _visit(member.name, _read)
+                if _done():
                     break
-    return matches
+        return content_name, content_data, listed, scanned
+
+    return None, None, listed, scanned
 
 
 def _safe_archive_member_name(member_name: str, archive_path: str) -> str:
@@ -783,8 +817,19 @@ def _parse_radar_xml_metadata_bytes(data: bytes) -> Tuple[Optional[List[Tuple[fl
             )
 
     coverage_polygon: Optional[List[Tuple[float, float]]] = None
+    corner_details: Dict[str, Dict[str, Any]] = {}
     if len(corners) >= 4:
         coverage_polygon = _ordered_closed_polygon_from_corners(corners[:4])
+        corner_details = {
+            str(item.get("name")): {
+                "lon": item.get("lon"),
+                "lat": item.get("lat"),
+                "ref_row": item.get("ref_row"),
+                "ref_col": item.get("ref_col"),
+            }
+            for item in corners
+            if item.get("name")
+        }
 
     start_time = (
         _xml_text_under_local_path(root, "start", "timeUTC")
@@ -834,6 +879,7 @@ def _parse_radar_xml_metadata_bytes(data: bytes) -> Tuple[Optional[List[Tuple[fl
             for item in corners
             if item.get("name")
         },
+        "corner_pixel_mapping": build_corner_pixel_mapping(corner_details),
         "coverage_polygon": coverage_polygon,
     }
     return coverage_polygon, {key: value for key, value in metadata.items() if value not in (None, "", [])}
@@ -890,6 +936,58 @@ def _metadata_document(
     }
 
 
+def _s1_annotation_sort_key(path: str) -> Tuple[int, str]:
+    normalized = str(path or "").replace("\\", "/")
+    lower = normalized.lower()
+    base = PurePosixPath(normalized).name.lower()
+    is_direct_annotation = "/annotation/" in lower and lower.count("/annotation/") == 1
+    is_measurement_annotation = is_direct_annotation and base.startswith("s1") and base.endswith(".xml")
+    if is_measurement_annotation:
+        rank = 0
+    elif "/annotation/calibration/" in lower:
+        rank = 2
+    elif "/annotation/noise/" in lower:
+        rank = 3
+    elif "/annotation/rfi/" in lower:
+        rank = 4
+    else:
+        rank = 1
+    return rank, lower
+
+
+def _parse_s1_preview_kml_bytes(data: bytes) -> Dict[str, Any]:
+    try:
+        root = etree.fromstring(data, parser=_xml_parser())
+    except Exception:
+        return {}
+    coordinate_texts = root.xpath("//*[local-name()='LatLonQuad']/*[local-name()='coordinates']/text()")
+    if not coordinate_texts:
+        return {}
+    points: List[Tuple[float, float]] = []
+    for token in str(coordinate_texts[0] or "").strip().split():
+        parts = token.split(",")
+        if len(parts) < 2:
+            continue
+        try:
+            points.append((float(parts[0]), float(parts[1])))
+        except ValueError:
+            continue
+    if len(points) != 4:
+        return {}
+    mapping = {
+        "bottom_left": [points[0][0], points[0][1]],
+        "bottom_right": [points[1][0], points[1][1]],
+        "top_right": [points[2][0], points[2][1]],
+        "top_left": [points[3][0], points[3][1]],
+        "source": "s1_preview_map_overlay_kml",
+    }
+    polygon = [points[0], points[1], points[2], points[3], points[0]]
+    return {
+        "preview_map_overlay_polygon": polygon,
+        "corner_pixel_mapping": mapping,
+    }
+
+
 def _extract_s1_annotation_documents(source_path: str, *, limit: int = 16) -> List[Dict[str, Any]]:
     docs: List[Dict[str, Any]] = []
     stat = _stat_path(source_path)
@@ -902,7 +1000,7 @@ def _extract_s1_annotation_documents(source_path: str, *, limit: int = 16) -> Li
             for file_name in files:
                 if file_name.lower().endswith(".xml"):
                     candidates.append(os.path.join(current_root, file_name))
-        for path in sorted(candidates)[: max(0, limit)]:
+        for path in sorted(candidates, key=_s1_annotation_sort_key)[: max(0, limit)]:
             try:
                 with open(path, "rb") as stream:
                     data = stream.read()
@@ -928,7 +1026,7 @@ def _extract_s1_annotation_documents(source_path: str, *, limit: int = 16) -> Li
                 for name in archive.namelist()
                 if "/annotation/" in name.lower() and name.lower().endswith(".xml")
             ]
-            for name in sorted(names)[: max(0, limit)]:
+            for name in sorted(names, key=_s1_annotation_sort_key)[: max(0, limit)]:
                 docs.append(
                     _metadata_document(
                         document_type="S1_ANNOTATION",
@@ -1099,13 +1197,48 @@ def _parse_s1_manifest_bytes(data: bytes) -> Dict[str, Any]:
 def _parse_s1_zip_manifest(path: str) -> Dict[str, Any]:
     stat = _stat_path(path)
     with zipfile.ZipFile(path) as archive:
-        manifest_name = next(
-            (name for name in archive.namelist() if name.lower().endswith("/manifest.safe") or name.lower() == "manifest.safe"),
-            None,
-        )
+        manifest_name = None
+        preview_kml_name = None
+        annotation_names: List[str] = []
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename
+            lower = name.lower()
+            if manifest_name is None and (lower.endswith("/manifest.safe") or lower == "manifest.safe"):
+                manifest_name = name
+            if preview_kml_name is None and lower.endswith("/preview/map-overlay.kml"):
+                preview_kml_name = name
+            if "/annotation/" in lower and lower.endswith(".xml"):
+                annotation_names.append(name)
         if not manifest_name:
             return {"manifest_parse_status": "MISSING"}
         manifest_bytes = archive.read(manifest_name)
+        annotation_documents = [
+            _metadata_document(
+                document_type="S1_ANNOTATION",
+                member_path=name,
+                content=archive.read(name),
+                source_format="S1_ZIP",
+                satellite_family="S1",
+                archive_path=path,
+                archive_mtime=stat.get("mtime_epoch"),
+            )
+            for name in sorted(annotation_names, key=_s1_annotation_sort_key)[:16]
+        ]
+        preview_kml_bytes = archive.read(preview_kml_name) if preview_kml_name else None
+        preview_kml_meta = _parse_s1_preview_kml_bytes(preview_kml_bytes) if preview_kml_bytes else {}
+        preview_kml_documents = [
+            _metadata_document(
+                document_type="S1_PREVIEW_KML",
+                member_path=preview_kml_name or "preview/map-overlay.kml",
+                content=preview_kml_bytes,
+                source_format="S1_ZIP",
+                satellite_family="S1",
+                archive_path=path,
+                archive_mtime=stat.get("mtime_epoch"),
+            )
+        ] if preview_kml_bytes else []
         return {
             "manifest_parse_status": "OK",
             "manifest_path": manifest_name,
@@ -1119,8 +1252,10 @@ def _parse_s1_zip_manifest(path: str) -> Dict[str, Any]:
                     archive_path=path,
                     archive_mtime=stat.get("mtime_epoch"),
                 ),
-                *_extract_s1_annotation_documents(path),
+                *preview_kml_documents,
+                *annotation_documents,
             ],
+            **preview_kml_meta,
             **_parse_s1_manifest_bytes(manifest_bytes),
         }
 
@@ -1132,6 +1267,23 @@ def _parse_s1_safe_manifest(path: str) -> Dict[str, Any]:
     stat = _stat_path(path)
     with open(manifest_path, "rb") as stream:
         manifest_bytes = stream.read()
+        preview_kml_path = os.path.join(path, "preview", "map-overlay.kml")
+        preview_kml_bytes = None
+        if os.path.isfile(preview_kml_path):
+            with open(preview_kml_path, "rb") as preview_stream:
+                preview_kml_bytes = preview_stream.read()
+        preview_kml_meta = _parse_s1_preview_kml_bytes(preview_kml_bytes) if preview_kml_bytes else {}
+        preview_kml_documents = [
+            _metadata_document(
+                document_type="S1_PREVIEW_KML",
+                member_path="preview/map-overlay.kml",
+                content=preview_kml_bytes,
+                source_format="S1_SAFE_DIR",
+                satellite_family="S1",
+                archive_path=path,
+                archive_mtime=stat.get("mtime_epoch"),
+            )
+        ] if preview_kml_bytes else []
         return {
             "manifest_parse_status": "OK",
             "manifest_path": manifest_path,
@@ -1145,8 +1297,10 @@ def _parse_s1_safe_manifest(path: str) -> Dict[str, Any]:
                     archive_path=path,
                     archive_mtime=stat.get("mtime_epoch"),
                 ),
+                *preview_kml_documents,
                 *_extract_s1_annotation_documents(path),
             ],
+            **preview_kml_meta,
             **_parse_s1_manifest_bytes(manifest_bytes),
         }
 
@@ -1154,14 +1308,11 @@ def _parse_s1_safe_manifest(path: str) -> Dict[str, Any]:
 def _parse_lt1_archive_metadata(path: str) -> Dict[str, Any]:
     archive_stem = _strip_known_suffix(os.path.basename(path))
     stat = _stat_path(path)
-    xml_member, xml_data, members = _archive_read_first_matching(
+    xml_member, xml_data, tiff_members, members = _archive_collect_members(
         path,
-        lambda name: _archive_member_base_name(name).lower().endswith(".meta.xml"),
-    )
-    tiff_members = _archive_list_matching(
-        path,
-        lambda name: _archive_member_base_name(name).lower().endswith((".tiff", ".tif")),
-        limit=8,
+        content_predicate=lambda name: _archive_member_base_name(name).lower().endswith(".meta.xml"),
+        list_predicate=lambda name: _archive_member_base_name(name).lower().endswith((".tiff", ".tif")),
+        list_limit=8,
     )
     if not xml_member or not xml_data:
         return {
@@ -1193,14 +1344,11 @@ def _parse_lt1_archive_metadata(path: str) -> Dict[str, Any]:
 
 def _parse_gf3_archive_metadata(path: str) -> Dict[str, Any]:
     archive_stem = _strip_known_suffix(os.path.basename(path))
-    xml_member, xml_data, members = _archive_read_first_matching(
+    xml_member, xml_data, quicklooks, members = _archive_collect_members(
         path,
-        lambda name: _archive_member_base_name(name).lower().endswith(".xml"),
-    )
-    quicklooks = _archive_list_matching(
-        path,
-        lambda name: _archive_member_base_name(name).lower().endswith((".jpg", ".jpeg", ".png", ".bmp", "_ql.tif", "_ql.tiff")),
-        limit=8,
+        content_predicate=lambda name: _archive_member_base_name(name).lower().endswith(".xml"),
+        list_predicate=lambda name: _archive_member_base_name(name).lower().endswith((".jpg", ".jpeg", ".png", ".bmp", "_ql.tif", "_ql.tiff")),
+        list_limit=8,
     )
     if not xml_member or not xml_data:
         return {
@@ -1782,6 +1930,8 @@ def _cached_source_asset_is_unchanged(
     cached: Optional[Dict[str, Any]],
     stat: Dict[str, Optional[float]],
     root: ManagedRootORM,
+    *,
+    skip_unchanged_failures: bool = True,
 ) -> bool:
     if not cached:
         return False
@@ -1797,7 +1947,11 @@ def _cached_source_asset_is_unchanged(
         return False
     if str(cached.get("parser_version") or "") != PARSER_VERSION:
         return False
-    if str(cached.get("parse_status") or "").upper() != "OK":
+    parse_status = str(cached.get("parse_status") or "").upper()
+    allowed_statuses = {"OK"}
+    if skip_unchanged_failures:
+        allowed_statuses.update({"PARTIAL", "FAILED"})
+    if parse_status not in allowed_statuses:
         return False
     return _same_size(cached.get("size_bytes"), stat.get("size_bytes")) and _same_mtime(
         cached.get("mtime_epoch"),
@@ -1840,14 +1994,27 @@ def _collect_source_assets_incremental(
     log_callback: Optional[Callable[[str, str], None]] = None,
     progress_start: int = 0,
     progress_end: int = 100,
+    parse_workers: int = DEFAULT_ASSET_SCAN_PARSE_WORKERS,
+    parse_inflight: int = DEFAULT_ASSET_SCAN_PARSE_INFLIGHT,
+    skip_unchanged_failures: bool = True,
+    row_batch_callback: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    row_batch_size: int = DEFAULT_ASSET_SCAN_DB_BATCH_SIZE,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, List[str]]:
     rows: List[Dict[str, Any]] = []
+    pending_rows: List[Dict[str, Any]] = []
     issues: List[Dict[str, Any]] = []
     seen_paths: List[str] = []
+    seen_path_set: set[str] = set()
     entry_count = 0
     skipped_unchanged = 0
+    skipped_unchanged_ok = 0
+    skipped_unchanged_failed = 0
     parse_attempts = 0
+    parse_completed = 0
     last_progress_count = 0
+    parse_workers = max(1, int(parse_workers or 1))
+    parse_inflight = max(parse_workers, int(parse_inflight or parse_workers))
+    row_batch_size = max(1, int(row_batch_size or 1))
 
     def _log(level: str, message: str) -> None:
         if log_callback:
@@ -1857,39 +2024,37 @@ def _collect_source_assets_incremental(
         if progress_callback:
             progress_callback(_activity_progress(progress_start, progress_end, entry_count), message)
 
-    _log("INFO", f"Source root discovery started: {root.path}")
-    for path in _iter_source_candidates(root.path):
-        entry_count += 1
-        normalized_path = _normalize_path(path)
-        stat = _stat_path(normalized_path)
-        if _cached_source_asset_is_unchanged(existing_by_path.get(normalized_path), stat, root):
-            seen_paths.append(normalized_path)
-            skipped_unchanged += 1
-            if skipped_unchanged % ASSET_SCAN_LOG_INTERVAL == 0:
-                _log(
-                    "INFO",
-                    f"Skipped unchanged source archives: {skipped_unchanged} (candidates={entry_count})",
-                )
-            if entry_count - last_progress_count >= ASSET_SCAN_LOG_INTERVAL:
-                _progress(
-                    "Scanning source archives: "
-                    f"candidates={entry_count}, skipped={skipped_unchanged}, parsed={len(rows)}, issues={len(issues)}"
-                )
-                last_progress_count = entry_count
-            continue
-        parse_attempts += 1
+    def _mark_seen(path: str) -> None:
+        normalized = _normalize_path(path)
+        if normalized and normalized not in seen_path_set:
+            seen_path_set.add(normalized)
+            seen_paths.append(normalized)
+
+    def _emit_row_batch(*, force: bool = False) -> None:
+        if not row_batch_callback or not pending_rows:
+            return
+        if not force and len(pending_rows) < row_batch_size:
+            return
+        batch = pending_rows[:]
+        pending_rows.clear()
+        row_batch_callback(batch)
+
+    def _parse_one(index: int, normalized_path: str) -> Dict[str, Any]:
         file_name = os.path.basename(normalized_path)
-        if parse_attempts <= ASSET_SCAN_DETAILED_PARSE_LOG_LIMIT or parse_attempts % ASSET_SCAN_LOG_INTERVAL == 0:
-            _log("INFO", f"Extracting source archive metadata {parse_attempts}: {file_name}")
-        if parse_attempts <= 50 or parse_attempts % 25 == 0:
-            _progress(
-                "Extracting source archive metadata: "
-                f"{file_name} (changed/new={parse_attempts}, skipped={skipped_unchanged})"
-            )
         try:
-            row = _parse_source_entry(normalized_path, root)
+            row = _parse_source_entry(normalized_path, parse_root)
+            return {"index": index, "path": normalized_path, "file_name": file_name, "row": row, "error": None}
         except Exception as exc:
-            row = None
+            return {"index": index, "path": normalized_path, "file_name": file_name, "row": None, "error": exc}
+
+    def _handle_parse_result(result: Dict[str, Any]) -> None:
+        nonlocal parse_completed, last_progress_count
+        parse_completed += 1
+        normalized_path = str(result.get("path") or "")
+        file_name = str(result.get("file_name") or os.path.basename(normalized_path))
+        exc = result.get("error")
+        if exc is not None:
+            _mark_seen(normalized_path)
             _log("WARNING", f"Source archive metadata parse failed: {file_name}: {exc}")
             issues.append(
                 {
@@ -1899,10 +2064,14 @@ def _collect_source_assets_incremental(
                     "source_path": normalized_path,
                 }
             )
+            return
+        row = result.get("row")
         if row is None:
-            continue
+            _mark_seen(normalized_path)
+            return
         rows.append(row)
-        seen_paths.append(str(row["file_path"]))
+        pending_rows.append(row)
+        _mark_seen(str(row["file_path"]))
         if row.get("parse_status") in {"FAILED", "PARTIAL"}:
             _log(
                 "WARNING",
@@ -1920,17 +2089,91 @@ def _collect_source_assets_incremental(
         if entry_count - last_progress_count >= ASSET_SCAN_LOG_INTERVAL:
             _progress(
                 "Scanning source archives: "
-                f"candidates={entry_count}, skipped={skipped_unchanged}, parsed={len(rows)}, issues={len(issues)}"
+                f"candidates={entry_count}, skipped={skipped_unchanged}, parsed={len(rows)}, "
+                f"completed={parse_completed}/{parse_attempts}, issues={len(issues)}"
             )
             last_progress_count = entry_count
+        _emit_row_batch()
+
+    def _drain_completed(pending: set, *, wait_for_one: bool = False) -> set:
+        if not pending:
+            return pending
+        timeout = None if wait_for_one else 0
+        done, remaining = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+        for future in done:
+            _handle_parse_result(future.result())
+        return remaining
+
+    _log(
+        "INFO",
+        "Source root discovery started: "
+        f"{root.path} (workers={parse_workers}, inflight={parse_inflight}, "
+        f"db_batch_size={row_batch_size}, skip_unchanged_failures={skip_unchanged_failures})",
+    )
+    parse_root = SimpleNamespace(id=root.id, path=root.path)
+    with ThreadPoolExecutor(max_workers=parse_workers, thread_name_prefix="asset-parse") as executor:
+        pending = set()
+        for path in _iter_source_candidates(root.path):
+            entry_count += 1
+            normalized_path = _normalize_path(path)
+            stat = _stat_path(normalized_path)
+            cached = existing_by_path.get(normalized_path)
+            if _cached_source_asset_is_unchanged(
+                cached,
+                stat,
+                root,
+                skip_unchanged_failures=skip_unchanged_failures,
+            ):
+                _mark_seen(normalized_path)
+                skipped_unchanged += 1
+                cached_status = str((cached or {}).get("parse_status") or "").upper()
+                if cached_status == "OK":
+                    skipped_unchanged_ok += 1
+                else:
+                    skipped_unchanged_failed += 1
+                if skipped_unchanged % ASSET_SCAN_LOG_INTERVAL == 0:
+                    _log(
+                        "INFO",
+                        "Skipped unchanged source archives: "
+                        f"{skipped_unchanged} (ok={skipped_unchanged_ok}, failed_cached={skipped_unchanged_failed}, "
+                        f"candidates={entry_count})",
+                    )
+                if entry_count - last_progress_count >= ASSET_SCAN_LOG_INTERVAL:
+                    _progress(
+                        "Scanning source archives: "
+                        f"candidates={entry_count}, skipped={skipped_unchanged}, parsed={len(rows)}, "
+                        f"completed={parse_completed}/{parse_attempts}, issues={len(issues)}"
+                    )
+                    last_progress_count = entry_count
+                continue
+            parse_attempts += 1
+            file_name = os.path.basename(normalized_path)
+            if parse_attempts <= ASSET_SCAN_DETAILED_PARSE_LOG_LIMIT or parse_attempts % ASSET_SCAN_LOG_INTERVAL == 0:
+                _log("INFO", f"Extracting source archive metadata {parse_attempts}: {file_name}")
+            if parse_attempts <= 50 or parse_attempts % 25 == 0:
+                _progress(
+                    "Extracting source archive metadata: "
+                    f"{file_name} (changed/new={parse_attempts}, completed={parse_completed}, "
+                    f"workers={parse_workers}, skipped={skipped_unchanged}, issue={len(issues)})"
+                )
+            pending.add(executor.submit(_parse_one, parse_attempts, normalized_path))
+            while len(pending) >= parse_inflight:
+                pending = _drain_completed(pending, wait_for_one=True)
+            pending = _drain_completed(pending, wait_for_one=False)
+        while pending:
+            pending = _drain_completed(pending, wait_for_one=True)
+    _emit_row_batch(force=True)
     _log(
         "INFO",
         "Source root discovery finished: "
-        f"candidates={entry_count}, skipped={skipped_unchanged}, changed_or_new={len(rows)}, issues={len(issues)}",
+        f"candidates={entry_count}, skipped={skipped_unchanged}, "
+        f"skipped_ok={skipped_unchanged_ok}, skipped_failed_cached={skipped_unchanged_failed}, "
+        f"changed_or_new={len(rows)}, parse_attempts={parse_attempts}, issues={len(issues)}",
     )
     _progress(
         "Source archive discovery finished: "
-        f"candidates={entry_count}, skipped={skipped_unchanged}, changed_or_new={len(rows)}"
+        f"candidates={entry_count}, skipped={skipped_unchanged}, changed_or_new={len(rows)}, "
+        f"workers={parse_workers}"
     )
     return rows, issues, entry_count, skipped_unchanged, seen_paths
 
@@ -2152,6 +2395,8 @@ class AssetInventoryService:
         task_id: Optional[str] = None,
         progress_start: int = 84,
         progress_end: int = 96,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        progress_interval: int = 1,
     ) -> Dict[str, Any]:
         generated_session = db is None
         if generated_session:
@@ -2218,6 +2463,16 @@ class AssetInventoryService:
             if limit and limit > 0:
                 candidates = candidates[: int(limit)]
             summary["candidate_count"] = len(candidates)
+            if progress_callback:
+                progress_callback(
+                    {
+                        "event": "planned",
+                        "records_seen": summary["records_seen"],
+                        "candidate_count": summary["candidate_count"],
+                        "skipped_ready": summary["skipped_ready"],
+                        "families": target_families,
+                    }
+                )
             if not apply:
                 return summary
             if not candidates:
@@ -2226,6 +2481,8 @@ class AssetInventoryService:
                     f"Archive preview cache already ready: skipped={summary['skipped_ready']}",
                     progress_end,
                 )
+                if progress_callback:
+                    progress_callback({"event": "completed", **summary})
                 return summary
 
             await self._progress(
@@ -2235,6 +2492,7 @@ class AssetInventoryService:
             )
             thumb_size = (settings.RADAR_THUMBNAIL_MAX_SIZE, settings.RADAR_THUMBNAIL_MAX_SIZE)
             total = len(candidates)
+            progress_interval = max(1, int(progress_interval or 1))
             for index, record in enumerate(candidates, start=1):
                 unique_id = record.unique_id or record.file_path
                 raw_cache_path = DataService.get_radar_raw_cache_path(unique_id, record.file_path)
@@ -2277,10 +2535,7 @@ class AssetInventoryService:
                             await task_service.add_log(task_id, "ERROR", f"Preview geometry invalid: {product_name}: {record.preview_cache_error}")
                         db.add(record)
                     else:
-                        source_corner_mapping = await asyncio.to_thread(
-                            DataService.get_radar_source_corner_mapping,
-                            record.file_path,
-                        )
+                        source_corner_mapping = DataService.get_radar_record_corner_mapping(record)
                         ok_geo, geo_error = await asyncio.to_thread(
                             image_service.create_geocorrected_radar_cached_image,
                             preview_source,
@@ -2327,6 +2582,31 @@ class AssetInventoryService:
                     f"Building archive preview cache ({index}/{total}): ready={summary['ready']}, failed={summary['failed']}, missing={summary['missing_source']}",
                     min(progress_end, progress),
                 )
+                if progress_callback and (
+                    index == 1
+                    or index == total
+                    or index % progress_interval == 0
+                    or (record.preview_cache_status or "").upper() == "FAILED"
+                ):
+                    progress_callback(
+                        {
+                            "event": "item",
+                            "processed": index,
+                            "total": total,
+                            "records_seen": summary["records_seen"],
+                            "candidate_count": summary["candidate_count"],
+                            "skipped_ready": summary["skipped_ready"],
+                            "ready": summary["ready"],
+                            "cached": summary["cached"],
+                            "failed": summary["failed"],
+                            "missing_source": summary["missing_source"],
+                            "raw_cached": summary["raw_cached"],
+                            "raw_failed": summary["raw_failed"],
+                            "product_name": product_name,
+                            "status": record.preview_cache_status,
+                            "error": record.preview_cache_error,
+                        }
+                    )
                 await db.commit()
 
             await self._progress(
@@ -2338,6 +2618,8 @@ class AssetInventoryService:
                 ),
                 progress_end,
             )
+            if progress_callback:
+                progress_callback({"event": "completed", **summary})
             return summary
         except Exception:
             if db is not None:
@@ -2748,6 +3030,109 @@ class AssetInventoryService:
 
         loop = asyncio.get_running_loop()
         progress_callback, log_callback, drain_thread_events = self._thread_callbacks(task_id, loop)
+        batch_write_start = max(progress_start, progress_end - 10)
+        batch_write_end = max(batch_write_start, progress_end - 3)
+        persisted_changed_count = 0
+
+        async def _upsert_source_asset_batch(rows_batch: Sequence[Dict[str, Any]], *, batch_index: int) -> int:
+            if not rows_batch:
+                return 0
+            now = _utcnow()
+            db_rows = [
+                {key: value for key, value in row.items() if not str(key).startswith("_")}
+                for row in rows_batch
+            ]
+            for row in db_rows:
+                stmt = pg_insert(SourceProductAssetORM).values(row)
+                excluded = stmt.excluded
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["file_path"],
+                    set_={
+                        "asset_uid": excluded.asset_uid,
+                        "logical_product_uid": excluded.logical_product_uid,
+                        "satellite_family": excluded.satellite_family,
+                        "satellite": excluded.satellite,
+                        "source_format": excluded.source_format,
+                        "product_type": excluded.product_type,
+                        "product_level": excluded.product_level,
+                        "imaging_mode": excluded.imaging_mode,
+                        "polarization": excluded.polarization,
+                        "absolute_orbit": excluded.absolute_orbit,
+                        "relative_orbit": excluded.relative_orbit,
+                        "orbit_direction": excluded.orbit_direction,
+                        "acquisition_start_time_utc": excluded.acquisition_start_time_utc,
+                        "acquisition_stop_time_utc": excluded.acquisition_stop_time_utc,
+                        "imaging_date": excluded.imaging_date,
+                        "root_ref_id": excluded.root_ref_id,
+                        "root_path": excluded.root_path,
+                        "archive_path": excluded.archive_path,
+                        "path_kind": excluded.path_kind,
+                        "file_name": excluded.file_name,
+                        "file_stem": excluded.file_stem,
+                        "file_ext": excluded.file_ext,
+                        "size_bytes": excluded.size_bytes,
+                        "mtime_epoch": excluded.mtime_epoch,
+                        "checksum_status": excluded.checksum_status,
+                        "archive_integrity_status": "NOT_CHECKED",
+                        "archive_integrity_method": None,
+                        "archive_integrity_checked_at": None,
+                        "archive_integrity_error": None,
+                        "archive_integrity_version": None,
+                        "archive_integrity_member_count": None,
+                        "parser_name": excluded.parser_name,
+                        "parser_version": excluded.parser_version,
+                        "parse_status": excluded.parse_status,
+                        "parse_error": excluded.parse_error,
+                        "parsed_at": excluded.parsed_at,
+                        "metadata_json": excluded.metadata_json,
+                        "is_active": True,
+                        "missing_since": None,
+                        "updated_at": now,
+                    },
+                )
+                await db.execute(stmt)
+            await db.flush()
+
+            changed_paths = [str(row["file_path"]) for row in rows_batch if row.get("file_path")]
+            asset_ids_by_path: Dict[str, int] = {}
+            if changed_paths:
+                result = await db.execute(
+                    select(SourceProductAssetORM.file_path, SourceProductAssetORM.id).where(
+                        SourceProductAssetORM.file_path.in_(changed_paths)
+                    )
+                )
+                asset_ids_by_path = {str(path): int(asset_id) for path, asset_id in result.all()}
+                await self._upsert_metadata_documents_for_source_assets(db, rows_batch, asset_ids_by_path)
+                await self._upsert_radar_records_for_source_assets(db, rows_batch, asset_ids_by_path)
+
+            await db.commit()
+            if task_id:
+                await task_service.add_log(
+                    task_id,
+                    "INFO",
+                    f"Source asset DB batch committed: batch={batch_index}, rows={len(rows_batch)}",
+                )
+                await self._progress(
+                    task_id,
+                    f"Committed source asset DB batch {batch_index}: rows={len(rows_batch)}",
+                    batch_write_start,
+                )
+            return len(rows_batch)
+
+        batch_index = 0
+
+        def _persist_row_batch(rows_batch: List[Dict[str, Any]]) -> None:
+            nonlocal batch_index, persisted_changed_count
+            if not rows_batch:
+                return
+            batch_index += 1
+            future = asyncio.run_coroutine_threadsafe(
+                _upsert_source_asset_batch(rows_batch, batch_index=batch_index),
+                loop,
+            )
+            persisted = int(future.result())
+            persisted_changed_count += persisted
+
         rows, issues, entry_count, skipped_unchanged, seen_paths = await asyncio.to_thread(
             _collect_source_assets_incremental,
             root,
@@ -2756,104 +3141,24 @@ class AssetInventoryService:
             log_callback=log_callback,
             progress_start=progress_start,
             progress_end=max(progress_start + 1, progress_end - 8),
+            parse_workers=settings.ASSET_SCAN_PARSE_WORKERS,
+            parse_inflight=settings.ASSET_SCAN_PARSE_INFLIGHT,
+            skip_unchanged_failures=settings.ASSET_SCAN_SKIP_UNCHANGED_FAILURES,
+            row_batch_callback=_persist_row_batch if task_id else None,
+            row_batch_size=settings.ASSET_SCAN_DB_BATCH_SIZE,
         )
         await drain_thread_events()
-        changed_paths = [row["file_path"] for row in rows]
+        if not task_id and rows:
+            persisted_changed_count += await _upsert_source_asset_batch(rows, batch_index=1)
         now = _utcnow()
-        write_start = max(progress_start, progress_end - 7)
-        write_end = max(write_start, progress_end - 3)
-        await self._progress(
-            task_id,
-            f"Writing source asset index: changed_or_new={len(rows)}, skipped={skipped_unchanged}",
-            write_start,
-        )
-        db_rows = [
-            {key: value for key, value in row.items() if not str(key).startswith("_")}
-            for row in rows
-        ]
         if task_id:
             await task_service.add_log(
                 task_id,
                 "INFO",
-                f"Source asset DB upsert started: changed_or_new={len(rows)}, skipped={skipped_unchanged}, seen={len(seen_paths)}",
+                "Source asset DB batch upsert finished: "
+                f"changed_or_new={len(rows)}, persisted={persisted_changed_count}, "
+                f"batches={batch_index}, skipped={skipped_unchanged}, seen={len(seen_paths)}",
             )
-        for index, row in enumerate(db_rows, start=1):
-            stmt = pg_insert(SourceProductAssetORM).values(row)
-            excluded = stmt.excluded
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["file_path"],
-                set_={
-                    "asset_uid": excluded.asset_uid,
-                    "logical_product_uid": excluded.logical_product_uid,
-                    "satellite_family": excluded.satellite_family,
-                    "satellite": excluded.satellite,
-                    "source_format": excluded.source_format,
-                    "product_type": excluded.product_type,
-                    "product_level": excluded.product_level,
-                    "imaging_mode": excluded.imaging_mode,
-                    "polarization": excluded.polarization,
-                    "absolute_orbit": excluded.absolute_orbit,
-                    "relative_orbit": excluded.relative_orbit,
-                    "orbit_direction": excluded.orbit_direction,
-                    "acquisition_start_time_utc": excluded.acquisition_start_time_utc,
-                    "acquisition_stop_time_utc": excluded.acquisition_stop_time_utc,
-                    "imaging_date": excluded.imaging_date,
-                    "root_ref_id": excluded.root_ref_id,
-                    "root_path": excluded.root_path,
-                    "archive_path": excluded.archive_path,
-                    "path_kind": excluded.path_kind,
-                    "file_name": excluded.file_name,
-                    "file_stem": excluded.file_stem,
-                    "file_ext": excluded.file_ext,
-                    "size_bytes": excluded.size_bytes,
-                    "mtime_epoch": excluded.mtime_epoch,
-                    "checksum_status": excluded.checksum_status,
-                    "archive_integrity_status": "NOT_CHECKED",
-                    "archive_integrity_method": None,
-                    "archive_integrity_checked_at": None,
-                    "archive_integrity_error": None,
-                    "archive_integrity_version": None,
-                    "archive_integrity_member_count": None,
-                    "parser_name": excluded.parser_name,
-                    "parser_version": excluded.parser_version,
-                    "parse_status": excluded.parse_status,
-                    "parse_error": excluded.parse_error,
-                    "parsed_at": excluded.parsed_at,
-                    "metadata_json": excluded.metadata_json,
-                    "is_active": True,
-                    "missing_since": None,
-                    "updated_at": now,
-                },
-            )
-            await db.execute(stmt)
-            if index % ASSET_SCAN_LOG_INTERVAL == 0 or index == len(rows):
-                progress_value = write_start
-                if rows and write_end > write_start:
-                    progress_value = write_start + int(index / max(1, len(rows)) * (write_end - write_start))
-                await self._progress(
-                    task_id,
-                    f"Writing source asset index: {index}/{len(rows)} changed_or_new, skipped={skipped_unchanged}",
-                    progress_value,
-                )
-        await db.flush()
-
-        asset_ids_by_path: Dict[str, int] = {}
-        if changed_paths:
-            await self._progress(
-                task_id,
-                f"Updating radar scene records for changed source assets: {len(changed_paths)}",
-                max(write_end, progress_end - 2),
-            )
-            result = await db.execute(
-                select(SourceProductAssetORM.file_path, SourceProductAssetORM.id).where(
-                    SourceProductAssetORM.file_path.in_(changed_paths)
-                )
-            )
-            asset_ids_by_path = {str(path): int(asset_id) for path, asset_id in result.all()}
-            await self._upsert_metadata_documents_for_source_assets(db, rows, asset_ids_by_path)
-            await self._upsert_radar_records_for_source_assets(db, rows, asset_ids_by_path)
-        elif task_id:
-            await task_service.add_log(task_id, "INFO", "No changed source assets; radar scene record update skipped.")
 
         await self._progress(task_id, "Marking missing source assets and refreshing scan issues...", max(progress_end - 2, progress_start))
         await self._mark_missing_source_assets(db, root, seen_paths, now)

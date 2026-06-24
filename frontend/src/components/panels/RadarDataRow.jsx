@@ -56,9 +56,6 @@ function RadarDataRow({
                             : (language === 'en' ? 'Rebuild' : '重建')}
                     </button>
                 )}
-                {item.is_envi_processed && (
-                    <span className="envi-status" title={language === 'en' ? 'Processed to ENVI format' : '已处理为ENVI格式'}>E</span>
-                )}
                 <span
                     className={`orbit-status ${item.has_orbit_data ? 'has-orbit' : ''}`}
                     title={item.has_orbit_data

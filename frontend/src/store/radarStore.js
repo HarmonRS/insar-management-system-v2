@@ -9,7 +9,7 @@ const RADAR_SEARCH_DEFAULTS = {
     satellite: '', satellite_mode: '', receiving_station: '', imaging_mode: '',
     orbit_circle: '', acquisition_time_utc: '', product_type: '', polarization: '',
     product_level: '', product_unique_id: '', orbit_direction: '',
-    has_orbit_data: '', is_envi_processed: '', imaging_date_from: '', imaging_date_to: '',
+    has_orbit_data: '', imaging_date_from: '', imaging_date_to: '',
 };
 
 const RADAR_SEARCH_OPTIONS_DEFAULTS = {

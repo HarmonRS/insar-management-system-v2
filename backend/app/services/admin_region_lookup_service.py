@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from shapely.geometry import Point, shape
+from shapely.geometry import MultiPolygon, Point, shape
 from shapely.ops import unary_union
 
 try:
@@ -36,6 +36,7 @@ class _RegionGeometryRecord:
 _REGION_GEOMETRY_CACHE: list[_RegionGeometryRecord] | None = None
 _REGION_BY_ID_LOOKUP_CACHE: dict[str, dict[str, Any]] | None = None
 _REGION_LOAD_ERROR: str | None = None
+_POLYGONAL_GEOMETRY_TYPES = {"Polygon", "MultiPolygon"}
 
 
 def _backend_geojson_dir() -> Path:
@@ -190,6 +191,40 @@ def _build_region_path(tree_id: str, region_by_id: dict[str, dict[str, Any]]) ->
     return names, tree_ids
 
 
+def _as_polygonal_geometry(geometry):
+    if geometry is None or geometry.is_empty:
+        return None
+    if getattr(geometry, "geom_type", None) in _POLYGONAL_GEOMETRY_TYPES:
+        return geometry
+
+    polygon_parts = []
+    for part in getattr(geometry, "geoms", []) or []:
+        polygonal = _as_polygonal_geometry(part)
+        if polygonal is None or polygonal.is_empty:
+            continue
+        if getattr(polygonal, "geom_type", None) == "Polygon":
+            polygon_parts.append(polygonal)
+        else:
+            polygon_parts.extend([item for item in getattr(polygonal, "geoms", []) if not item.is_empty])
+
+    if not polygon_parts:
+        return None
+    if len(polygon_parts) == 1:
+        return polygon_parts[0]
+    try:
+        merged = unary_union(polygon_parts)
+        if merged is not None and not merged.is_empty:
+            if getattr(merged, "geom_type", None) in _POLYGONAL_GEOMETRY_TYPES:
+                return merged
+            return _as_polygonal_geometry(merged)
+    except Exception:
+        pass
+    try:
+        return MultiPolygon(polygon_parts)
+    except Exception:
+        return polygon_parts[0]
+
+
 def _load_region_records() -> tuple[list[_RegionGeometryRecord], dict[str, dict[str, Any]], str | None]:
     global _REGION_BY_ID_LOOKUP_CACHE, _REGION_GEOMETRY_CACHE, _REGION_LOAD_ERROR
     if _REGION_GEOMETRY_CACHE is not None:
@@ -228,6 +263,7 @@ def _load_region_records() -> tuple[list[_RegionGeometryRecord], dict[str, dict[
             if not geometries:
                 continue
             geometry = _merge_region_geometries(geometries)
+            geometry = _as_polygonal_geometry(geometry)
             if geometry is None or geometry.is_empty:
                 continue
             node = region_by_id.get(tree_id) or {}

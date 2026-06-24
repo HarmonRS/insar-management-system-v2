@@ -41,7 +41,6 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
     taskTypes: ['IDL_IMPORT', 'IDL_DINSAR'],
     showRecent: true,
     recentLimit: 1,
-    pollRecentMs: 10000,
   });
   const runningTask = idlTaskMonitor.activeTasks[0] || null;
 
@@ -75,9 +74,12 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
 
   useEffect(() => {
     refreshData().catch(() => {});
-    const timer = setInterval(() => refreshData().catch(() => {}), 10000);
+    if (!runningTask) {
+      return undefined;
+    }
+    const timer = setInterval(() => refreshData().catch(() => {}), 15000);
     return () => clearInterval(timer);
-  }, [refreshData]);
+  }, [refreshData, runningTask]);
 
   const runAction = async (action) => {
     setIsBusy(true);

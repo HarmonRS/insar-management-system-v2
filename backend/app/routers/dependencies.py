@@ -126,6 +126,17 @@ _STATS_CACHE_DATA: Optional[Dict[str, Any]] = None
 _STATS_CACHE_EXPIRES_AT = 0.0
 _STATS_CACHE_GENERATED_AT_UTC: Optional[str] = None
 
+DASHBOARD_STATS_CACHE_TTL_SECONDS = read_int_env(
+    "DASHBOARD_STATS_CACHE_TTL_SECONDS",
+    STATS_CACHE_TTL_SECONDS,
+    minimum=0,
+    maximum=3600,
+)
+_DASHBOARD_STATS_CACHE_LOCK = asyncio.Lock()
+_DASHBOARD_STATS_CACHE_DATA: Optional[Dict[str, Any]] = None
+_DASHBOARD_STATS_CACHE_EXPIRES_AT = 0.0
+_DASHBOARD_STATS_CACHE_GENERATED_AT_UTC: Optional[str] = None
+
 # ---------------------------------------------------------------------------
 # AOI token store
 # ---------------------------------------------------------------------------

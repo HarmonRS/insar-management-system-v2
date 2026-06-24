@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from .. import database
 from ..config import settings, split_env_paths
-from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskItemORM, PsTaskItemORM, RadarDataORM, SARSceneGeoORM, FloodDetectionORM, WaterDetectionORM, WaterExtractionORM, GF3ProcessingORM, AiDiagnosisORM
+from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskItemORM, PsTaskItemORM, RadarDataORM, SARSceneGeoORM, FloodDetectionORM, WaterDetectionORM, WaterExtractionORM, GF3ProcessingORM, AiDiagnosisORM, DinsarProductionRunItemORM
 from ..scheduler import scan_data_job
 from .data_service import data_service
 from .asset_inventory_service import asset_inventory_service
@@ -93,6 +93,7 @@ JOB_TYPE_GF3_SARSCAPE_CLEAN = "GF3_SARSCAPE_CLEAN"
 JOB_TYPE_ISCE2_RUN = "ISCE2_RUN"
 JOB_TYPE_PYINT_RUN = "PYINT_RUN"
 JOB_TYPE_LANDSAR_RUN = "LANDSAR_RUN"
+JOB_TYPE_LANDSAR_CLUSTER_ITEM = "LANDSAR_CLUSTER_ITEM"
 JOB_TYPE_PUBLISH_DINSAR_PRODUCTS = "PUBLISH_DINSAR_PRODUCTS"
 JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
@@ -107,6 +108,15 @@ JOB_TYPE_SBAS_GAMMA_WORKFLOW = "SBAS_GAMMA_WORKFLOW"
 JOB_TYPE_SBAS_LANDSAR_WORKFLOW = "SBAS_LANDSAR_WORKFLOW"
 
 COPY_ALLOWED_STATUSES = {"PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"}
+_LOCAL_ENGINE_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+def _local_engine_lock(name: str) -> asyncio.Lock:
+    lock = _LOCAL_ENGINE_LOCKS.get(name)
+    if lock is None:
+        lock = asyncio.Lock()
+        _LOCAL_ENGINE_LOCKS[name] = lock
+    return lock
 
 
 def AsyncSessionLocal():
@@ -1997,6 +2007,15 @@ async def _run_dinsar_production_controller(job: SystemJobORM) -> None:
                 )
             except Exception as exc:
                 publish_error = str(exc)
+                item.status = "FAILED"
+                item.current_step = "publish_failed"
+                item.last_error = publish_error
+                await dinsar_production_service.refresh_run_counters(
+                    run,
+                    db=db,
+                    latest_message=f"Publish failed {item_label}: {publish_error}",
+                )
+                await db.commit()
                 await task_service.add_log(
                     job.task_id,
                     "WARNING",
@@ -3207,6 +3226,357 @@ async def _handle_landsar_run(job: SystemJobORM) -> None:
         engine_title="LandSAR",
         fallback_timeout_seconds=int(getattr(settings, "LANDSAR_DINSAR_TIMEOUT_SECONDS", 0) or 43200),
     )
+
+
+async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
+    payload = job.payload or {}
+    production_run_id = str(payload.get("production_run_id") or "").strip()
+    item_id = _normalize_positive_int(payload.get("item_id"))
+    if not production_run_id or not item_id:
+        raise ValueError("LANDSAR_CLUSTER_ITEM requires production_run_id and item_id.")
+
+    from ..dinsar_engines import registry
+    from ..dinsar_engines.base import RunRequest
+
+    engine = registry.get_engine("landsar")
+    if engine is None:
+        raise RuntimeError("LandSAR engine is not registered on this worker.")
+    engine_title = "LandSAR"
+    per_task_timeout = int(getattr(settings, "LANDSAR_DINSAR_TIMEOUT_SECONDS", 0) or 43200)
+
+    async with AsyncSessionLocal() as db:
+        run = await dinsar_production_service.get_run(production_run_id, db)
+        if run is None:
+            raise ValueError(f"LandSAR cluster run not found: {production_run_id}")
+
+        item = await db.get(DinsarProductionRunItemORM, int(item_id))
+        if item is None or item.run_id != run.run_id:
+            raise ValueError(f"LandSAR cluster item not found: {item_id}")
+
+        await db.refresh(item)
+        item_status = str(item.status or "").strip().upper()
+        if item_status in {"COMPLETED", "FAILED", "SKIPPED", "CANCELLED"}:
+            await dinsar_production_service.finalize_cluster_run_if_complete(run, db=db)
+            return
+
+        current_task = await task_service.get_task(job.task_id)
+        task_cancelled = bool(current_task and current_task.status == "CANCELLED")
+        if bool(run.cancel_requested) or task_cancelled:
+            run.cancel_requested = True
+            item.status = "CANCELLED"
+            item.current_step = "cancelled"
+            item.last_error = "Cancelled before worker execution."
+            await dinsar_production_service.refresh_run_counters(run, db=db, latest_message=item.last_error)
+            await db.commit()
+            await dinsar_production_service.finalize_cluster_run_if_complete(run, db=db)
+            return
+
+        if str(run.status or "").strip().upper() == "PENDING":
+            await task_service.start_task(
+                job.task_id,
+                message=f"Starting LandSAR cluster run {run.run_id} ({run.total_items} items)...",
+            )
+            await dinsar_production_service.mark_run_started(
+                run,
+                db=db,
+                message=f"LandSAR cluster started. total={run.total_items}",
+            )
+        else:
+            await task_service.update_task(
+                job.task_id,
+                status="RUNNING",
+                message=f"LandSAR cluster running. item={item.task_alias or item.task_name}",
+            )
+
+        params = run.params_json or {}
+        user_extra = dict(params.get("extra") or {})
+        timeout_seconds_raw = params.get("timeout_seconds")
+        if timeout_seconds_raw not in (None, ""):
+            per_task_timeout = int(timeout_seconds_raw)
+
+        total_items = max(1, int(run.total_items or 1))
+        item_index = max(1, int(item.order_index or 1))
+        item_label = item.task_alias or item.task_name
+        run_key = f"{build_run_key('landsar', run.profile_code, started_at=datetime.utcnow())}_{item.id}_{uuid.uuid4().hex[:6]}"
+        execution = await dinsar_production_service.begin_item_execution(
+            run=run,
+            item=item,
+            run_key=run_key,
+            db=db,
+        )
+
+        managed_run_dir = os.path.normpath(execution.output_dir)
+        landsar_work_root = str(getattr(settings, "LANDSAR_WORK_ROOT", "") or "").strip()
+        if landsar_work_root:
+            managed_native_output_dir = os.path.normpath(os.path.join(landsar_work_root, run_key, "native"))
+        else:
+            managed_native_output_dir = os.path.join(managed_run_dir, "native")
+        managed_work_dir = os.path.join(managed_native_output_dir, "workflow")
+        managed_export_dir = os.path.join(managed_native_output_dir, "export")
+        managed_orbit_output_dir = os.path.join(managed_work_dir, "orbits")
+        base_progress = min(95, 5 + int(((item_index - 1) / total_items) * 90))
+        progress_state: Dict[str, Any] = {
+            "progress": base_progress,
+            "message": f"[landsar/cluster] Running {item_index}/{total_items}: {item_label}",
+            "started_monotonic": time.monotonic(),
+        }
+        progress_queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def _emit_progress(event: Dict[str, Any]) -> None:
+            if not event:
+                return
+            try:
+                loop.call_soon_threadsafe(progress_queue.put_nowait, dict(event))
+            except RuntimeError:
+                return
+
+        async def _consume_progress() -> None:
+            while True:
+                event = await progress_queue.get()
+                if event is None:
+                    return
+                event_type = str(event.get("event") or "").strip().lower()
+                if event_type == "log":
+                    level = str(event.get("level") or "INFO").strip().upper()
+                    if level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
+                        level = "INFO"
+                    source = str(event.get("source") or "").strip()
+                    message = str(event.get("message") or "").strip()
+                    if message:
+                        prefix = f"[cluster {item_index}/{total_items}] {engine_title} {item_label}"
+                        if source:
+                            prefix = f"{prefix} {source}"
+                        await task_service.add_log(job.task_id, level, f"{prefix}: {message}")
+                elif event_type == "pair_started":
+                    progress_state["message"] = f"[landsar/cluster] Running {item_index}/{total_items}: {item_label}"
+                    progress_state["started_monotonic"] = time.monotonic()
+                    await task_service.add_log(
+                        job.task_id,
+                        "INFO",
+                        f"[cluster {item_index}/{total_items}] {engine_title} started {item_label}",
+                    )
+                elif event_type == "pair_finished":
+                    if bool(event.get("success")):
+                        progress_state["progress"] = min(98, 5 + int((item_index / total_items) * 90))
+                        progress_state["message"] = f"[landsar/cluster] Finished {item_index}/{total_items}: {item_label}"
+                    else:
+                        progress_state["message"] = f"[landsar/cluster] Failed {item_index}/{total_items}: {item_label}"
+
+        async def _task_keepalive() -> None:
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    message = str(progress_state.get("message") or "")
+                    started_monotonic = progress_state.get("started_monotonic")
+                    if isinstance(started_monotonic, (int, float)):
+                        elapsed_seconds = max(0, int(time.monotonic() - float(started_monotonic)))
+                        message = f"{message} (elapsed={elapsed_seconds}s)"
+                    await task_service.update_task(
+                        job.task_id,
+                        status="RUNNING",
+                        progress=int(progress_state.get("progress") or base_progress),
+                        message=message,
+                    )
+                except Exception as exc:
+                    logger.warning("LandSAR cluster keepalive failed for item %s: %s", item_label, exc)
+
+        progress_task = asyncio.create_task(_consume_progress())
+        keepalive_task = asyncio.create_task(_task_keepalive())
+        task_result: Dict[str, Any] = {}
+        result = None
+        run_exception_text = ""
+
+        await task_service.add_log(
+            job.task_id,
+            "INFO",
+            f"[cluster {item_index}/{total_items}] Launching {item_label} -> {managed_run_dir}",
+        )
+        dinsar_production_service.append_run_log(
+            run.run_id,
+            f"[cluster-item-start] {item_index}/{total_items} {item_label} run_key={run_key} output={managed_run_dir}",
+        )
+
+        request = RunRequest(
+            engine_code="landsar",
+            profile=run.profile_code,
+            root_dir=str(item.source_task_dir),
+            job_id=job.job_id,
+            num_to_process=1,
+            timeout_seconds=per_task_timeout or None,
+            extra={
+                **user_extra,
+                "__managed_run_dir": managed_run_dir,
+                "__managed_native_output_dir": managed_native_output_dir,
+                "__managed_work_dir": managed_work_dir,
+                "__managed_export_dir": managed_export_dir,
+                "__managed_orbit_output_dir": managed_orbit_output_dir,
+                "__managed_run_key": run_key,
+                "__source_root_override": run.source_root,
+                "__rerun_mode": "rerun_all",
+                "__cluster_item": True,
+            },
+            progress_callback=_emit_progress,
+        )
+
+        publish_error: Optional[str] = None
+        item_error: Optional[str] = None
+        try:
+            availability = await asyncio.to_thread(engine.check_available)
+            if not availability.available:
+                raise RuntimeError(f"LandSAR engine is unavailable on worker: {availability.message}")
+
+            async with _local_engine_lock("landsar"):
+                result = await asyncio.to_thread(engine.run, request)
+
+            detail = result.detail or {} if result else {}
+            task_result = ((detail.get("task_results") or [{}])[0]) if result else {}
+            result_error = str(result.error or "").strip() if result else ""
+            result_success = bool(result.success) if result else False
+            if not result or not result_success or not bool(task_result.get("success", result_success)):
+                error_message = (
+                    str(task_result.get("error") or "").strip()
+                    or result_error
+                    or run_exception_text
+                    or str(task_result.get("stderr_tail") or "").strip()
+                    or "LandSAR cluster item failed."
+                )
+                raise RuntimeError(error_message)
+
+            run_dir = os.path.normpath(
+                str(task_result.get("run_dir") or task_result.get("output_dir") or execution.output_dir)
+            )
+            if run_dir != managed_run_dir:
+                raise RuntimeError(f"LandSAR managed run dir mismatch: expected {managed_run_dir}, got {run_dir}")
+
+            primary_file = str(task_result.get("primary_file") or "").strip()
+            source_files = [
+                str(path)
+                for path in (task_result.get("source_files") or [])
+                if str(path or "").strip()
+            ]
+            native_output_dir = str(task_result.get("native_output_dir") or managed_native_output_dir).strip() or managed_native_output_dir
+            if not primary_file or not os.path.isfile(primary_file):
+                raise RuntimeError(f"LandSAR primary output is missing: {primary_file or '<empty>'}")
+            if not source_files:
+                source_files = [primary_file]
+
+            metrics = {"result_detail": detail, "task_result": task_result, "cluster_item": True}
+            manifest_path = await asyncio.to_thread(
+                dinsar_production_service.build_execution_manifest,
+                run=run,
+                item=item,
+                execution=execution,
+                primary_file=primary_file,
+                source_files=source_files,
+                native_output_dir=native_output_dir,
+                metrics=metrics,
+            )
+            await asyncio.to_thread(
+                dinsar_production_service.write_current_pointer,
+                run=run,
+                item=item,
+                execution=execution,
+                manifest_path=manifest_path,
+                primary_file=primary_file,
+                source_files=source_files,
+                native_output_dir=native_output_dir,
+            )
+            await dinsar_production_service.mark_item_completed(
+                run=run,
+                item=item,
+                execution=execution,
+                manifest_path=manifest_path,
+                metrics=metrics,
+                db=db,
+            )
+
+            try:
+                publish_result = await result_catalog_service.publish_from_sources(db, [managed_run_dir])
+                processed_count = int(publish_result.get("processed", 0) or 0)
+                failed_count = int(publish_result.get("failed", 0) or 0)
+                if processed_count > 0:
+                    await result_catalog_service.rebuild_catalog(db, full_rebuild=True)
+                if processed_count != 1 or failed_count != 0:
+                    raise RuntimeError(f"expected processed=1 failed=0, got processed={processed_count} failed={failed_count}")
+                await task_service.add_log(
+                    job.task_id,
+                    "INFO",
+                    f"[cluster {item_index}/{total_items}] Published {item_label}",
+                )
+            except Exception as exc:
+                publish_error = str(exc)
+                await task_service.add_log(
+                    job.task_id,
+                    "WARNING",
+                    f"[cluster {item_index}/{total_items}] Result catalog publish failed for {item_label}: {publish_error}",
+                )
+
+            await task_service.add_log(
+                job.task_id,
+                "INFO",
+                f"[cluster {item_index}/{total_items}] Completed {item_label}",
+            )
+            dinsar_production_service.append_run_log(run.run_id, f"[cluster-item-ok] {item_index}/{total_items} {item_label}")
+        except Exception as exc:
+            run_exception_text = str(exc)
+            item_error = run_exception_text
+            await dinsar_production_service.mark_item_failed(
+                run=run,
+                item=item,
+                execution=execution,
+                error_message=item_error,
+                db=db,
+            )
+            await task_service.add_log(
+                job.task_id,
+                "WARNING",
+                f"[cluster {item_index}/{total_items}] Failed {item_label}: {item_error}",
+            )
+            dinsar_production_service.append_run_log(
+                run.run_id,
+                f"[cluster-item-failed] {item_index}/{total_items} {item_label}: {item_error}",
+            )
+            if task_result.get("command"):
+                await task_service.add_log(job.task_id, "INFO", f"LandSAR command [{item_label}]: {task_result.get('command')}")
+            if task_result.get("stdout_tail"):
+                await task_service.add_log(job.task_id, "INFO", f"LandSAR stdout tail [{item_label}]:\n{task_result.get('stdout_tail')}")
+            if task_result.get("stderr_tail"):
+                await task_service.add_log(job.task_id, "WARNING", f"LandSAR stderr tail [{item_label}]:\n{task_result.get('stderr_tail')}")
+        finally:
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except asyncio.CancelledError:
+                pass
+            await progress_queue.put(None)
+            await progress_task
+
+        await db.refresh(run)
+        await dinsar_production_service.refresh_run_counters(run, db=db)
+        done_items = int(run.completed_items or 0) + int(run.failed_items or 0) + int(run.skipped_items or 0)
+        progress = min(99, 5 + int((done_items / max(1, int(run.total_items or 1))) * 90))
+        final_status = await dinsar_production_service.finalize_cluster_run_if_complete(
+            run,
+            db=db,
+            publish_error=publish_error,
+        )
+
+        if final_status:
+            task_status = "COMPLETED" if final_status == "COMPLETED" else ("CANCELLED" if final_status == "CANCELLED" else "FAILED")
+            await task_service.update_task(
+                job.task_id,
+                status=task_status,
+                progress=100,
+                message=run.latest_message,
+            )
+        else:
+            await task_service.update_task(
+                job.task_id,
+                status="RUNNING",
+                progress=progress,
+                message=f"LandSAR cluster progress: completed={run.completed_items} failed={run.failed_items} total={run.total_items}",
+            )
 
 
 async def _handle_water_geocode(job: SystemJobORM) -> None:
@@ -5259,6 +5629,7 @@ _HANDLERS = {
     JOB_TYPE_ISCE2_RUN: _handle_isce2_run,
     JOB_TYPE_PYINT_RUN: _handle_pyint_run,
     JOB_TYPE_LANDSAR_RUN: _handle_landsar_run,
+    JOB_TYPE_LANDSAR_CLUSTER_ITEM: _handle_landsar_cluster_item,
     JOB_TYPE_WATER_GEOCODE: _handle_water_geocode,
     JOB_TYPE_SAR_SCENE_PREPROCESS: _handle_sar_scene_preprocess,
     JOB_TYPE_WATER_FLOOD: _handle_water_flood,

@@ -54,7 +54,6 @@ const createSentinelRows = (dataInfo, language, formatYmd) => {
     field(language === 'en' ? 'Orbit File:' : '轨道文件：', dataInfo.orbit_file_path, {
       valueStyle: { wordBreak: 'break-all' },
     }),
-    field(language === 'en' ? 'ENVI Processed:' : 'ENVI已处理：', yesNo(dataInfo.is_envi_processed, language)),
   ];
 };
 
@@ -77,7 +76,6 @@ const createDefaultRows = (dataInfo, language, formatYmd) => [
   field(language === 'en' ? 'Orbit File:' : '轨道文件：', dataInfo.orbit_file_path, {
     valueStyle: { wordBreak: 'break-all' },
   }),
-  field(language === 'en' ? 'ENVI Processed:' : 'ENVI已处理：', yesNo(dataInfo.is_envi_processed, language)),
 ];
 
 const createRows = (dataInfo, language, formatYmd) => {

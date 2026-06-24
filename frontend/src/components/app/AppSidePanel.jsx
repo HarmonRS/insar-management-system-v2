@@ -10,7 +10,7 @@ import {
     LEFT_TAB_SECTION,
     PRODUCTION_WORKSPACE_ROUTE_TABS,
 } from '../../config/appConstants';
-import { getLeftTabLabel } from '../../utils/appUiHelpers';
+import { getLeftTabDescription, getLeftTabLabel } from '../../utils/appUiHelpers';
 import { PanelLoadingBody, PanelLoadingPanel } from './AppLoadingFallbacks';
 
 const LazyDataMonitorPanel = lazy(() => import('../../DataMonitorPanel'));
@@ -28,6 +28,8 @@ const LazyDinsarResultPanel = lazy(() => import('../../panels/DinsarResultPanel'
 const LazyPsinsarCatalogPanel = lazy(() => import('../PsinsarCatalogPanel'));
 const LazySbasInsarMapAnalysisPanel = lazy(() => import('../../panels/SbasInsarMapAnalysisPanel'));
 const LazyProductionWorkspace = lazy(() => import('../../ProductionWorkspace'));
+const LazyStatisticsDashboard = lazy(() => import('../../StatisticsDashboard'));
+const LazyResultExtractionPanel = lazy(() => import('../../ResultExtractionPanel'));
 
 export default function AppSidePanel({
     leftPanelWidth,
@@ -105,8 +107,8 @@ export default function AppSidePanel({
         ? '生产管理'
         : getLeftTabLabel(leftPanelTab, leftTabLabelContext);
     const standaloneDescription = isProductionWorkspace
-        ? '这里统一承载 D-InSAR 与 Gamma SBAS-InSAR 生产；旧 ISCE2/MintPy 时序入口已停用。'
-        : '当前模块已切换为独立工作区模式。';
+        ? '这里统一承载 D-InSAR 与 Gamma SBAS-InSAR 的数据准备、生产运行、质量检查和成果发布。'
+        : getLeftTabDescription(leftPanelTab);
 
     return (
         <aside
@@ -198,7 +200,6 @@ export default function AppSidePanel({
                     showRadarPageInputError={radarPanel.showRadarPageInputError}
                     radarPageInputValidationError={radarPanel.radarPageInputValidationError}
                     onSearchAll={radarPanel.onSearchAll}
-                    onShowStats={radarPanel.onShowStats}
                     onSearch={radarPanel.onSearch}
                     onReset={radarPanel.onReset}
                     onAoiModeChange={radarPanel.onAoiModeChange}
@@ -220,6 +221,14 @@ export default function AppSidePanel({
                 />
             )}
 
+            {leftPanelTab === 'statistics' && (
+                <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
+                    <Suspense fallback={<PanelLoadingBody message="正在加载综合统计..." />}>
+                        <LazyStatisticsDashboard />
+                    </Suspense>
+                </div>
+            )}
+
             {leftPanelTab === 'ingest' && (
                 <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
                     <Suspense fallback={<PanelLoadingBody message="正在加载数据接入面板..." />}>
@@ -235,7 +244,7 @@ export default function AppSidePanel({
 
             {leftPanelTab === 'asset_inventory' && (
                 <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <Suspense fallback={<PanelLoadingBody message="正在加载资产库存..." />}>
+                    <Suspense fallback={<PanelLoadingBody message="正在加载资产台账..." />}>
                         <LazyAssetInventoryPanel
                             readOnly={isReadOnlyUser}
                             onTaskStart={taskPanel.onTaskStart}
@@ -311,7 +320,7 @@ export default function AppSidePanel({
 
             {leftPanelTab === 'health' && (
                 <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
-                    <Suspense fallback={<PanelLoadingBody message="正在加载运维自检面板..." />}>
+                    <Suspense fallback={<PanelLoadingBody message="正在加载运行维护面板..." />}>
                         <LazyHealthCheckPanel
                             apiEndpoint={apiEndpoint}
                             language={language}
@@ -364,6 +373,7 @@ export default function AppSidePanel({
                         onToggleVisibility={dinsarPanel.onToggleVisibility}
                         onLabel={dinsarPanel.onLabel}
                         onAnalyze={dinsarPanel.onAnalyze}
+                        onOpenResultExtraction={() => setLeftPanelTab('result_extraction')}
                     />
                 </Suspense>
             )}
@@ -401,6 +411,14 @@ export default function AppSidePanel({
                             readOnly={isReadOnlyUser}
                             {...sbasAnalysisPanel}
                         />
+                    </Suspense>
+                </div>
+            )}
+
+            {leftPanelTab === 'result_extraction' && (
+                <div className="panel-content" style={{ flex: '1 1 auto', padding: 0, overflow: 'auto' }}>
+                    <Suspense fallback={<PanelLoadingBody message="正在加载结果提取工作台..." />}>
+                        <LazyResultExtractionPanel readOnly={isReadOnlyUser} />
                     </Suspense>
                 </div>
             )}

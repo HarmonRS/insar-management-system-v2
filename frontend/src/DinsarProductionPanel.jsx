@@ -1,16 +1,15 @@
 ﻿import React, { useCallback, useEffect, useState } from 'react';
 
-import { deleteRunLog, deleteRunRecord, getRunLog, listEngines, listRuns, listTaskRoots, previewPyintInputAssets, submitRun } from './api/dinsarProduction';
+import { deleteRunLog, deleteRunRecord, getRunLog, listEngines, listRuns, listTaskRoots, previewPyintInputAssets, submitLandsarClusterRun, submitRun } from './api/dinsarProduction';
 import { clearTaskLogs, deleteTaskLog, deleteTaskRecord, getRecentTasks, getTaskLogs } from './api/tasks';
 import { formatSatelliteFamilyLabel, inferSatelliteFamilyFromResultLike } from './utils/satelliteFamily';
 import useTaskMonitor from './hooks/useTaskMonitor';
 
 const card = {
   background: '#fff',
-  padding: '12px',
+  padding: '14px',
   borderRadius: '8px',
   border: '1px solid #e2e8f0',
-  marginBottom: '12px',
 };
 
 const EMPTY_ARRAY = [];
@@ -44,11 +43,12 @@ const ENGINE_LABEL = {
 };
 
 const TASK_TYPE_LABEL = {
-  PYINT_RUN: 'PyINT/Gamma生产',
-  LANDSAR_RUN: 'LandSAR生产',
-  IDL_RUN_DINSAR: 'ENVI生产',
+  PYINT_RUN: 'PyINT / Gamma 生产',
+  LANDSAR_RUN: 'LandSAR 生产',
+  LANDSAR_CLUSTER_RUN: 'LandSAR 集群生产',
+  IDL_RUN_DINSAR: 'ENVI 生产',
 };
-const DINSAR_PRODUCTION_TASK_TYPES = ['PYINT_RUN', 'LANDSAR_RUN', 'IDL_RUN_DINSAR'];
+const DINSAR_PRODUCTION_TASK_TYPES = ['PYINT_RUN', 'LANDSAR_RUN', 'LANDSAR_CLUSTER_RUN', 'IDL_RUN_DINSAR'];
 
 const STATUS_LABEL = {
   PENDING: '等待中',
@@ -114,7 +114,7 @@ function formatStatus(status) {
 
 function taskTypeToEngine(taskType) {
   if (taskType === 'PYINT_RUN') return 'pyint';
-  if (taskType === 'LANDSAR_RUN') return 'landsar';
+  if (taskType === 'LANDSAR_RUN' || taskType === 'LANDSAR_CLUSTER_RUN') return 'landsar';
   if (taskType === 'IDL_RUN_DINSAR') return 'sarscape';
   return '';
 }
@@ -582,6 +582,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const [timeoutSec, setTimeoutSec] = useState('');
   const [engineExtraParams, setEngineExtraParams] = useState({});
   const [submitting, setSubmitting] = useState(false);
+  const [clusterSubmitting, setClusterSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState('');
   const [submitError, setSubmitError] = useState(false);
   const [submitDialogOpen, setSubmitDialogOpen] = useState(false);
@@ -635,7 +636,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           latestRunWithTask.engine === 'pyint'
               ? 'PYINT_RUN'
               : latestRunWithTask.engine === 'landsar'
-                ? 'LANDSAR_RUN'
+                ? (latestRunWithTask.mode === 'cluster' ? 'LANDSAR_CLUSTER_RUN' : 'LANDSAR_RUN')
                 : 'IDL_RUN_DINSAR',
         status: latestRunWithTask.raw_status || latestRunWithTask.status,
         progress: latestRunWithTask.raw_status === 'COMPLETED' || latestRunWithTask.status === 'success' ? 100 : null,
@@ -645,6 +646,9 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   );
   const logTaskId = monitoredTask?.task_id || '';
   const showingRecentTask = !taskMonitor.isBusy && !!monitoredTask;
+  const activeRunCount = runs.filter(run => ['running', 'pending'].includes(String(run.status || '').toLowerCase())).length;
+  const failedRunCount = runs.filter(run => ['failed', 'FAILED'].includes(String(run.status || ''))).length;
+  const productionReady = !!currentEngineObj?.available && !!rootDir.trim() && !pyintPreviewBlocksSubmit && !readOnly;
 
   const loadEngines = useCallback(async () => {
     setEnginesLoading(true);
@@ -892,6 +896,48 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     }
   };
 
+  const handleSubmitCluster = async () => {
+    if (readOnly || clusterSubmitting) return;
+    if (selectedEngine !== 'landsar') {
+      setSubmitError(true);
+      setSubmitMsg('LandSAR 集群只支持 LandSAR 引擎。');
+      return;
+    }
+    if (!rootDir.trim()) {
+      setSubmitError(true);
+      setSubmitMsg('请输入或选择 D-InSAR 生产根目录。');
+      return;
+    }
+
+    setClusterSubmitting(true);
+    setSubmitMsg('');
+    setSubmitError(false);
+    try {
+      const extra = buildExtraPayload(currentParamSchema, engineExtraParams);
+      const result = await submitLandsarClusterRun({
+        engine_code: 'landsar',
+        profile: selectedProfile,
+        root_dir: rootDir.trim(),
+        num_to_process: Number(numToProcess) || 0,
+        rerun_mode: rerunMode,
+        timeout_seconds: timeoutSec ? Number(timeoutSec) : null,
+        extra,
+      });
+      const taskCount = result?.selected_task_count ? `，选中 ${result.selected_task_count} 个 pair` : '';
+      const skippedCompleted = Number(result?.skipped_completed_count || 0);
+      const skippedText = skippedCompleted > 0 ? `，跳过 ${skippedCompleted} 个已完成 pair` : '';
+      setSubmitError(false);
+      setSubmitMsg(`LandSAR 集群任务已入队：${result.task_id}${taskCount}${skippedText}`);
+      if (onJobQueued) onJobQueued(result.task_id);
+      await refreshMonitor();
+    } catch (err) {
+      setSubmitError(true);
+      setSubmitMsg(`LandSAR 集群提交失败：${err?.response?.data?.detail || err.message}`);
+    } finally {
+      setClusterSubmitting(false);
+    }
+  };
+
   const handleViewLog = async run => {
     const runId = typeof run === 'string' ? run : (run?.run_id || run?.task_id || '');
     const source = typeof run !== 'string' && run?.log_source === 'task' ? 'task' : 'run';
@@ -1001,9 +1047,10 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   }, [logModal.open, logModal.runId, logTaskId, readOnly, refreshMonitor, runLogDeletingId]);
 
   const isSubmitDisabled = readOnly || submitting || !currentEngineObj?.available || !rootDir.trim() || pyintPreviewBlocksSubmit;
+  const isClusterSubmitDisabled = readOnly || clusterSubmitting || selectedEngine !== 'landsar' || !rootDir.trim();
 
   return (
-    <div style={{ padding: '16px 0', width: '100%' }}>
+    <div className="dinsar-production-shell">
       {logModal.open && (
         <div
           style={{
@@ -1217,7 +1264,39 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
         </div>
       )}
 
-      <div style={card}>
+      <div className="dinsar-production-header">
+        <div>
+          <h3>D-InSAR 生产运行</h3>
+          <p>选择生产引擎、任务根目录和处理模板，完成预检后提交运行；监控区用于查看近期 Task、日志和审计记录。</p>
+        </div>
+        <div className="dinsar-production-summary">
+          <div className={`dinsar-production-signal ${productionReady ? 'ok' : 'warn'}`}>
+            <span>提交状态</span>
+            <strong>{productionReady ? '可提交' : readOnly ? '只读' : '待检查'}</strong>
+          </div>
+          <div className="dinsar-production-signal">
+            <span>当前引擎</span>
+            <strong>{formatEngineLabel(selectedEngine, currentEngineObj?.engine_label)}</strong>
+          </div>
+          <div className="dinsar-production-signal">
+            <span>运行中</span>
+            <strong>{activeRunCount}</strong>
+          </div>
+          <div className={`dinsar-production-signal ${failedRunCount > 0 ? 'warn' : ''}`}>
+            <span>失败记录</span>
+            <strong>{failedRunCount}</strong>
+          </div>
+        </div>
+      </div>
+
+      <section className="dinsar-production-section">
+        <div className="dinsar-production-section-header">
+          <div>
+            <h4>引擎与能力</h4>
+            <p>先确认生产引擎可用，再选择对应处理模板。</p>
+          </div>
+        </div>
+        <div style={card}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <strong style={{ fontSize: 14 }}>引擎状态</strong>
           <button
@@ -1249,8 +1328,16 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           ))}
         </div>
       </div>
+      </section>
 
-      <div style={card}>
+      <section className="dinsar-production-section">
+        <div className="dinsar-production-section-header">
+          <div>
+            <h4>任务准备与提交</h4>
+            <p>生产任务根目录、参数模板和预检结果共同决定是否允许提交。</p>
+          </div>
+        </div>
+        <div style={card}>
         <strong style={{ fontSize: 14, display: 'block', marginBottom: 10 }}>提交生产任务</strong>
 
         <div style={{ display: 'flex', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
@@ -1635,15 +1722,48 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           >
             {submitting ? '提交中...' : '提交任务'}
           </button>
+          {selectedEngine === 'landsar' && (
+            <button
+              onClick={handleSubmitCluster}
+              disabled={isClusterSubmitDisabled}
+              title="按 pair 拆分为 LANDSAR_CLUSTER_ITEM，由本机或远端 LandSAR worker 领取执行。"
+              style={{
+                padding: '6px 16px',
+                borderRadius: 6,
+                border: '1px solid #0f766e',
+                background: isClusterSubmitDisabled ? '#f1f5f9' : '#0f766e',
+                color: isClusterSubmitDisabled ? '#94a3b8' : '#fff',
+                cursor: isClusterSubmitDisabled ? 'not-allowed' : 'pointer',
+                fontSize: 13,
+                fontWeight: 600,
+              }}
+            >
+              {clusterSubmitting ? '集群入队中...' : '提交 LandSAR 集群'}
+            </button>
+          )}
           {submitMsg && (
             <span style={{ fontSize: 12, color: submitError ? '#ef4444' : '#16a34a' }}>
               {submitMsg}
             </span>
           )}
         </div>
+        {selectedEngine === 'landsar' && (
+          <div style={{ marginTop: 8, fontSize: 12, color: '#64748b', lineHeight: 1.6 }}>
+            集群模式按 pair 拆分队列任务。远端服务器需启动只领取 LANDSAR_CLUSTER_ITEM 的 worker；
+            本地 LandSAR 提交流程保持不变。
+          </div>
+        )}
       </div>
+      </section>
 
-      <div style={card}>
+      <section className="dinsar-production-section">
+        <div className="dinsar-production-section-header">
+          <div>
+            <h4>运行监控与审计记录</h4>
+            <p>监控近期 Task、查看日志，并保留运行记录删除等审计类操作。</p>
+          </div>
+        </div>
+        <div style={card}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <strong style={{ fontSize: 14 }}>运行监控</strong>
           <button
@@ -1703,7 +1823,6 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                       height: '100%',
                       width: `${monitoredTask.progress}%`,
                       background: showingRecentTask ? '#3b82f6' : '#f59e0b',
-                      transition: 'width 0.3s',
                     }}
                   />
                 </div>
@@ -1912,6 +2031,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
           </div>
         )}
       </div>
+      </section>
     </div>
   );
 }

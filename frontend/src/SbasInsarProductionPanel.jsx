@@ -285,33 +285,33 @@ function RuntimeStatusPanel({ status }) {
   return (
     <div style={{ border: '1px solid #bae6fd', borderRadius: 8, padding: 10, background: '#f0f9ff' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-        <div style={valueStyle}>Runtime Status</div>
+        <div style={valueStyle}>运行状态</div>
         <StatusBadge value={status.active ? 'RUNNING' : (status.run_status || 'IDLE')} />
       </div>
       <div style={{ ...metricGridStyle, marginTop: 8 }}>
-        <Metric label="Current step" value={status.current_step?.id || '-'} />
-        <Metric label="Workflow updated" value={status.workflow_updated_at || '-'} />
-        <Metric label="Latest log" value={status.latest_log_updated_at || '-'} />
+        <Metric label="当前步骤" value={status.current_step?.id || '-'} />
+        <Metric label="Workflow 更新时间" value={status.workflow_updated_at || '-'} />
+        <Metric label="最近日志" value={status.latest_log_updated_at || '-'} />
         <Metric
-          label="Common overlap"
+          label="公共重叠率"
           value={`${formatPercent(gate.common_overlap_ratio)} / ${formatPercent(gate.min_common_overlap_ratio)}`}
         />
       </div>
       {(currentTask || currentJob) && (
         <div style={{ ...mutedStyle, marginTop: 8, wordBreak: 'break-word' }}>
-          Task: {currentTask ? `${currentTask.task_type || '-'} ${currentTask.status || '-'} ${currentTask.progress ?? 0}%` : '-'}
+          Task：{currentTask ? `${currentTask.task_type || '-'} ${currentTask.status || '-'} ${currentTask.progress ?? 0}%` : '-'}
           {'; '}
-          Job: {currentJob ? `${currentJob.job_type || '-'} ${currentJob.status || '-'}` : '-'}
+          Job：{currentJob ? `${currentJob.job_type || '-'} ${currentJob.status || '-'}` : '-'}
         </div>
       )}
       {latestTaskLog && (
         <div style={{ ...mutedStyle, marginTop: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-          DB log: [{latestTaskLog.level || 'INFO'}] {latestTaskLog.message}
+          DB 日志：[{latestTaskLog.level || 'INFO'}] {latestTaskLog.message}
         </div>
       )}
       {latestFileLog?.tail && (
         <details style={{ ...compactDetailsStyle, marginTop: 8, borderColor: '#bae6fd' }}>
-          <summary style={compactSummaryStyle}>{latestFileLog.name || 'latest log'}</summary>
+          <summary style={compactSummaryStyle}>{latestFileLog.name || '最近日志'}</summary>
           <pre
             style={{
               margin: '8px 0 0',
@@ -329,10 +329,10 @@ function RuntimeStatusPanel({ status }) {
         </details>
       )}
       <details style={{ ...compactDetailsStyle, marginTop: 8, borderColor: '#bae6fd' }}>
-        <summary style={compactSummaryStyle}>WSL processes ({wslProcesses.length})</summary>
+        <summary style={compactSummaryStyle}>WSL 进程（{wslProcesses.length}）</summary>
         <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
           {wslProcesses.length === 0 && (
-            <div style={mutedStyle}>{status.wsl_processes?.error || 'No matching WSL process reported.'}</div>
+            <div style={mutedStyle}>{status.wsl_processes?.error || '未发现匹配的 WSL 进程。'}</div>
           )}
           {wslProcesses.map(item => (
             <div key={`${item.pid}-${item.command}`} style={{ ...mutedStyle, fontFamily: 'monospace', wordBreak: 'break-word' }}>
@@ -1021,7 +1021,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
         setLandsarRunDetail(detailData);
       }
       if (data?.task_id) {
-        onTaskStart?.(data.task_id, 'LandSAR SBAS workflow queued.', {
+        onTaskStart?.(data.task_id, 'LandSAR SBAS Workflow 已入队。', {
           taskType: data.job_type || 'SBAS_LANDSAR_WORKFLOW',
           nonBlocking: true,
         });
@@ -1070,7 +1070,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
       const data = await submitSbasInsarWorkflowJob(selectedRunId, workflowPayload);
       setWorkflowJob(data);
       if (data?.task_id) {
-        onTaskStart?.(data.task_id, 'Gamma SBAS workflow queued.', {
+        onTaskStart?.(data.task_id, 'Gamma SBAS Workflow 已入队。', {
           taskType: data.job_type || 'SBAS_GAMMA_WORKFLOW',
           nonBlocking: true,
         });
@@ -1163,7 +1163,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
       });
       setCoregistrationJob(data);
       if (data?.task_id) {
-        onTaskStart?.(data.task_id, 'SBAS coregistration task queued.', {
+        onTaskStart?.(data.task_id, 'SBAS 共参考配准 Task 已入队。', {
           taskType: data.job_type || 'SBAS_COREGISTRATION',
           nonBlocking: true,
         });
@@ -1210,7 +1210,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
       });
       setRdcDemJob(data);
       if (data?.task_id) {
-        onTaskStart?.(data.task_id, 'SBAS RDC DEM task queued.', {
+        onTaskStart?.(data.task_id, 'SBAS RDC DEM Task 已入队。', {
           taskType: data.job_type || 'SBAS_RDC_DEM',
           nonBlocking: true,
         });
@@ -1261,7 +1261,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
       });
       setInterferogramJob(data);
       if (data?.task_id) {
-        onTaskStart?.(data.task_id, 'SBAS interferogram task queued.', {
+        onTaskStart?.(data.task_id, 'SBAS 干涉图 Task 已入队。', {
           taskType: data.job_type || 'SBAS_INTERFEROGRAMS',
           nonBlocking: true,
         });
@@ -1310,7 +1310,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
       });
       setIptaTimeseriesJob(data);
       if (data?.task_id) {
-        onTaskStart?.(data.task_id, 'SBAS IPTA timeseries task queued.', {
+        onTaskStart?.(data.task_id, 'SBAS IPTA 时序 Task 已入队。', {
           taskType: data.job_type || 'SBAS_IPTA_TIMESERIES',
           nonBlocking: true,
         });
@@ -1379,7 +1379,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
         }}
         style={{ border: '1px solid #0369a1', borderRadius: 8, background: '#e0f2fe', color: '#0369a1', padding: '7px 11px', fontWeight: 750 }}
       >
-        Open Runtime Status
+        打开运行状态
       </button>
     </div>
   ) : null;
@@ -2058,7 +2058,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
                   </div>
                   {running && (
                     <div style={{ marginTop: 6, color: '#0369a1', fontSize: 12, fontWeight: 700 }}>
-                      正在运行，已自动打开右侧 Runtime Status
+                      正在运行，已自动打开右侧运行状态
                     </div>
                   )}
                 </button>
@@ -2153,11 +2153,11 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
                         color: '#9a3412',
                         fontSize: 12,
                       }}>
-                        Sentinel-1 Gamma SBAS is planning-only. Stack discovery, audit manifest and run record are enabled; Gamma execution is disabled until the S1 TOPS/SBAS scripts are verified.
+                        Sentinel-1 Gamma SBAS 当前仅开放规划能力：可进行栈发现、审计 Manifest 和 Run 记录管理；Gamma 执行需等待 S1 TOPS/SBAS 脚本验证完成后启用。
                       </div>
                     )}
                     <div style={{ ...mutedStyle, marginTop: 6 }}>
-                      专家文档目录 + manifest + WSL runner 主路径。旧分阶段执行仅作为兼容桥接。
+                      专家文档目录 + manifest + WSL runner 主路径，生产执行以当前统一工作流为准。
                     </div>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
                       <button
@@ -2237,7 +2237,7 @@ export default function SbasInsarProductionPanel({ readOnly = false, onTaskStart
                       <details style={{ ...compactDetailsStyle, marginTop: 10 }}>
                         <summary style={compactSummaryStyle}>Expert document path ({expertDocumentSteps.length})</summary>
                         <div style={{ ...mutedStyle, marginTop: 4 }}>
-                          {expertDocumentSteps.length} sections from the LT1 Gamma SBAS expert document. Commands are used as the acceptance checklist; completed workflow steps must pass the expert command audit.
+                          已载入 LT1 Gamma SBAS 专家文档中的 {expertDocumentSteps.length} 个章节。命令清单作为验收检查项，已完成的 Workflow 步骤必须通过专家命令审计。
                         </div>
                         <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
                           {expertDocumentSteps.map(item => {

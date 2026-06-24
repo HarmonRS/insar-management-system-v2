@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import apiClient from '../api/client';
 import { normalizeTaskStatus } from '../utils/appUiHelpers';
 
+const ACTIVE_TASK_FALLBACK_POLL_MS = 10000;
+
 export default function useGlobalTaskControl({
   currentUser,
   licenseOk,
@@ -135,7 +137,7 @@ export default function useGlobalTaskControl({
         es.close();
         es = null;
         if (!fallbackInterval) {
-          fallbackInterval = setInterval(syncActiveTasks, 5000);
+          fallbackInterval = setInterval(syncActiveTasks, ACTIVE_TASK_FALLBACK_POLL_MS);
         }
       };
     };

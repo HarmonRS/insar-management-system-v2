@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -32,6 +33,13 @@ _PUBLIC_KEY_B64 = "QOpR1c3bONDwOzrj3IVTogE1ZHIphpwxJY8nhWa09yw="
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 _BACKEND_DIR = os.path.dirname(_APP_DIR)
 LICENSE_PATH_DEFAULT = os.path.join(_BACKEND_DIR, "license", "license.lic")
+LICENSE_STATUS_CACHE_SECONDS = int(os.getenv("LICENSE_STATUS_CACHE_SECONDS", "30"))
+_LICENSE_STATUS_CACHE: Dict[str, Any] = {
+    "path": None,
+    "mtime": None,
+    "checked_at": 0.0,
+    "payload": None,
+}
 
 
 def _now_utc() -> datetime:
@@ -86,47 +94,71 @@ def _get_machine_fingerprint() -> str:
 
 # ── 授权验证 ──────────────────────────────────────────────────────────────────
 
+def _license_result(result: Dict[str, Any], *, use_cache: bool, path: str, mtime: Optional[float]) -> Dict[str, Any]:
+    if use_cache:
+        _LICENSE_STATUS_CACHE.update({
+            "path": path,
+            "mtime": mtime,
+            "checked_at": time.monotonic(),
+            "payload": dict(result),
+        })
+    return result
+
+
 def check_license(license_path: Optional[str] = None) -> Dict[str, Any]:
+    use_cache = license_path is None
     license_path = license_path or settings.LICENSE_PATH or LICENSE_PATH_DEFAULT
+    mtime = os.path.getmtime(license_path) if os.path.exists(license_path) else None
+
+    if use_cache:
+        cached = _LICENSE_STATUS_CACHE.get("payload")
+        cache_age = time.monotonic() - float(_LICENSE_STATUS_CACHE.get("checked_at") or 0.0)
+        if (
+            cached is not None
+            and _LICENSE_STATUS_CACHE.get("path") == license_path
+            and _LICENSE_STATUS_CACHE.get("mtime") == mtime
+            and cache_age <= LICENSE_STATUS_CACHE_SECONDS
+        ):
+            return dict(cached)
 
     if not os.path.exists(license_path):
-        return {"ok": False, "reason": "未找到授权文件"}
+        return _license_result({"ok": False, "reason": "未找到授权文件"}, use_cache=use_cache, path=license_path, mtime=mtime)
 
     try:
         blob = open(license_path, "rb").read().strip()
         parts = blob.split(b"|", 2)
         if len(parts) != 3 or parts[0] != b"LIC2":
-            return {"ok": False, "reason": "授权文件格式无效"}
+            return _license_result({"ok": False, "reason": "授权文件格式无效"}, use_cache=use_cache, path=license_path, mtime=mtime)
 
         _, sig_b64, payload_b64 = parts
         pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(_PUBLIC_KEY_B64))
         pub.verify(base64.b64decode(sig_b64), payload_b64)
         payload = json.loads(base64.b64decode(payload_b64))
     except InvalidSignature:
-        return {"ok": False, "reason": "授权文件签名无效（可能已被篡改）"}
+        return _license_result({"ok": False, "reason": "授权文件签名无效（可能已被篡改）"}, use_cache=use_cache, path=license_path, mtime=mtime)
     except Exception as e:
-        return {"ok": False, "reason": f"授权文件解析失败: {e}"}
+        return _license_result({"ok": False, "reason": f"授权文件解析失败: {e}"}, use_cache=use_cache, path=license_path, mtime=mtime)
 
     fp_expected = payload.get("fingerprint")
     fp_actual   = _get_machine_fingerprint()
     if not fp_expected or fp_expected != fp_actual:
-        return {"ok": False, "reason": "机器指纹不匹配"}
+        return _license_result({"ok": False, "reason": "机器指纹不匹配"}, use_cache=use_cache, path=license_path, mtime=mtime)
 
     expires_at = payload.get("expires_at")
     if not expires_at:
-        return {"ok": False, "reason": "授权文件缺少有效期"}
+        return _license_result({"ok": False, "reason": "授权文件缺少有效期"}, use_cache=use_cache, path=license_path, mtime=mtime)
     try:
         expires_dt = datetime.fromisoformat(expires_at)
     except Exception:
-        return {"ok": False, "reason": "有效期格式错误"}
+        return _license_result({"ok": False, "reason": "有效期格式错误"}, use_cache=use_cache, path=license_path, mtime=mtime)
 
     if _now_utc() > expires_dt:
-        return {"ok": False, "reason": "授权已过期"}
+        return _license_result({"ok": False, "reason": "授权已过期"}, use_cache=use_cache, path=license_path, mtime=mtime)
 
-    return {
+    return _license_result({
         "ok":          True,
         "issued_to":   payload.get("issued_to"),
         "expires_at":  expires_at,
         "fingerprint": fp_actual,
         "license_path": license_path,
-    }
+    }, use_cache=use_cache, path=license_path, mtime=mtime)

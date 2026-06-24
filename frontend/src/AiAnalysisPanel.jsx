@@ -26,7 +26,6 @@ export default function AiAnalysisPanel({ readOnly = false, onJobQueued }) {
     taskTypes: ['AI_DIAGNOSIS'],
     showRecent: true,
     recentLimit: 1,
-    pollRecentMs: 10000,
   });
 
   // 状态

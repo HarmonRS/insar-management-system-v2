@@ -13,7 +13,6 @@ const HazardPointPanel = ({ onPointClick, onToggleVisibility, isVisible, onScanC
         taskTypes: ['SCAN_HAZARD'],
         showRecent: true,
         recentLimit: 1,
-        pollRecentMs: 10000,
     });
     const scanBusy = isLoading || scanTaskMonitor.isBusy;
 

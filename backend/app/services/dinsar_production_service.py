@@ -35,6 +35,7 @@ from .workflow_service import workflow_service
 TASK_TYPE_DINSAR_PRODUCTION = "IDL_RUN_DINSAR"
 TASK_TYPE_PYINT_DINSAR_PRODUCTION = "PYINT_RUN"
 TASK_TYPE_LANDSAR_DINSAR_PRODUCTION = "LANDSAR_RUN"
+TASK_TYPE_LANDSAR_CLUSTER_PRODUCTION = "LANDSAR_CLUSTER_RUN"
 RUN_STATUS_PENDING = "PENDING"
 RUN_STATUS_RUNNING = "RUNNING"
 RUN_STATUS_COMPLETED = "COMPLETED"
@@ -775,6 +776,172 @@ class DinsarProductionService:
             "rerun_mode": selection["rerun_mode"],
         }
 
+    async def create_landsar_cluster_run(
+        self,
+        *,
+        profile_code: str,
+        root_dir: str,
+        num_to_process: int,
+        rerun_mode: Optional[str],
+        timeout_seconds: Optional[int],
+        extra: Optional[Dict[str, Any]],
+        created_by: Optional[str],
+        max_attempts: int,
+        db: AsyncSession,
+    ) -> Dict[str, Any]:
+        normalized_engine = "landsar"
+        normalized_profile = str(profile_code or "").strip()
+        normalized_root = _normalize_dir(root_dir, "root_dir")
+        selection = await asyncio.to_thread(
+            _select_run_items,
+            normalized_root,
+            engine_code=normalized_engine,
+            profile_code=normalized_profile,
+            num_to_process=max(0, int(num_to_process or 0)),
+            rerun_mode=rerun_mode,
+        )
+        item_payloads = selection["items"]
+        if not item_payloads:
+            if (
+                selection["discovered_task_count"] > 0
+                and selection["skipped_completed_count"] > 0
+                and selection["rerun_mode"] == RERUN_MODE_UNFINISHED_ONLY
+            ):
+                raise ValueError(
+                    f"All discovered Task_* directories already have completed "
+                    f"landsar/{normalized_profile} results under: {normalized_root}"
+                )
+            raise ValueError(f"No Task_* directories found under: {normalized_root}")
+
+        run_id = str(uuid.uuid4())
+        mode = "cluster"
+        task_name = f"D-InSAR production: landsar/{normalized_profile} cluster"
+        task_params = {
+            "engine_code": normalized_engine,
+            "profile": normalized_profile,
+            "root_dir": normalized_root,
+            "num_to_process": int(num_to_process or 0),
+            "rerun_mode": selection["rerun_mode"],
+            "timeout_seconds": timeout_seconds,
+            "extra": dict(extra or {}),
+            "mode": mode,
+            "production_run_id": run_id,
+            "cluster_job_type": "LANDSAR_CLUSTER_ITEM",
+        }
+
+        task_id: Optional[str] = None
+        created_items: List[DinsarProductionRunItemORM] = []
+        try:
+            task_id = await task_service.create_task(
+                task_type=TASK_TYPE_LANDSAR_CLUSTER_PRODUCTION,
+                task_name=task_name,
+                params=task_params,
+                db=db,
+            )
+
+            run = DinsarProductionRunORM(
+                run_id=run_id,
+                task_id=task_id,
+                product_family="dinsar",
+                engine_code=normalized_engine,
+                profile_code=normalized_profile,
+                mode=mode,
+                source_root=normalized_root,
+                publish_root_dir=settings.DINSAR_PRODUCT_DIR,
+                status=RUN_STATUS_PENDING,
+                cancel_requested=False,
+                total_items=len(item_payloads),
+                completed_items=0,
+                failed_items=0,
+                skipped_items=0,
+                latest_message="Queued LandSAR cluster items",
+                params_json=task_params,
+                summary_json={
+                    "phase": "queued",
+                    "selected_task_count": len(item_payloads),
+                    "discovered_task_count": selection["discovered_task_count"],
+                    "skipped_completed_count": selection["skipped_completed_count"],
+                    "rerun_mode": selection["rerun_mode"],
+                    "product_family": "dinsar",
+                    "publish_root_dir": settings.DINSAR_PRODUCT_DIR,
+                    "cluster_job_type": "LANDSAR_CLUSTER_ITEM",
+                },
+                created_by=created_by,
+            )
+            db.add(run)
+            await db.flush()
+
+            for item_payload in item_payloads:
+                item = DinsarProductionRunItemORM(
+                    run_id=run_id,
+                    order_index=item_payload["order_index"],
+                    task_name=item_payload["task_name"],
+                    task_alias=item_payload["task_alias"],
+                    pair_key=item_payload["pair_key"],
+                    pair_uid=item_payload["pair_uid"],
+                    network_run_id=item_payload["network_run_id"],
+                    network_edge_id=item_payload["network_edge_id"],
+                    policy_version=item_payload["policy_version"],
+                    selection_strategy=item_payload["selection_strategy"],
+                    source_task_dir=item_payload["source_task_dir"],
+                    results_root_dir=item_payload["results_root_dir"],
+                    status=RUN_ITEM_STATUS_PENDING,
+                )
+                db.add(item)
+                created_items.append(item)
+
+            await db.flush()
+
+            from .job_queue_service import job_queue_service
+
+            for item in created_items:
+                await job_queue_service.create_job(
+                    "LANDSAR_CLUSTER_ITEM",
+                    payload={
+                        "production_run_id": run_id,
+                        "item_id": item.id,
+                    },
+                    task_id=task_id,
+                    priority=0,
+                    max_attempts=max(1, int(max_attempts or 1)),
+                    db=db,
+                )
+
+            await db.commit()
+            await db.refresh(run)
+        except Exception as exc:
+            await db.rollback()
+            if task_id:
+                try:
+                    await task_service.update_task(
+                        task_id,
+                        status="FAILED",
+                        message=f"Failed to create LandSAR cluster run: {exc}",
+                    )
+                except Exception:
+                    pass
+            raise
+
+        await asyncio.to_thread(
+            _append_run_log_sync,
+            run_id,
+            (
+                f"[cluster-queued] run_id={run_id} profile={normalized_profile} root={normalized_root} "
+                f"items={len(item_payloads)} rerun_mode={selection['rerun_mode']} "
+                f"skipped_completed={selection['skipped_completed_count']}"
+            ),
+        )
+        return {
+            "run_id": run_id,
+            "task_id": task_id,
+            "workflow_run_id": None,
+            "status": run.status,
+            "selected_task_count": len(item_payloads),
+            "discovered_task_count": selection["discovered_task_count"],
+            "skipped_completed_count": selection["skipped_completed_count"],
+            "rerun_mode": selection["rerun_mode"],
+        }
+
     async def list_runs(
         self,
         db: AsyncSession,
@@ -922,6 +1089,80 @@ class DinsarProductionService:
         if latest_message is not None:
             run.latest_message = latest_message
         return run
+
+    async def finalize_cluster_run_if_complete(
+        self,
+        run: DinsarProductionRunORM,
+        *,
+        db: AsyncSession,
+        publish_error: Optional[str] = None,
+    ) -> Optional[str]:
+        rows = await db.execute(
+            select(DinsarProductionRunItemORM.status, func.count(DinsarProductionRunItemORM.id))
+            .where(DinsarProductionRunItemORM.run_id == run.run_id)
+            .group_by(DinsarProductionRunItemORM.status)
+        )
+        counts = {str(status or "").upper(): int(count or 0) for status, count in rows.fetchall()}
+        total_items = int(run.total_items or 0)
+        completed = counts.get(RUN_ITEM_STATUS_COMPLETED, 0)
+        failed = counts.get(RUN_ITEM_STATUS_FAILED, 0)
+        skipped = counts.get(RUN_ITEM_STATUS_SKIPPED, 0)
+        cancelled = counts.get(RUN_ITEM_STATUS_CANCELLED, 0)
+        terminal_count = completed + failed + skipped + cancelled
+
+        run.completed_items = completed
+        run.failed_items = failed
+        run.skipped_items = skipped
+        if total_items <= 0 or terminal_count < total_items:
+            run.status = RUN_STATUS_RUNNING
+            run.latest_message = (
+                f"LandSAR cluster running: completed={completed} failed={failed} "
+                f"skipped={skipped} cancelled={cancelled} total={total_items}"
+            )
+            await db.commit()
+            return None
+
+        if publish_error:
+            final_status = RUN_STATUS_FAILED
+            latest_message = f"LandSAR cluster publish failed: {publish_error}"
+        elif cancelled > 0 or bool(run.cancel_requested):
+            final_status = RUN_STATUS_CANCELLED
+            latest_message = (
+                f"LandSAR cluster cancelled. completed={completed} failed={failed} "
+                f"cancelled={cancelled} total={total_items}"
+            )
+        elif failed > 0:
+            final_status = RUN_STATUS_FAILED
+            latest_message = (
+                f"LandSAR cluster finished with failures. completed={completed} "
+                f"failed={failed} total={total_items}"
+            )
+        else:
+            final_status = RUN_STATUS_COMPLETED
+            latest_message = (
+                f"LandSAR cluster completed. completed={completed} failed={failed} total={total_items}"
+            )
+
+        summary_payload = dict(run.summary_json or {})
+        summary_payload.update(
+            {
+                "phase": "completed",
+                "cluster": True,
+                "total_items": total_items,
+                "completed_items": completed,
+                "failed_items": failed,
+                "skipped_items": skipped,
+                "cancelled_items": cancelled,
+                "publish_error": publish_error,
+            }
+        )
+        run.status = final_status
+        run.summary_json = summary_payload
+        run.latest_message = latest_message
+        run.ended_at = _utcnow()
+        await db.commit()
+        await asyncio.to_thread(_append_run_log_sync, run.run_id, f"[cluster-finish] status={final_status} message={latest_message}")
+        return final_status
 
     async def mark_run_started(
         self,

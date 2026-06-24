@@ -1,0 +1,22 @@
+# 2026-06-23 文档归档说明
+
+本目录保存 2026-06-23 文档治理时从 `docs/` 根目录移出的历史、实验、过程和阶段性文档。
+
+归档原则：
+
+- `docs/INDEX.md` 列出的文档继续作为当前有效事实入口。
+- 本目录文档只作为历史参考，不再直接指导当前系统设计、部署或生产操作。
+- 如果需要重新启用某份归档文档，必须先复核其内容与当前代码、数据库结构、生产流程是否一致，再移回 `docs/` 并加入 `docs/INDEX.md`。
+
+本次归档文件：
+
+- `GAMMA_SBAS_EXPERT_CORRECT_IMPLEMENTATION_ROUTE_20260607.md`
+- `GAMMA_SBAS_EXPERT_WORKFLOW_AUDIT_20260608.md`
+- `GAMMA_SBAS_RUNTIME_OBSERVATIONS_20260611.md`
+- `GAMMA_SBAS_ZERO_RATE_VALID_VISUALIZATION_DESIGN_20260608.md`
+- `GF3_WATER_EXTRACTION_INTEGRATION_20260615.md`
+- `LANDSAR_SBAS_ARCHIVE_20260606.md`
+- `LANDSAR_SBAS_INSAR_INTEGRATION_DESIGN.md`
+- `LandSAR_API服务接入采购需求说明书_20260604.md`
+- `SBAS_INSAR_GAMMA_EXPERT_WORKFLOW_REVIEW_20260603.md`
+- `SENTINEL1_GAMMA_SBAS_NO_STITCH_DESIGN.md`

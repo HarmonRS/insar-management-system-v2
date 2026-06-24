@@ -3,7 +3,7 @@ import os
 import socket
 import uuid
 import time
-from typing import Set
+from typing import Optional, Set
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy import func
@@ -24,6 +24,15 @@ IDL_JOB_TYPES = {
     "WATER_FLOOD",
     "TIMESERIES_RUN_SARSCAPE_SBAS",
 }
+
+
+def _parse_allowed_job_types(raw_value: str) -> Optional[Set[str]]:
+    values = {
+        part.strip().upper()
+        for part in str(raw_value or "").replace(";", ",").split(",")
+        if part.strip()
+    }
+    return values or None
 
 
 def _default_worker_id() -> str:
@@ -129,6 +138,7 @@ async def run_worker_loop(
     concurrency = max(1, int(concurrency))
     sem = asyncio.Semaphore(concurrency)
     active: Set[asyncio.Task] = set()
+    allowed_job_types = _parse_allowed_job_types(getattr(settings, "JOB_WORKER_ALLOWED_TYPES", ""))
     job_heartbeat_interval = float(settings.JOB_WORKER_JOB_HEARTBEAT_INTERVAL)
     stale_recover_interval = float(settings.JOB_WORKER_STALE_RECOVER_INTERVAL)
     stale_running_seconds = int(settings.JOB_WORKER_STALE_RUNNING_SECONDS)
@@ -187,7 +197,10 @@ async def run_worker_loop(
                 print(f"[WARN] worker poll: {exc}")
 
         if len(active) < concurrency:
-            job = await job_queue_service.claim_next_job(worker_id)
+            job = await job_queue_service.claim_next_job(
+                worker_id,
+                allowed_job_types=allowed_job_types,
+            )
             if job:
                 task = asyncio.create_task(_wrap(job))
                 active.add(task)

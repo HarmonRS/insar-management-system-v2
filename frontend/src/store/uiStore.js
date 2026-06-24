@@ -7,10 +7,7 @@ const s = (set, key) => (v) =>
 
 export const useUiStore = create((set) => ({
     leftPanelTab: 'ingest',
-    leftPanelWidth: 380,
-    rightPanelWidth: 360,
-    isResizing: false,
-    showStats: false,
+    leftPanelWidth: 620,
     showDataInfo: false,
     selectedDataInfo: null,
     showDates: false,
@@ -19,9 +16,6 @@ export const useUiStore = create((set) => ({
     logs: [],
     setLeftPanelTab: s(set, 'leftPanelTab'),
     setLeftPanelWidth: s(set, 'leftPanelWidth'),
-    setRightPanelWidth: s(set, 'rightPanelWidth'),
-    setIsResizing: s(set, 'isResizing'),
-    setShowStats: s(set, 'showStats'),
     setShowDataInfo: s(set, 'showDataInfo'),
     setSelectedDataInfo: s(set, 'selectedDataInfo'),
     setShowDates: s(set, 'showDates'),

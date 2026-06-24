@@ -18,6 +18,9 @@ export const runWslCheck = (payload = {}) =>
 export const submitRun = (payload) =>
   apiClient.post('/dinsar-production/run', payload).then(r => r.data);
 
+export const submitLandsarClusterRun = (payload) =>
+  apiClient.post('/dinsar-production/landsar-cluster/run', payload).then(r => r.data);
+
 // 运行历史
 export const listRuns = (limit = 20, offset = 0) =>
   apiClient.get(

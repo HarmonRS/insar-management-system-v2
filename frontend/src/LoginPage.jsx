@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import apiClient from './api/client';
 
-
 const LoginPage = ({ onLoginSuccess }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -104,6 +103,5 @@ const LoginPage = ({ onLoginSuccess }) => {
     </div>
   );
 };
-
 
 export default LoginPage;

@@ -61,9 +61,6 @@
   { zh: '有精轨：全部', en: 'Precise Orbit: All' },
   { zh: '有精轨：是', en: 'Precise Orbit: Yes' },
   { zh: '有精轨：否', en: 'Precise Orbit: No' },
-  { zh: 'ENVI已处理：全部', en: 'ENVI Processed: All' },
-  { zh: 'ENVI已处理：是', en: 'ENVI Processed: Yes' },
-  { zh: 'ENVI已处理：否', en: 'ENVI Processed: No' },
   { zh: '源数据检索选项加载中...', en: 'Loading source data search options...' },
   { zh: '无源数据', en: 'No source data.' },
 
@@ -116,7 +113,6 @@
   { zh: '轨道方向：', en: 'Orbit Direction:' },
   { zh: '有精轨：', en: 'Has Orbit:' },
   { zh: '轨道文件：', en: 'Orbit File:' },
-  { zh: 'ENVI已处理：', en: 'ENVI Processed:' },
   { zh: '关闭', en: 'Close' },
 
   { zh: '是', en: 'Yes' },

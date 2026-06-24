@@ -42,6 +42,12 @@ LANDSAR_PRODUCTION_JOB_MAX_ATTEMPTS = read_int_env(
     minimum=1,
     maximum=10,
 )
+LANDSAR_CLUSTER_ITEM_JOB_MAX_ATTEMPTS = read_int_env(
+    "LANDSAR_CLUSTER_ITEM_JOB_MAX_ATTEMPTS",
+    1,
+    minimum=1,
+    maximum=10,
+)
 
 
 class RunJobRequest(BaseModel):
@@ -438,6 +444,114 @@ async def submit_run(
         "skipped_completed_count": validation_summary.get("skipped_completed_count", 0) if validation_summary else 0,
         "rerun_mode": req.rerun_mode,
         "message": "Task queued.",
+    }
+
+
+@router.post("/landsar-cluster/run")
+async def submit_landsar_cluster_run(
+    req: RunJobRequest,
+    current_user: AuthUserORM = Depends(_get_current_user),
+):
+    if str(req.engine_code or "").strip().lower() != "landsar":
+        raise HTTPException(status_code=400, detail="LandSAR cluster only accepts engine_code='landsar'.")
+
+    registry = _get_registry()
+    engine = registry.get_engine("landsar")
+    if not engine:
+        raise HTTPException(status_code=400, detail="Engine 'landsar' not found.")
+
+    valid_profiles = {profile.code for profile in engine.get_profiles()}
+    if req.profile not in valid_profiles:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Engine 'landsar' does not support profile '{req.profile}'. "
+                f"Available profiles: {sorted(valid_profiles)}"
+            ),
+        )
+
+    validation_summary = None
+    if hasattr(engine, "validate_root_dir"):
+        try:
+            validation_summary = await asyncio.to_thread(
+                engine.validate_root_dir,
+                req.root_dir,
+                req.num_to_process,
+                req.rerun_mode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if int(validation_summary.get("task_count", 0) or 0) <= 0:
+            if (
+                req.rerun_mode == "unfinished_only"
+                and int(validation_summary.get("skipped_completed_count", 0) or 0) > 0
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"All discovered Task_* directories already have completed "
+                        f"landsar/{req.profile} results under: {req.root_dir}"
+                    ),
+                )
+            raise HTTPException(status_code=400, detail="No valid LandSAR task directories selected.")
+
+    normalized_extra = dict(req.extra or {})
+    if hasattr(engine, "normalize_extra"):
+        try:
+            normalized_extra = engine.normalize_extra(normalized_extra)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if validation_summary is not None:
+        validated_task_count = validation_summary.get("task_count", 0)
+        normalized_extra.update(
+            {
+                "__validated_task_count": validated_task_count,
+                "__validated_mode": validation_summary.get("mode", ""),
+                "__rerun_mode": req.rerun_mode,
+                "__discovered_task_count": int(validation_summary.get("discovered_task_count", validated_task_count) or 0),
+                "__skipped_completed_count": int(validation_summary.get("skipped_completed_count", 0) or 0),
+                "__cluster": True,
+            }
+        )
+
+    effective_timeout_seconds = req.timeout_seconds
+    if effective_timeout_seconds is None:
+        engine_default_timeout = getattr(engine, "default_timeout_seconds", None)
+        if engine_default_timeout:
+            effective_timeout_seconds = int(engine_default_timeout)
+
+    try:
+        async with _new_session() as db:
+            result = await dinsar_production_service.create_landsar_cluster_run(
+                profile_code=req.profile,
+                root_dir=req.root_dir,
+                num_to_process=req.num_to_process,
+                rerun_mode=req.rerun_mode,
+                timeout_seconds=effective_timeout_seconds,
+                extra=normalized_extra,
+                created_by=getattr(current_user, "username", None),
+                max_attempts=LANDSAR_CLUSTER_ITEM_JOB_MAX_ATTEMPTS,
+                db=db,
+            )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 409 if "浠诲姟鍐茬獊" in message else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+    return {
+        "task_id": result["task_id"],
+        "job_id": None,
+        "run_id": result["run_id"],
+        "workflow_run_id": None,
+        "job_type": "LANDSAR_CLUSTER_ITEM",
+        "engine_code": "landsar",
+        "profile": req.profile,
+        "selected_task_count": result.get("selected_task_count", 0),
+        "discovered_task_count": result.get("discovered_task_count", result.get("selected_task_count", 0)),
+        "skipped_completed_count": result.get("skipped_completed_count", 0),
+        "rerun_mode": result.get("rerun_mode", req.rerun_mode),
+        "message": "LandSAR cluster items queued.",
     }
 
 

@@ -2,7 +2,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from sqlalchemy import and_, or_, select, update, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -183,6 +183,7 @@ class JobQueueService:
         self,
         worker_id: str,
         lock_timeout_seconds: int = 1800,
+        allowed_job_types: Optional[Sequence[str]] = None,
         db: Optional[AsyncSession] = None,
     ) -> Optional[SystemJobORM]:
         gen_db = db is None
@@ -191,14 +192,30 @@ class JobQueueService:
 
         try:
             lock_timeout_seconds = int(lock_timeout_seconds)
+            normalized_allowed = [
+                _normalize_job_type(job_type)
+                for job_type in (allowed_job_types or [])
+                if str(job_type or "").strip()
+            ]
+            normalized_allowed = list(dict.fromkeys(normalized_allowed))
+            allowed_clause = ""
+            params: Dict[str, Any] = {"lock_timeout_seconds": lock_timeout_seconds}
+            if normalized_allowed:
+                allowed_params = []
+                for index, job_type in enumerate(normalized_allowed):
+                    key = f"allowed_job_type_{index}"
+                    allowed_params.append(f":{key}")
+                    params[key] = job_type
+                allowed_clause = f"AND job_type IN ({', '.join(allowed_params)})"
             async with db.begin():
                 result = await db.execute(
                     text(
-                        """
+                        f"""
                         SELECT id
                         FROM system_jobs
                         WHERE status IN ('READY', 'RETRY')
                           AND (next_run_at IS NULL OR next_run_at <= NOW())
+                          {allowed_clause}
                           AND (
                                 locked_by IS NULL OR
                                 locked_at IS NULL OR
@@ -209,7 +226,7 @@ class JobQueueService:
                         LIMIT 1
                         """
                     ),
-                    {"lock_timeout_seconds": lock_timeout_seconds},
+                    params,
                 )
                 row = result.first()
                 if not row:

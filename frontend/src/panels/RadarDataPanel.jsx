@@ -15,9 +15,7 @@ export default function RadarDataPanel({
     radarTotalPages,
     showRadarPageInputError,
     radarPageInputValidationError,
-    // handlers
     onSearchAll,
-    onShowStats,
     onSearch,
     onReset,
     onAoiModeChange,
@@ -73,7 +71,6 @@ export default function RadarDataPanel({
         [allData]
     );
 
-    // Build visible satellite group buttons based on available satellites in the database
     const visibleSatelliteGroups = useMemo(() => {
         const allSatellites = radarSearchOptions.satellite || [];
         return SATELLITE_GROUPS.filter((group) =>
@@ -86,15 +83,12 @@ export default function RadarDataPanel({
             <div style={{ padding: '10px', borderBottom: '1px solid #eee', flex: '0 0 auto' }}>
                 <div className="header-buttons">
                     <button onClick={onSearchAll} disabled={isLoading} style={{ flex: 1 }}>
-                        {language === 'en' ? 'Search All Source Data' : '搜索全部源数据'}
-                    </button>
-                    <button onClick={onShowStats} disabled={isLoading} style={{ width: 'auto' }}>
-                        {language === 'en' ? 'Statistics' : '统计'}
+                        搜索全部源数据
                     </button>
                 </div>
                 <div style={{ marginTop: '10px', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px', background: '#f8fafc' }}>
                     <div style={{ fontWeight: 600, marginBottom: '8px', fontSize: '13px' }}>
-                        {language === 'en' ? 'Source Data Search' : '源数据检索'}
+                        源数据检索
                     </div>
                     {visibleSatelliteGroups.length > 0 && (
                         <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
@@ -114,7 +108,7 @@ export default function RadarDataPanel({
                                     cursor: 'pointer',
                                 }}
                             >
-                                {language === 'en' ? 'All' : '全部'}
+                                全部
                             </button>
                             {visibleSatelliteGroups.map((group) => (
                                 <button
@@ -141,7 +135,7 @@ export default function RadarDataPanel({
                     )}
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
                         <select value={radarSearchDraft.imaging_mode} onChange={(e) => updateDraft('imaging_mode', e.target.value)} disabled={radarSearchOptionsLoading}>
-                            <option value="">{language === 'en' ? 'Imaging Mode: All' : '成像模式：全部'}</option>
+                            <option value="">成像模式：全部</option>
                             {radarSearchOptions.imaging_mode.map((item) => (
                                 <option key={item} value={item}>{item}</option>
                             ))}
@@ -150,28 +144,28 @@ export default function RadarDataPanel({
                             value={radarSearchDraft.imaging_date_from}
                             onChange={(nextValue) => updateDraft('imaging_date_from', nextValue)}
                             language={language}
-                            title={language === 'en' ? 'Imaging Date From: Any' : '成像时间起：不限'}
-                            ariaLabel={language === 'en' ? 'Imaging Date From' : '成像时间起'}
-                            placeholder={language === 'en' ? 'Select start date' : '选择起始日期'}
+                            title="成像时间起：不限"
+                            ariaLabel="成像时间起"
+                            placeholder="选择起始日期"
                         />
                         <UnifiedDatePicker
                             value={radarSearchDraft.imaging_date_to}
                             onChange={(nextValue) => updateDraft('imaging_date_to', nextValue)}
                             language={language}
-                            title={language === 'en' ? 'Imaging Date To: Any' : '成像时间止：不限'}
-                            ariaLabel={language === 'en' ? 'Imaging Date To' : '成像时间止'}
-                            placeholder={language === 'en' ? 'Select end date' : '选择结束日期'}
+                            title="成像时间止：不限"
+                            ariaLabel="成像时间止"
+                            placeholder="选择结束日期"
                         />
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
                         <select value={radarSearchDraft.polarization} onChange={(e) => updateDraft('polarization', e.target.value)} disabled={radarSearchOptionsLoading}>
-                            <option value="">{language === 'en' ? 'Polarization: All' : '极化方式：全部'}</option>
+                            <option value="">极化方式：全部</option>
                             {radarSearchOptions.polarization.map((item) => (
                                 <option key={item} value={item}>{item}</option>
                             ))}
                         </select>
                         <select value={radarSearchDraft.product_level} onChange={(e) => updateDraft('product_level', e.target.value)} disabled={radarSearchOptionsLoading}>
-                            <option value="">{language === 'en' ? 'Product Level: All' : '产品级别：全部'}</option>
+                            <option value="">产品级别：全部</option>
                             {radarSearchOptions.product_level.map((item) => (
                                 <option key={item} value={item}>{item}</option>
                             ))}
@@ -179,16 +173,16 @@ export default function RadarDataPanel({
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
                         <select value={radarSearchAoiMode} onChange={(e) => onAoiModeChange(e.target.value)}>
-                            <option value="none">{language === 'en' ? 'AOI: Any' : '空间范围：不限'}</option>
-                            <option value="region">{language === 'en' ? 'AOI: Region' : '空间范围：行政区'}</option>
-                            <option value="shp">{language === 'en' ? 'AOI: Upload SHP' : '空间范围：上传SHP'}</option>
+                            <option value="none">空间范围：不限</option>
+                            <option value="region">空间范围：行政区</option>
+                            <option value="shp">空间范围：上传 SHP</option>
                         </select>
                         <div style={{ display: 'flex', gap: '8px' }}>
                             <button type="button" onClick={onSearch} disabled={isLoading} style={{ flex: 1 }}>
-                                {language === 'en' ? 'Search' : '搜索'}
+                                搜索
                             </button>
                             <button type="button" onClick={onReset} disabled={isLoading} style={{ flex: 1 }}>
-                                {language === 'en' ? 'Reset' : '重置'}
+                                重置
                             </button>
                         </div>
                     </div>
@@ -199,7 +193,7 @@ export default function RadarDataPanel({
                                 onChange={(e) => onProvinceChange(e.target.value)}
                                 disabled={radarSearchRegionLoading}
                             >
-                                <option value="">{language === 'en' ? 'Select Province' : '选择省份'}</option>
+                                <option value="">选择省份</option>
                                 {radarSearchRegionOptions.provinces.map((item) => (
                                     <option key={item.tree_id} value={item.tree_id}>{item.name}</option>
                                 ))}
@@ -209,7 +203,7 @@ export default function RadarDataPanel({
                                 onChange={(e) => onCityChange(e.target.value)}
                                 disabled={radarSearchRegionLoading || !radarSearchRegionSelection.province}
                             >
-                                <option value="">{language === 'en' ? 'Select City (Optional)' : '选择地市（可选）'}</option>
+                                <option value="">选择地市（可选）</option>
                                 {radarSearchRegionOptions.cities.map((item) => (
                                     <option key={item.tree_id} value={item.tree_id}>{item.name}</option>
                                 ))}
@@ -231,66 +225,61 @@ export default function RadarDataPanel({
                     )}
                     <details>
                         <summary style={{ cursor: 'pointer', fontSize: '12px', color: '#334155' }}>
-                            {language === 'en' ? 'Advanced Fields' : '高级字段'}
+                            高级字段
                         </summary>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '8px' }}>
                             <select value={radarSearchDraft.satellite_mode} onChange={(e) => updateDraft('satellite_mode', e.target.value)} disabled={radarSearchOptionsLoading}>
-                                <option value="">{language === 'en' ? 'Satellite Mode: All' : '卫星模式：全部'}</option>
+                                <option value="">卫星模式：全部</option>
                                 {radarSearchOptions.satellite_mode.map((item) => (
                                     <option key={item} value={item}>{item}</option>
                                 ))}
                             </select>
                             <select value={radarSearchDraft.receiving_station} onChange={(e) => updateDraft('receiving_station', e.target.value)} disabled={radarSearchOptionsLoading}>
-                                <option value="">{language === 'en' ? 'Receiving Station: All' : '接收站：全部'}</option>
+                                <option value="">接收站：全部</option>
                                 {radarSearchOptions.receiving_station.map((item) => (
                                     <option key={item} value={item}>{item}</option>
                                 ))}
                             </select>
                             <select value={radarSearchDraft.orbit_circle} onChange={(e) => updateDraft('orbit_circle', e.target.value)} disabled={radarSearchOptionsLoading}>
-                                <option value="">{language === 'en' ? 'Orbit Circle: All' : '轨道圈号：全部'}</option>
+                                <option value="">轨道圈号：全部</option>
                                 {radarSearchOptions.orbit_circle.map((item) => (
                                     <option key={item} value={item}>{item}</option>
                                 ))}
                             </select>
                             <select value={radarSearchDraft.acquisition_time_utc} onChange={(e) => updateDraft('acquisition_time_utc', e.target.value)} disabled={radarSearchOptionsLoading}>
-                                <option value="">{language === 'en' ? 'Acquisition Time: All' : '采集时间：全部'}</option>
+                                <option value="">采集时间：全部</option>
                                 {radarSearchOptions.acquisition_time_utc.map((item) => (
                                     <option key={item} value={item}>{item}</option>
                                 ))}
                             </select>
                             <select value={radarSearchDraft.product_type} onChange={(e) => updateDraft('product_type', e.target.value)} disabled={radarSearchOptionsLoading}>
-                                <option value="">{language === 'en' ? 'Product Type: All' : '产品类型：全部'}</option>
+                                <option value="">产品类型：全部</option>
                                 {radarSearchOptions.product_type.map((item) => (
                                     <option key={item} value={item}>{item}</option>
                                 ))}
                             </select>
                             <select value={radarSearchDraft.product_unique_id} onChange={(e) => updateDraft('product_unique_id', e.target.value)} disabled={radarSearchOptionsLoading}>
-                                <option value="">{language === 'en' ? 'Product Unique ID: All' : '产品唯一ID：全部'}</option>
+                                <option value="">产品唯一 ID：全部</option>
                                 {radarSearchOptions.product_unique_id.map((item) => (
                                     <option key={item} value={item}>{item}</option>
                                 ))}
                             </select>
                             <select value={radarSearchDraft.orbit_direction} onChange={(e) => updateDraft('orbit_direction', e.target.value)} disabled={radarSearchOptionsLoading}>
-                                <option value="">{language === 'en' ? 'Orbit Direction: All' : '轨道方向：全部'}</option>
+                                <option value="">轨道方向：全部</option>
                                 {radarSearchOptions.orbit_direction.map((item) => (
                                     <option key={item} value={item}>{item}</option>
                                 ))}
                             </select>
                             <select value={radarSearchDraft.has_orbit_data} onChange={(e) => updateDraft('has_orbit_data', e.target.value)}>
-                                <option value="">{language === 'en' ? 'Precise Orbit: All' : '有精轨：全部'}</option>
-                                <option value="true">{language === 'en' ? 'Precise Orbit: Yes' : '有精轨：是'}</option>
-                                <option value="false">{language === 'en' ? 'Precise Orbit: No' : '有精轨：否'}</option>
-                            </select>
-                            <select value={radarSearchDraft.is_envi_processed} onChange={(e) => updateDraft('is_envi_processed', e.target.value)}>
-                                <option value="">{language === 'en' ? 'ENVI Processed: All' : 'ENVI已处理：全部'}</option>
-                                <option value="true">{language === 'en' ? 'ENVI Processed: Yes' : 'ENVI已处理：是'}</option>
-                                <option value="false">{language === 'en' ? 'ENVI Processed: No' : 'ENVI已处理：否'}</option>
+                                <option value="">精轨状态：全部</option>
+                                <option value="true">精轨状态：有</option>
+                                <option value="false">精轨状态：无</option>
                             </select>
                         </div>
                     </details>
                     {radarSearchOptionsLoading && (
                         <div style={{ marginTop: '8px', fontSize: '12px', color: '#64748b' }}>
-                            {language === 'en' ? 'Loading source data search options...' : '源数据检索选项加载中...'}
+                            源数据检索选项加载中...
                         </div>
                     )}
                 </div>
@@ -300,12 +289,8 @@ export default function RadarDataPanel({
                     <div className="empty-state">
                         <p>
                             {!hasRadarSearched
-                                ? (language === 'en'
-                                    ? 'No query yet. Please run Search or Search All first.'
-                                    : '尚未执行检索，请先点击"搜索"或"搜索全部"。')
-                                : (language === 'en'
-                                    ? 'No data matched this query.'
-                                    : '当前检索未命中数据。')}
+                                ? '尚未执行检索，请先点击“搜索”或“搜索全部源数据”。'
+                                : '当前检索条件下没有匹配的数据。'}
                         </p>
                     </div>
                 ) : (
@@ -319,35 +304,31 @@ export default function RadarDataPanel({
                                     onChange={onSelectAllVisibility}
                                 />
                                 <label htmlFor="select-all-visibility">
-                                    {language === 'en'
-                                        ? `Toggle all coverage (Current page ${allData.length} items / Total ${radarPagination.total} items)`
-                                        : `覆盖面全部显示/隐藏（当前页 ${allData.length} 条 / 总计 ${radarPagination.total} 条）`}
+                                    覆盖面全部显示/隐藏（当前页 {allData.length} 条 / 总计 {radarPagination.total} 条）
                                 </label>
                             </div>
                             <div className="toolbar-row">
                                 <button type="button" onClick={() => onSetAllPreviewVisibility(true)} disabled={allData.length === 0}>
-                                    {language === 'en' ? 'Show All Source Previews' : '源影像一键显示'}
+                                    源影像一键显示
                                 </button>
                                 <button type="button" onClick={() => onSetAllPreviewVisibility(false)} disabled={allData.length === 0}>
-                                    {language === 'en' ? 'Hide All Source Previews' : '源影像一键隐藏'}
+                                    源影像一键隐藏
                                 </button>
                             </div>
                             <div className="toolbar-row">
                                 <button type="button" onClick={() => onPageChange(-1)} disabled={isLoading || !hasRadarSearched || radarPagination.offset <= 0}>
-                                    {language === 'en' ? 'Previous' : '上一页'}
+                                    上一页
                                 </button>
                                 <span style={{ fontSize: '12px', color: '#4a5568' }}>
-                                    {language === 'en'
-                                        ? `Page ${radarCurrentPage}/${radarTotalPages}`
-                                        : `第 ${radarCurrentPage}/${radarTotalPages} 页`}
+                                    第 {radarCurrentPage}/{radarTotalPages} 页
                                 </span>
                                 <button type="button" onClick={() => onPageChange(1)} disabled={isLoading || !hasRadarSearched || !radarPagination.hasMore}>
-                                    {language === 'en' ? 'Next' : '下一页'}
+                                    下一页
                                 </button>
                             </div>
                             <div className="toolbar-row">
                                 <label style={{ fontSize: '12px', color: '#4a5568' }}>
-                                    {language === 'en' ? 'Per page' : '每页'}
+                                    每页
                                     <select
                                         value={radarPagination.limit}
                                         onChange={onPageSizeChange}
@@ -358,10 +339,10 @@ export default function RadarDataPanel({
                                             <option key={size} value={size}>{size}</option>
                                         ))}
                                     </select>
-                                    {language === 'en' ? 'items' : '条'}
+                                    条
                                 </label>
                                 <label style={{ fontSize: '12px', color: '#4a5568' }}>
-                                    {language === 'en' ? 'Go to' : '跳到'}
+                                    跳到
                                     <input
                                         type="number"
                                         min={1}
@@ -387,10 +368,10 @@ export default function RadarDataPanel({
                                             boxShadow: showRadarPageInputError ? '0 0 0 1px rgba(229,62,62,0.25)' : undefined,
                                         }}
                                     />
-                                    {language === 'en' ? 'page' : '页'}
+                                    页
                                 </label>
                                 <button type="button" onClick={onGoToPage} disabled={isLoading || !hasRadarSearched}>
-                                    {language === 'en' ? 'Jump' : '跳转'}
+                                    跳转
                                 </button>
                             </div>
                             <div className="toolbar-row">
@@ -398,10 +379,8 @@ export default function RadarDataPanel({
                                     {showRadarPageInputError
                                         ? radarPageInputValidationError
                                         : (hasRadarSearched
-                                            ? getPageHintText(radarTotalPages, language)
-                                            : (language === 'en'
-                                                ? 'Run a search first to enable pagination.'
-                                                : '请先执行检索，再使用分页。'))}
+                                            ? getPageHintText(radarTotalPages)
+                                            : '请先执行检索，再使用分页。')}
                                 </span>
                             </div>
                         </div>

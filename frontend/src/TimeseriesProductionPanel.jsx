@@ -42,6 +42,20 @@ const STATUS_COLOR = {
   PUBLISHED: '#16a34a',
 };
 
+const ACTIVE_RUN_STATUSES = new Set([
+  'PENDING',
+  'RUNNING',
+  'PREPARING',
+  'STACK_PREPARING',
+  'MATERIALIZING',
+  'STACK_RUNNING',
+  'MINTPY_RUNNING',
+  'EXPORTING',
+  'REGISTERING',
+]);
+
+const ACTIVE_RUN_REFRESH_INTERVAL_MS = 30000;
+
 const PREPARED_STACK_STATE = {
   not_prepared: { label: 'Not prepared', color: '#64748b' },
   manifest_unreadable: { label: 'Manifest unreadable', color: '#dc2626' },
@@ -209,6 +223,9 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
   const [wslReport, setWslReport] = useState(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightReport, setPreflightReport] = useState(null);
+  const hasActiveRun = useMemo(() => (
+    runs.some(item => ACTIVE_RUN_STATUSES.has(String(item.status || '').toUpperCase()))
+  ), [runs]);
   const [retryingStepId, setRetryingStepId] = useState('');
 
   const selectedBatch = useMemo(
@@ -355,9 +372,10 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
   }, [loadBatches, loadRuns]);
 
   useEffect(() => {
-    const timer = setInterval(loadRuns, 10000);
+    if (!hasActiveRun) return undefined;
+    const timer = setInterval(loadRuns, ACTIVE_RUN_REFRESH_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [loadRuns]);
+  }, [hasActiveRun, loadRuns]);
 
   useEffect(() => {
     loadRunDetail(selectedRunId);
@@ -465,8 +483,7 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
           }}
         >
           当前生产入口采用分层 SBAS 模型：时序配对先形成候选大池，提交 run 后由 prepare 冻结 prepared SBAS 小栈。
-          ENVI/SARscape SBAS 后续只读取 prepared manifest 和 selected_network_edges 审计图，不再重新扫描全量数据。
-          ISCE2 + MintPy 路径仍沿用 stack_prep、materialize、stack、MintPy、publish、register 链路。
+          ENVI/SARscape SBAS 后续只读取 prepared manifest 和 selected_network_edges 审计图，确保生产输入可复核、可追溯。
         </div>
         {wslReport && (
           <div
@@ -560,7 +577,6 @@ export default function TimeseriesProductionPanel({ readOnly = false, onJobQueue
               style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1' }}
             >
               <option value="sarscape_sbas">ENVI/SARscape SBAS</option>
-              <option value="isce2_stack_mintpy">ISCE2 + MintPy</option>
             </select>
           </div>
           <div>

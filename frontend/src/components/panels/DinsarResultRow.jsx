@@ -73,7 +73,7 @@ function DinsarResultRow({
                             className="dinsar-trace-pill"
                             title={language === 'en' ? 'Pairing selection strategy' : '配对选择策略'}
                         >
-                            {result.selection_strategy || 'legacy'}
+                            {result.selection_strategy || '标准选择'}
                         </span>
                         {result.run_key && (
                             <span

@@ -9,7 +9,6 @@ import { ModalLoadingFallback } from './AppLoadingFallbacks';
 const LazyPairingModal = lazy(() => import('../PairingModal'));
 const LazyDataInfoModal = lazy(() => import('../DataInfoModal'));
 const LazyGlobalTaskCenter = lazy(() => import('../GlobalTaskCenter'));
-const LazyStatisticsDashboard = lazy(() => import('../../StatisticsDashboard'));
 const LazyAiReportModal = lazy(() => import('../AiReportModal'));
 const LazyMapExportModal = lazy(() => import('../MapExportModal'));
 
@@ -40,14 +39,10 @@ export default function AppOverlays({
         showPairingModal: state.showPairingModal,
     })));
     const {
-        showStats,
-        setShowStats,
         showDataInfo,
         setShowDataInfo,
         selectedDataInfo,
     } = useUiStore(useShallow((state) => ({
-        showStats: state.showStats,
-        setShowStats: state.setShowStats,
         showDataInfo: state.showDataInfo,
         setShowDataInfo: state.setShowDataInfo,
         selectedDataInfo: state.selectedDataInfo,
@@ -76,12 +71,6 @@ export default function AppOverlays({
                         report={activeAiReport}
                         onClose={() => setActiveAiReport(null)}
                     />
-                </Suspense>
-            )}
-
-            {showStats && (
-                <Suspense fallback={<ModalLoadingFallback message="正在加载统计看板..." />}>
-                    <LazyStatisticsDashboard onClose={() => setShowStats(false)} />
                 </Suspense>
             )}
 

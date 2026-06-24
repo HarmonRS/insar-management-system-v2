@@ -86,12 +86,12 @@ export const PRODUCTION_WORKSPACE_DINSAR_VIEWS = [
   {
     key: 'dinsar_runs',
     label: '生产运行',
-    description: '运行任务编排、引擎切换与过程监控',
+    description: '运行任务编排、引擎切换与过程监控。',
   },
   {
     key: 'dinsar_products',
     label: '结果管理',
-    description: '结果提取、标准目录发布与产物编目',
+    description: '结果提取、标准目录发布与产品编目。',
   },
 ];
 
@@ -99,11 +99,11 @@ export const PRODUCTION_WORKSPACE_SBAS_VIEWS = [
   {
     key: 'sbas_insar_planning',
     label: '序列规划',
-    description: '按生产区域发现 SBAS 候选序列，审计覆盖、时序密度、精轨和公共重叠范围。',
+    description: '按生产区域发现 SBAS 候选序列，审查覆盖、时序密度、精轨和公共重叠范围。',
   },
   {
     key: 'sbas_insar_batches',
-    label: '候选栈与Run',
+    label: '候选栈与 Run',
     description: '查看候选序列、Manifest 与已创建的 SBAS 生产 Run。',
   },
   {
@@ -119,21 +119,21 @@ export const PRODUCTION_WORKSPACE_SBAS_VIEWS = [
   {
     key: 'sbas_insar_products',
     label: '结果管理',
-    description: 'Gamma SBAS LOS velocity, uncertainty, coverage and monitoring-point product catalog',
+    description: '管理 Gamma SBAS LOS velocity、uncertainty、coverage 和监测点产品目录。',
   },
 ];
 
 export const PRODUCTION_WORKSPACE_WORKBENCHES = [
   {
     key: 'dinsar_workbench',
-    label: 'D-InSAR工作台',
-    description: '配对规划、候选对与批次、生产准备、生产运行和结果管理集中到一条 D-InSAR 工作流。',
+    label: 'D-InSAR 工作台',
+    description: '将配对规划、候选对与批次、生产准备、生产运行和结果管理集中到一条 D-InSAR 工作流。',
     defaultView: 'dinsar_pairing',
     views: PRODUCTION_WORKSPACE_DINSAR_VIEWS,
   },
   {
     key: 'sbas_workbench',
-    label: 'SBAS-InSAR工作台',
+    label: 'SBAS-InSAR 工作台',
     description: '围绕 SBAS 序列发现、生产执行和结果 catalog 管理组织时序 InSAR 生产。',
     defaultView: 'sbas_insar_planning',
     views: PRODUCTION_WORKSPACE_SBAS_VIEWS,
@@ -145,18 +145,18 @@ export const PRODUCTION_WORKSPACE_VIEWS = [
   ...PRODUCTION_WORKSPACE_SBAS_VIEWS,
   {
     key: 'lt1_production',
-    label: '陆探生产占位',
+    label: '陆探一生产占位',
     description: 'LT-1 源压缩包本机登记，按需 materialize 到 Task_Pool；D-InSAR/SBAS 生产不走 UNC。',
   },
   {
     key: 'sentinel1_production',
-    label: '哨兵生产占位',
+    label: 'Sentinel-1 生产占位',
     description: 'Sentinel-1 ZIP/SAFE 与 EOF 精轨本机管理，按需解包；当前 SBAS 仅保留规划能力。',
   },
   {
     key: 'gf3_native_registration',
     label: '高分三结果登记',
-    description: 'GF3 在外部 SARscape 服务器生产，本机只登记复制回来的 _geo 二进制并生成 WebP。',
+    description: 'GF3 在外部 SARscape 服务生产，本机只登记复制回来的 _geo 二进制并生成 WebP。',
   },
 ];
 
@@ -179,10 +179,12 @@ export const PRODUCTION_WORKSPACE_ROUTE_TABS = new Set([
 ]);
 
 export const LEFT_GROUP_LABELS = {
-  data: '数据管理',
+  data: '数据资产',
   production_management: '生产管理',
-  insar_analysis: 'InSAR形变分析',
-  flood_analysis: '洪涝灾害分析',
+  result_extraction: '结果提取',
+  insar_analysis: '形变分析',
+  statistics: '综合统计',
+  flood_analysis: '灾害分析',
   ops: '运行维护',
 };
 
@@ -190,12 +192,12 @@ export const LEFT_GROUP_SECTIONS = {
   insar_analysis: [
     {
       key: 'dinsar',
-      label: 'D-InSAR',
+      label: 'D-InSAR 判读',
       tabs: ['dinsar_results', 'dinsar_analysis'],
     },
     {
       key: 'psinsar',
-      label: 'SBAS',
+      label: 'SBAS 形变',
       tabs: ['psinsar_analysis'],
     },
   ],
@@ -204,7 +206,9 @@ export const LEFT_GROUP_SECTIONS = {
 export const LEFT_GROUP_TABS = {
   data: ['ingest', 'asset_inventory', 'data', 'hazard'],
   production_management: [PRODUCTION_WORKSPACE_TAB],
+  result_extraction: ['result_extraction'],
   insar_analysis: LEFT_GROUP_SECTIONS.insar_analysis.flatMap(section => section.tabs),
+  statistics: ['statistics'],
   flood_analysis: ['flood_analysis'],
   ops: ['health', 'users', 'audit'],
 };
@@ -231,6 +235,8 @@ export const LEFT_TAB_SECTION = Object.entries(LEFT_GROUP_SECTIONS).reduce((acc,
 
 export const FULL_WIDTH_LEFT_TABS = new Set([
   ...PRODUCTION_WORKSPACE_ROUTE_TABS,
+  'statistics',
+  'result_extraction',
 ]);
 
 export const ADMIN_ONLY_TABS = new Set([
@@ -271,7 +277,6 @@ export const RADAR_SEARCH_DEFAULTS = {
   product_unique_id: '',
   orbit_direction: '',
   has_orbit_data: '',
-  is_envi_processed: '',
   imaging_date_from: '',
   imaging_date_to: '',
 };

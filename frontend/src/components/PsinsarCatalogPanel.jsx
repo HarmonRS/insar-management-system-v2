@@ -24,6 +24,8 @@ const statusColorMap = {
   REBUILDING: '#2563eb',
 };
 
+const CATALOG_ACTIVE_REFRESH_INTERVAL_MS = 30000;
+
 function formatDateTime(value) {
   if (!value) return '-';
   try {
@@ -125,13 +127,18 @@ export default function PsinsarCatalogPanel({
 
   useEffect(() => {
     loadCatalog();
+  }, [loadCatalog]);
+
+  useEffect(() => {
+    const status = String(catalogStatus?.status || '').toUpperCase();
+    if (status !== 'REBUILDING') return undefined;
     const timer = setInterval(() => {
       if (!actionLoading) {
         loadCatalog();
       }
-    }, 10000);
+    }, CATALOG_ACTIVE_REFRESH_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [actionLoading, loadCatalog]);
+  }, [actionLoading, catalogStatus?.status, loadCatalog]);
 
   useEffect(() => {
     loadProductDetail(selectedProductId);
