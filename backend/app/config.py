@@ -238,8 +238,9 @@ class Settings(BaseSettings):
     RADAR_GEO_CACHE_VERSION: str = "b2"
     RADAR_GEO_CACHE_QUALITY: int = 84
     RADAR_PREVIEW_BUILD_ON_DEMAND: bool = True
-    ASSET_SCAN_PARSE_WORKERS: int = 4
+    ASSET_SCAN_PARSE_WORKERS: int = 16
     ASSET_SCAN_PARSE_INFLIGHT: int = 64
+    ASSET_SCAN_PARSE_TIMEOUT_SECONDS: int = 600
     ASSET_SCAN_SKIP_UNCHANGED_FAILURES: bool = True
     ASSET_SCAN_DB_BATCH_SIZE: int = 50
 
@@ -505,6 +506,11 @@ class Settings(BaseSettings):
             self,
             "ASSET_SCAN_PARSE_INFLIGHT",
             max(self.ASSET_SCAN_PARSE_WORKERS, int(self.ASSET_SCAN_PARSE_INFLIGHT or self.ASSET_SCAN_PARSE_WORKERS)),
+        )
+        object.__setattr__(
+            self,
+            "ASSET_SCAN_PARSE_TIMEOUT_SECONDS",
+            max(60, int(self.ASSET_SCAN_PARSE_TIMEOUT_SECONDS or 600)),
         )
         object.__setattr__(self, "ASSET_SCAN_DB_BATCH_SIZE", max(1, int(self.ASSET_SCAN_DB_BATCH_SIZE or 1)))
         if not self.GF3_ARCHIVE_SOURCE_DIRS:

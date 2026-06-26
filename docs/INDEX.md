@@ -41,6 +41,8 @@
   LT-1/Sentinel-1 鏈湴婧愬帇缂╁寘绠＄悊銆佸寘鍐?XML/manifest 璧勪骇鍖栥€佹湰鍦?Task_Pool materialize锛屼互鍙?UNC 閫€鍑哄悗鐨勬湰鏈洪儴缃茶竟鐣屻€?
 - [SOURCE_ARCHIVE_INTEGRITY_AUDIT_20260620.md](SOURCE_ARCHIVE_INTEGRITY_AUDIT_20260620.md)  
   LT-1/Sentinel-1 婧愬帇缂╁寘瀹屾暣鎬у璁＄殑鐙珛浠诲姟銆佸閲忚涔夈€佹暟鎹簱瀛楁鍜岄棶棰樼櫥璁拌鍒欍€?
+- [SOURCE_ORBIT_ASSET_SCAN_OPERATIONS_20260626.md](SOURCE_ORBIT_ASSET_SCAN_OPERATIONS_20260626.md)
+  LT-1/Sentinel-1 source/orbit asset scan operations: incremental filtering, parser process isolation, concurrency defaults, timeout recovery, and orbit binding semantics.
 - [DINSAR_PRODUCTION_CORES_OVERVIEW.md](DINSAR_PRODUCTION_CORES_OVERVIEW.md)  
   鏃х増 ENVI/SARscape銆両SCE2銆丟amma/PyINT D-InSAR 鐢熶骇鏍稿績璇存槑銆侷SCE2 鐩稿叧鍐呭浠呬綔鍘嗗彶鑳屾櫙銆?
 - [SBAS_INSAR_CURRENT_WORKFLOW.md](SBAS_INSAR_CURRENT_WORKFLOW.md)  

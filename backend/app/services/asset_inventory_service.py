@@ -4,12 +4,14 @@ import asyncio
 import gzip
 import hashlib
 import math
+import multiprocessing as mp
 import os
+import queue
 import re
 import shutil
 import tarfile
+import time
 import zipfile
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
 from types import SimpleNamespace
@@ -58,7 +60,7 @@ LT1_ORBIT_MATCH_RULE_VERSION = "lt1_orbit_day_v1"
 ASSET_SCAN_LOG_INTERVAL = 100
 ASSET_SCAN_DETAILED_PARSE_LOG_LIMIT = 200
 ARCHIVE_INTEGRITY_LOG_INTERVAL = 10
-DEFAULT_ASSET_SCAN_PARSE_WORKERS = 4
+DEFAULT_ASSET_SCAN_PARSE_WORKERS = 16
 DEFAULT_ASSET_SCAN_PARSE_INFLIGHT = 64
 DEFAULT_ASSET_SCAN_DB_BATCH_SIZE = 50
 
@@ -1908,6 +1910,269 @@ def _collect_source_assets(root: ManagedRootORM) -> Tuple[List[Dict[str, Any]], 
     return rows, issues, entry_count
 
 
+def _source_parse_worker_main(worker_id: int, generation: int, task_queue: Any, result_queue: Any) -> None:
+    while True:
+        task = task_queue.get()
+        if task is None:
+            return
+        index = int(task.get("index") or 0)
+        normalized_path = str(task.get("path") or "")
+        file_name = os.path.basename(normalized_path)
+        root = SimpleNamespace(id=int(task.get("root_id") or 0), path=str(task.get("root_path") or ""))
+        try:
+            row = _parse_source_entry(normalized_path, root)
+            result_queue.put(
+                {
+                    "worker_id": worker_id,
+                    "generation": generation,
+                    "index": index,
+                    "path": normalized_path,
+                    "file_name": file_name,
+                    "row": row,
+                    "error": None,
+                }
+            )
+        except Exception as exc:
+            result_queue.put(
+                {
+                    "worker_id": worker_id,
+                    "generation": generation,
+                    "index": index,
+                    "path": normalized_path,
+                    "file_name": file_name,
+                    "row": None,
+                    "error": str(exc),
+                }
+            )
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+class _SourceParseProcessPool:
+    def __init__(
+        self,
+        *,
+        root_id: int,
+        root_path: str,
+        workers: int,
+        timeout_seconds: int,
+        log_callback: Optional[Callable[[str, str], None]] = None,
+    ) -> None:
+        self.root_id = int(root_id)
+        self.root_path = str(root_path)
+        self.workers = max(1, int(workers or 1))
+        self.timeout_seconds = max(1, int(timeout_seconds or 1))
+        self.log_callback = log_callback
+        self.ctx = mp.get_context("spawn")
+        self.result_queue = self.ctx.Queue()
+        self.pending_tasks: List[Dict[str, Any]] = []
+        self.slots: List[Dict[str, Any]] = [self._new_slot(worker_id=index) for index in range(self.workers)]
+
+    def _log(self, level: str, message: str) -> None:
+        if self.log_callback:
+            self.log_callback(level, message)
+
+    def _new_slot(self, *, worker_id: int, generation: int = 0) -> Dict[str, Any]:
+        task_queue = self.ctx.Queue(maxsize=1)
+        process = self.ctx.Process(
+            target=_source_parse_worker_main,
+            args=(worker_id, generation, task_queue, self.result_queue),
+            daemon=True,
+        )
+        process.start()
+        return {
+            "worker_id": worker_id,
+            "generation": generation,
+            "process": process,
+            "queue": task_queue,
+            "task": None,
+            "started_at": None,
+        }
+
+    def _stop_slot(self, slot: Dict[str, Any], *, terminate: bool = False) -> None:
+        process = slot.get("process")
+        task_queue = slot.get("queue")
+        if process is not None:
+            if process.is_alive():
+                if terminate:
+                    process.terminate()
+                else:
+                    try:
+                        task_queue.put_nowait(None)
+                    except Exception:
+                        process.terminate()
+                process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+            else:
+                process.join(timeout=0)
+        if task_queue is not None:
+            try:
+                task_queue.cancel_join_thread()
+            except Exception:
+                pass
+            try:
+                task_queue.close()
+            except Exception:
+                pass
+        slot["task"] = None
+        slot["started_at"] = None
+
+    def close(self) -> None:
+        for slot in self.slots:
+            self._stop_slot(slot, terminate=True)
+        try:
+            self.result_queue.cancel_join_thread()
+        except Exception:
+            pass
+        try:
+            self.result_queue.close()
+        except Exception:
+            pass
+
+    def active_count(self) -> int:
+        return len(self.pending_tasks) + sum(1 for slot in self.slots if slot.get("task") is not None)
+
+    def submit(self, index: int, normalized_path: str) -> None:
+        task = {
+            "index": int(index),
+            "path": normalized_path,
+            "root_id": self.root_id,
+            "root_path": self.root_path,
+        }
+        self.pending_tasks.append(task)
+        self._dispatch_available()
+
+    def drain(self, *, wait_for_one: bool) -> List[Dict[str, Any]]:
+        raw_results: List[Dict[str, Any]] = []
+        accepted_results: List[Dict[str, Any]] = []
+        self._dispatch_available()
+        if wait_for_one:
+            if self.active_count() <= 0:
+                return self._collect_unhealthy_workers()
+            try:
+                result = self.result_queue.get(timeout=0.2)
+                raw_results.append(result)
+            except queue.Empty:
+                pass
+        while True:
+            try:
+                result = self.result_queue.get_nowait()
+            except queue.Empty:
+                break
+            raw_results.append(result)
+        for result in raw_results:
+            if self._release_completed_slot(result):
+                accepted_results.append(result)
+        accepted_results.extend(self._collect_unhealthy_workers())
+        self._dispatch_available()
+        return accepted_results
+
+    def _dispatch_available(self) -> None:
+        for idx, slot in enumerate(list(self.slots)):
+            if not self.pending_tasks:
+                return
+            if slot.get("task") is not None:
+                continue
+            process = slot.get("process")
+            if process is None or not process.is_alive():
+                worker_id = _int_or_default(slot.get("worker_id"), idx)
+                generation = _int_or_default(slot.get("generation"), 0)
+                self._stop_slot(slot, terminate=True)
+                self.slots[idx] = self._new_slot(worker_id=worker_id, generation=generation + 1)
+                slot = self.slots[idx]
+            task = self.pending_tasks.pop(0)
+            slot["queue"].put(task)
+            slot["task"] = task
+            slot["started_at"] = time.monotonic()
+
+    def _release_completed_slot(self, result: Dict[str, Any]) -> bool:
+        result_worker_id = _int_or_default(result.get("worker_id"), -1)
+        result_generation = _int_or_default(result.get("generation"), -1)
+        result_index = _int_or_default(result.get("index"), -1)
+        for slot in self.slots:
+            if _int_or_default(slot.get("worker_id"), -1) != result_worker_id:
+                continue
+            if _int_or_default(slot.get("generation"), -1) != result_generation:
+                return False
+            task = slot.get("task")
+            if task is None or _int_or_default(task.get("index"), -1) != result_index:
+                return False
+            slot["task"] = None
+            slot["started_at"] = None
+            return True
+        return False
+
+    def _collect_unhealthy_workers(self) -> List[Dict[str, Any]]:
+        now = time.monotonic()
+        results: List[Dict[str, Any]] = []
+        for idx, slot in enumerate(list(self.slots)):
+            task = slot.get("task")
+            process = slot.get("process")
+            worker_id = _int_or_default(slot.get("worker_id"), idx)
+            generation = _int_or_default(slot.get("generation"), 0)
+            if task is None:
+                if process is None or not process.is_alive():
+                    self._stop_slot(slot, terminate=True)
+                    self.slots[idx] = self._new_slot(worker_id=worker_id, generation=generation + 1)
+                continue
+            path = str(task.get("path") or "")
+            file_name = os.path.basename(path)
+            if process is None or not process.is_alive():
+                exitcode = getattr(process, "exitcode", None)
+                self._log(
+                    "WARNING",
+                    f"Source archive metadata parse worker exited unexpectedly (exitcode={exitcode}): {file_name}",
+                )
+                self._stop_slot(slot, terminate=True)
+                self.slots[idx] = self._new_slot(worker_id=worker_id, generation=generation + 1)
+                results.append(
+                    {
+                        "worker_id": worker_id,
+                        "generation": generation,
+                        "index": _int_or_default(task.get("index"), 0),
+                        "path": path,
+                        "file_name": file_name,
+                        "row": None,
+                        "error": f"parse worker exited unexpectedly (exitcode={exitcode})",
+                    }
+                )
+                continue
+            started_at = slot.get("started_at")
+            if started_at is None:
+                continue
+            elapsed = now - float(started_at)
+            if elapsed < self.timeout_seconds:
+                continue
+            self._log(
+                "WARNING",
+                f"Source archive metadata parse timed out after {self.timeout_seconds}s: {file_name}",
+            )
+            self._stop_slot(slot, terminate=True)
+            self.slots[idx] = self._new_slot(worker_id=worker_id, generation=generation + 1)
+            results.append(
+                {
+                    "worker_id": worker_id,
+                    "generation": generation,
+                    "index": _int_or_default(task.get("index"), 0),
+                    "path": path,
+                    "file_name": file_name,
+                    "row": None,
+                    "error": f"parse timed out after {self.timeout_seconds}s",
+                }
+            )
+        self._dispatch_available()
+        return results
+
+
 def _same_mtime(left: Any, right: Any) -> bool:
     if left is None or right is None:
         return left is None and right is None
@@ -2012,9 +2277,11 @@ def _collect_source_assets_incremental(
     parse_attempts = 0
     parse_completed = 0
     last_progress_count = 0
-    parse_workers = max(1, int(parse_workers or 1))
-    parse_inflight = max(parse_workers, int(parse_inflight or parse_workers))
+    last_parse_wait_log_at = time.monotonic()
+    parse_workers = max(1, min(int(parse_workers or 1), 32))
+    parse_inflight = max(parse_workers, min(int(parse_inflight or parse_workers), parse_workers * 4))
     row_batch_size = max(1, int(row_batch_size or 1))
+    parse_timeout_seconds = max(60, int(getattr(settings, "ASSET_SCAN_PARSE_TIMEOUT_SECONDS", 600) or 600))
 
     def _log(level: str, message: str) -> None:
         if log_callback:
@@ -2038,14 +2305,6 @@ def _collect_source_assets_incremental(
         batch = pending_rows[:]
         pending_rows.clear()
         row_batch_callback(batch)
-
-    def _parse_one(index: int, normalized_path: str) -> Dict[str, Any]:
-        file_name = os.path.basename(normalized_path)
-        try:
-            row = _parse_source_entry(normalized_path, parse_root)
-            return {"index": index, "path": normalized_path, "file_name": file_name, "row": row, "error": None}
-        except Exception as exc:
-            return {"index": index, "path": normalized_path, "file_name": file_name, "row": None, "error": exc}
 
     def _handle_parse_result(result: Dict[str, Any]) -> None:
         nonlocal parse_completed, last_progress_count
@@ -2095,24 +2354,36 @@ def _collect_source_assets_incremental(
             last_progress_count = entry_count
         _emit_row_batch()
 
-    def _drain_completed(pending: set, *, wait_for_one: bool = False) -> set:
-        if not pending:
-            return pending
-        timeout = None if wait_for_one else 0
-        done, remaining = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
-        for future in done:
-            _handle_parse_result(future.result())
-        return remaining
-
     _log(
         "INFO",
         "Source root discovery started: "
         f"{root.path} (workers={parse_workers}, inflight={parse_inflight}, "
-        f"db_batch_size={row_batch_size}, skip_unchanged_failures={skip_unchanged_failures})",
+        f"db_batch_size={row_batch_size}, parse_timeout={parse_timeout_seconds}s, "
+        f"skip_unchanged_failures={skip_unchanged_failures})",
     )
-    parse_root = SimpleNamespace(id=root.id, path=root.path)
-    with ThreadPoolExecutor(max_workers=parse_workers, thread_name_prefix="asset-parse") as executor:
-        pending = set()
+    parse_pool = _SourceParseProcessPool(
+        root_id=int(root.id or 0),
+        root_path=root.path,
+        workers=parse_workers,
+        timeout_seconds=parse_timeout_seconds,
+        log_callback=_log,
+    )
+
+    def _log_parse_wait_if_needed() -> None:
+        nonlocal last_parse_wait_log_at
+        now = time.monotonic()
+        if now - last_parse_wait_log_at < 30:
+            return
+        _log(
+            "INFO",
+            "Source archive metadata parsing in progress: "
+            f"pending={len(pending_indices)}, active_or_queued={parse_pool.active_count()}, "
+            f"completed={parse_completed}/{parse_attempts}, timeout={parse_timeout_seconds}s",
+        )
+        last_parse_wait_log_at = now
+
+    try:
+        pending_indices: set[int] = set()
         for path in _iter_source_candidates(root.path):
             entry_count += 1
             normalized_path = _normalize_path(path)
@@ -2156,12 +2427,27 @@ def _collect_source_assets_incremental(
                     f"{file_name} (changed/new={parse_attempts}, completed={parse_completed}, "
                     f"workers={parse_workers}, skipped={skipped_unchanged}, issue={len(issues)})"
                 )
-            pending.add(executor.submit(_parse_one, parse_attempts, normalized_path))
-            while len(pending) >= parse_inflight:
-                pending = _drain_completed(pending, wait_for_one=True)
-            pending = _drain_completed(pending, wait_for_one=False)
-        while pending:
-            pending = _drain_completed(pending, wait_for_one=True)
+            parse_pool.submit(parse_attempts, normalized_path)
+            pending_indices.add(parse_attempts)
+            while parse_pool.active_count() >= parse_inflight:
+                for result in parse_pool.drain(wait_for_one=True):
+                    pending_indices.discard(int(result.get("index") or 0))
+                    _handle_parse_result(result)
+                _log_parse_wait_if_needed()
+            for result in parse_pool.drain(wait_for_one=False):
+                pending_indices.discard(int(result.get("index") or 0))
+                _handle_parse_result(result)
+        while pending_indices:
+            drained = parse_pool.drain(wait_for_one=True)
+            if not drained:
+                _log_parse_wait_if_needed()
+                continue
+            for result in drained:
+                pending_indices.discard(int(result.get("index") or 0))
+                _handle_parse_result(result)
+            _log_parse_wait_if_needed()
+    finally:
+        parse_pool.close()
     _emit_row_batch(force=True)
     _log(
         "INFO",
@@ -2775,9 +3061,20 @@ class AssetInventoryService:
             }
             await self._progress(task_id, "Asset inventory scan completed", 100)
             return summary
-        except Exception:
+        except Exception as exc:
             if db is not None:
                 await db.rollback()
+                if "roots" in locals():
+                    try:
+                        await self._fail_running_states_for_roots(
+                            db,
+                            roots,
+                            inventory_types=inventory_types,
+                            error=str(exc),
+                        )
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
             raise
         finally:
             if generated_session and db is not None:
@@ -4018,6 +4315,40 @@ class AssetInventoryService:
         state.last_error = error
         state.updated_at = _utcnow()
         db.add(state)
+
+    async def _fail_running_states_for_roots(
+        self,
+        db: AsyncSession,
+        roots: Sequence[ManagedRootORM],
+        *,
+        inventory_types: Optional[Sequence[str]],
+        error: str,
+    ) -> None:
+        now = _utcnow()
+        values = {
+            "status": "FAILED",
+            "last_scan_finished_at": now,
+            "last_error": str(error or "Asset inventory scan failed"),
+            "needs_rescan": True,
+            "updated_at": now,
+        }
+        for root in roots:
+            inventory_type: Optional[str] = None
+            if root.root_role == "source_product_pool":
+                inventory_type = "source_product"
+            elif root.root_role == "orbit_asset_pool":
+                inventory_type = "orbit_asset"
+            if not inventory_type or not self._scan_includes_type(inventory_types, inventory_type):
+                continue
+            await db.execute(
+                update(AssetInventoryStateORM)
+                .where(
+                    AssetInventoryStateORM.root_ref_id == root.id,
+                    AssetInventoryStateORM.inventory_type == inventory_type,
+                    AssetInventoryStateORM.status == "RUNNING",
+                )
+                .values(**values)
+            )
 
     async def _replace_root_issues(
         self,
