@@ -14,7 +14,7 @@
  ## 设计目标
 
  - 不依赖 Windows 文件共享（SMB）、映射盘符、UNC 路径
- - 不要求主服务器和 worker 共用盘符或路径结构
+- 不要求主服务器和 worker 共用盘符或路径结构；worker 可通过 `CLUSTER_WORKER_TASK_ROOT`、`CLUSTER_WORKER_RESULT_ROOT` 使用本机任务/结果缓存根
  - Worker 节点可以动态增减，配置简单
  - 复用现有 `SOURCE_PRODUCT_DIRS` 压缩包源池和 `TASK_POOL_ROOT` 体系
  - 传输失败利用队列系统自带的重试机制
@@ -69,13 +69,13 @@
 
  **Worker 端流程**：
 
- 1. 读取 `item.source_task_dir`，检查本地目录是否存在且包含 `master/`、`slave/`、`pair_metadata.json`
+ 1. 读取 `item.source_task_dir`，解析 worker 本地输入目录。未配置 `CLUSTER_WORKER_TASK_ROOT` 时沿用原路径；已配置时使用 `CLUSTER_WORKER_TASK_ROOT\item_<item_id>\Task_*`
  2. 若无 → 调用 `GET /api/cluster/input-package/{item_id}`
  3. Worker 请求头携带 `X-Cluster-Token`，主服务器校验 `CLUSTER_SHARED_TOKEN`
  4. 主服务器读取 `item.source_task_dir` 指向的现有 Task_Pool 目录
  5. 将该 Task_Pool 目录打成 zip 流式返回给 worker
- 6. Worker 解包到 `item.source_task_dir`（保持与主服务器一致的路径结构）
- 7. Worker 对 zip 成员路径做目录逃逸校验，并校验解包后的 `master/`、`slave/` 目录可用
+ 6. Worker 解包到本地输入目录
+ 7. Worker 对 zip 成员路径做目录逃逸校验，并校验解包后的 `Input_Data` 或 `master/`、`slave/` 目录可用
 
  **主服务器新增 API**：
 
@@ -85,13 +85,13 @@
    Response: application/zip (streaming)
    内容结构:
      Task_YYYYMMDD_YYYYMMDD/
+       .dinsar_pair.json
        master/
          <源文件...>
        slave/
          <源文件...>
        orbit/
          <精轨文件...>
-       pair_metadata.json
  ```
 
  **当前实现边界**：主服务器不在传输接口里重新从 `SOURCE_PRODUCT_DIRS` 解包源压缩包；传输接口只打包已经由 Task_Pool 准备流程生成的 `item.source_task_dir`。如果主服务器上的 `source_task_dir` 不存在，接口返回 404，队列重试会保留失败信息。
@@ -102,11 +102,12 @@
 
  **Worker 端流程**：
 
- 1. LandSAR 完成后，收集标准产品包文件列表（从 `task_result.source_files` 和 manifest 获取）
+ 1. LandSAR 完成后，收集标准产品包文件列表（从 `task_result.source_files` 和 manifest 获取）。未配置 `CLUSTER_WORKER_RESULT_ROOT` 时沿用 `item.results_root_dir\runs\<run_key>`；已配置时使用 `CLUSTER_WORKER_RESULT_ROOT\<pair_key>\runs\<run_key>`
  2. 调用 `POST /api/cluster/upload-result/{item_id}`
- 3. 以 multipart 或流式上传产品包（含 primary file、auxiliary files、metadata）
+ 3. 以 multipart 上传 managed run 目录内容（不是外层 run 目录本身）
  4. 主服务器接收后写入该 item 的标准目录 `results_root_dir\runs\<run_key>`
- 5. 触发 catalog 登记（复用现有 `result_catalog_service.bootstrap` 或增量登记）
+ 5. 触发 catalog 登记，修复 `execution_manifest.json` 和 current 指针
+ 6. 主服务器把 item/execution 标记为完成并尝试 finalize cluster run；远端 worker 不再在上传后自行标记完成
 
  **主服务器新增 API**：
 
@@ -122,11 +123,12 @@
 
  **上传后处理**：
 
- 1. 校验文件完整性（与 manifest 对比）
- 2. 写入 `D:\production_results\dinsar\<engine_code>\<profile>\<task_name>\`
- 3. 调用 `result_catalog_service` 增量登记
- 4. 更新 `DinsarProductionExecutionORM` 指向最终结果路径
- 5. 返回登记结果给 worker
+ 1. 安全解压上传 zip，替换该 item 的 `results_root_dir\runs\<run_key>`
+ 2. 调用 `result_catalog_service` 增量登记
+ 3. 校验 catalog 只登记 1 条且生成 `execution_manifest.json` 和 current 指针
+ 4. 更新 `DinsarProductionExecutionORM` / `DinsarProductionRunItemORM` 指向主服务器最终结果路径
+ 5. 标记 item 完成，并在所有 item 终态后 finalize run
+ 6. 返回登记结果给 worker
 
  ### 错误处理与重试
 
@@ -199,10 +201,14 @@
  CLUSTER_MAIN_SERVER_URL=http://192.168.1.62
  CLUSTER_SHARED_TOKEN=<same-long-random-token-on-main-and-workers>
  CLUSTER_TRANSFER_TIMEOUT_SECONDS=3600
+ CLUSTER_WORKER_TASK_ROOT=D:\Cluster_Work\Task_Pool
+ CLUSTER_WORKER_RESULT_ROOT=D:\Cluster_Work\Results
+ LANDSAR_RUNTIME_ID=landsar_runtime_v1
  ```
 
- `CLUSTER_MAIN_SERVER_URL` 用于 worker 构造下载/上传 API 的完整 URL。未配置时默认使用 `DATABASE_URL` 中的 host 推断。
- `CLUSTER_SHARED_TOKEN` 是集群传输接口的专用共享密钥，主服务器和所有远端 worker 必须一致且非空；未配置时 `/api/cluster/...` 接口返回 503。
+`CLUSTER_MAIN_SERVER_URL` 用于 worker 构造下载/上传 API 的完整 URL。未配置时默认使用 `DATABASE_URL` 中的 host 推断。
+`CLUSTER_SHARED_TOKEN` 是集群传输接口的专用共享密钥，主服务器和所有远端 worker 必须一致且非空；未配置时 `/api/cluster/...` 接口返回 503。
+`CLUSTER_WORKER_TASK_ROOT`、`CLUSTER_WORKER_RESULT_ROOT` 是远端 worker 本机缓存根。未配置时保持旧行为，直接使用数据库中的 `source_task_dir` 和 `results_root_dir`。
 
  ## 实现路线图
 
@@ -224,6 +230,8 @@
  - [x] 数据搬运 pre-flight（HTTP 下载 Task_Pool zip + 安全解压）
  - [x] 结果上传 post-flight（HTTP 上传结果 zip + catalog 登记）
  - [x] 集群传输接口 `CLUSTER_SHARED_TOKEN` 鉴权
+ - [x] 主服务器上传登记后负责 item/execution 完成和 run finalize
+ - [x] 支持 worker 本机输入/结果根，避免强依赖主服务器盘符
  - [ ] 远端 .6 端到端测试
  - [ ] Worker 开机自启
 

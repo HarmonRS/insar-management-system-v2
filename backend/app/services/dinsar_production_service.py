@@ -1184,9 +1184,12 @@ class DinsarProductionService:
         run: DinsarProductionRunORM,
         item: DinsarProductionRunItemORM,
         run_key: str,
+        output_dir_override: Optional[str] = None,
         db: AsyncSession,
     ) -> DinsarProductionExecutionORM:
-        output_dir = _execution_dir(item, run_key)
+        output_dir = os.path.normpath(
+            os.path.abspath(output_dir_override)
+        ) if output_dir_override else _execution_dir(item, run_key)
         _ensure_dir(output_dir)
         execution = DinsarProductionExecutionORM(
             execution_id=run_key,

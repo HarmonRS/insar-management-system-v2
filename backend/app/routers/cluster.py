@@ -13,6 +13,8 @@ import tempfile
 import zipfile
 from typing import Optional
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import (
     APIRouter,
     Depends,
@@ -24,11 +26,14 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..database import get_db
-from ..models.orm import DinsarProductionRunItemORM
+from ..models.orm import (
+    DinsarProductionExecutionORM,
+    DinsarProductionRunItemORM,
+    DinsarProductionRunORM,
+)
 from ..services.cluster_transport import safe_extract_zip
 
 router = APIRouter()
@@ -263,17 +268,84 @@ async def upload_cluster_result(
 
     # ----- catalog registration ------------------------------------------------
     from ..services.result_catalog_service import result_catalog_service as rcs
+    from ..services.dinsar_production_service import dinsar_production_service
 
     try:
         publish_result = await rcs.publish_from_sources(db, [extract_dir])
         processed = int(publish_result.get("processed", 0) or 0)
+        failed = int(publish_result.get("failed", 0) or 0)
         if processed > 0:
             await rcs.rebuild_catalog(db, full_rebuild=True)
+        if processed != 1 or failed != 0:
+            raise RuntimeError(
+                f"expected processed=1 failed=0, got processed={processed} failed={failed}"
+            )
+
+        details = publish_result.get("details") if isinstance(publish_result, dict) else []
+        detail = next(
+            (
+                item_detail
+                for item_detail in (details or [])
+                if str(item_detail.get("run_key") or "").strip() == normalized_run_key
+            ),
+            (details or [{}])[0] if details else {},
+        )
+        execution_manifest_path = str(
+            detail.get("execution_manifest_path")
+            or os.path.join(extract_dir, "execution_manifest.json")
+        )
+        current_pointer_path = str(detail.get("current_pointer_path") or "")
+        if not os.path.isfile(execution_manifest_path):
+            raise RuntimeError(
+                f"execution manifest was not created: {execution_manifest_path}"
+            )
+        if not current_pointer_path or not os.path.isfile(current_pointer_path):
+            raise RuntimeError(
+                f"current pointer was not created: {current_pointer_path or '<empty>'}"
+            )
+
+        run = await db.get(DinsarProductionRunORM, str(item.run_id or ""))
+        if run is None:
+            raise RuntimeError(f"Cluster run not found for item {item_id}: {item.run_id}")
+        execution_result = await db.execute(
+            select(DinsarProductionExecutionORM).where(
+                DinsarProductionExecutionORM.item_id == item.id,
+                DinsarProductionExecutionORM.run_key == normalized_run_key,
+            )
+        )
+        execution = execution_result.scalar_one_or_none()
+        if execution is None:
+            raise RuntimeError(
+                f"Cluster execution not found for item={item.id} run_key={normalized_run_key}"
+            )
+        execution.output_dir = extract_dir
+        item.latest_output_dir = extract_dir
+        await dinsar_production_service.mark_item_completed(
+            run=run,
+            item=item,
+            execution=execution,
+            manifest_path=execution_manifest_path,
+            metrics={
+                "cluster_upload": True,
+                "catalog_processed": processed,
+                "catalog_failed": failed,
+                "current_pointer_path": current_pointer_path,
+            },
+            db=db,
+        )
+        final_status = await dinsar_production_service.finalize_cluster_run_if_complete(
+            run,
+            db=db,
+        )
         return {
             "registered": processed > 0,
+            "completed": True,
+            "final_status": final_status,
             "processed": processed,
-            "failed": int(publish_result.get("failed", 0) or 0),
+            "failed": failed,
             "catalog_path": extract_dir,
+            "execution_manifest_path": execution_manifest_path,
+            "current_pointer_path": current_pointer_path,
         }
     except Exception as exc:
         raise HTTPException(

@@ -67,6 +67,16 @@ def safe_extract_zip(zf: zipfile.ZipFile, target_dir: str) -> None:
     zf.extractall(target_root)
 
 
+def _zip_directory_contents(source_dir: str, zip_path: str) -> None:
+    source_root = os.path.abspath(source_dir)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for current, _, files in os.walk(source_root):
+            for name in files:
+                path = os.path.join(current, name)
+                arcname = os.path.relpath(path, source_root)
+                zf.write(path, arcname)
+
+
 def _resolve_cluster_server_url() -> str:
     """Return the main-server HTTP base URL for cluster data transport.
 
@@ -99,23 +109,52 @@ def _is_remote_worker() -> bool:
     return host not in {"", "127.0.0.1", "localhost"}
 
 
+def resolve_cluster_local_task_dir(item: DinsarProductionRunItemORM) -> str:
+    """Return the worker-local Task_* directory for a cluster item."""
+    source_task_dir = os.path.normpath(str(item.source_task_dir or ""))
+    worker_root = _read_cluster_env("CLUSTER_WORKER_TASK_ROOT")
+    if not worker_root:
+        return source_task_dir
+    task_name = os.path.basename(source_task_dir) or f"Task_item_{item.id}"
+    return os.path.normpath(
+        os.path.join(worker_root, f"item_{item.id}", task_name)
+    )
+
+
+def resolve_cluster_local_run_dir(
+    item: DinsarProductionRunItemORM,
+    run_key: str,
+) -> str:
+    """Return the worker-local managed result run directory."""
+    worker_root = _read_cluster_env("CLUSTER_WORKER_RESULT_ROOT")
+    if not worker_root:
+        return os.path.join(str(item.results_root_dir or ""), "runs", run_key)
+    pair_fragment = str(item.pair_key or f"item_{item.id}").strip() or f"item_{item.id}"
+    safe_pair = "".join(
+        ch if ch.isalnum() or ch in "._-" else "_"
+        for ch in pair_fragment
+    ).strip("._") or f"item_{item.id}"
+    return os.path.normpath(os.path.join(worker_root, safe_pair, "runs", run_key))
+
+
 async def materialize_cluster_input(
     item: DinsarProductionRunItemORM,
-    source_task_dir: str,
+    local_task_dir: str,
     task_id: str,
 ) -> None:
     """Download and extract the input data for a cluster item.
 
     Calls ``GET /api/cluster/input-package/{item_id}`` on the main
     server, retrieves a zip containing the Task_Pool directory tree,
-    and extracts it so that *source_task_dir* exists locally.
+    and extracts it so that *local_task_dir* exists locally.
     """
     from .task_service import task_service
 
     server_url = _resolve_cluster_server_url()
     download_url = f"{server_url}/api/cluster/input-package/{item.id}"
-    parent_dir = os.path.dirname(source_task_dir)
-    task_name = os.path.basename(source_task_dir)
+    parent_dir = os.path.dirname(local_task_dir)
+    task_name = os.path.basename(local_task_dir)
+    package_task_name = os.path.basename(str(item.source_task_dir or "")) or task_name
 
     await task_service.add_log(
         task_id,
@@ -124,8 +163,8 @@ async def materialize_cluster_input(
     )
 
     tmp_zip = os.path.join(
-        tempfile.gettempdir(),
-        f"cluster_input_{item.id}_{task_name}.zip",
+        tempfile.mkdtemp(prefix=f"cluster_input_{item.id}_"),
+        f"{package_task_name}.zip",
     )
     try:
         req = urllib.request.Request(
@@ -138,18 +177,28 @@ async def materialize_cluster_input(
                 shutil.copyfileobj(resp, fh, 8 * 1024 * 1024)
 
         os.makedirs(parent_dir, exist_ok=True)
+        if os.path.isdir(local_task_dir):
+            shutil.rmtree(local_task_dir)
         with zipfile.ZipFile(tmp_zip, "r") as zf:
             safe_extract_zip(zf, parent_dir)
 
-        if not os.path.isdir(source_task_dir):
+        extracted_task_dir = os.path.join(parent_dir, package_task_name)
+        if (
+            os.path.isdir(extracted_task_dir)
+            and os.path.normcase(os.path.abspath(extracted_task_dir))
+            != os.path.normcase(os.path.abspath(local_task_dir))
+        ):
+            os.replace(extracted_task_dir, local_task_dir)
+
+        if not os.path.isdir(local_task_dir):
             raise RuntimeError(
-                f"Extraction did not create expected directory: {source_task_dir}"
+                f"Extraction did not create expected directory: {local_task_dir}"
             )
 
         await task_service.add_log(
             task_id,
             "INFO",
-            f"[cluster] Input data ready: {source_task_dir}",
+            f"[cluster] Input data ready: {local_task_dir}",
         )
     except urllib.error.HTTPError as exc:
         body_text = ""
@@ -167,7 +216,9 @@ async def materialize_cluster_input(
         ) from exc
     finally:
         try:
-            os.unlink(tmp_zip)
+            tmp_root = os.path.dirname(tmp_zip)
+            if os.path.isdir(tmp_root):
+                shutil.rmtree(tmp_root)
         except Exception:
             pass
 
@@ -194,19 +245,10 @@ async def upload_cluster_result(
         "[cluster] Packaging results for upload ...",
     )
 
-    run_dir_name = os.path.basename(os.path.normpath(managed_run_dir))
-    tmp_zip = os.path.join(
-        tempfile.gettempdir(),
-        f"cluster_result_{item.id}.zip",
-    )
+    tmp_root = tempfile.mkdtemp(prefix=f"cluster_result_{item.id}_")
+    tmp_zip = os.path.join(tmp_root, "result.zip")
     try:
-        parent = os.path.dirname(managed_run_dir)
-        shutil.make_archive(
-            tmp_zip.replace(".zip", ""),
-            "zip",
-            root_dir=parent,
-            base_dir=run_dir_name,
-        )
+        _zip_directory_contents(managed_run_dir, tmp_zip)
 
         await task_service.add_log(
             task_id,
@@ -284,7 +326,7 @@ async def upload_cluster_result(
         ) from exc
     finally:
         try:
-            if os.path.isfile(tmp_zip):
-                os.unlink(tmp_zip)
+            if os.path.isdir(tmp_root):
+                shutil.rmtree(tmp_root)
         except Exception:
             pass

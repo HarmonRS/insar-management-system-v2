@@ -312,6 +312,7 @@ class Settings(BaseSettings):
     WSL_BROKER_JOB_ROOT: str = ""
     ISCE2_RUNTIME_ID: str = ""
     PYINT_RUNTIME_ID: str = ""
+    LANDSAR_RUNTIME_ID: str = ""
 
     ISCE2_ENABLED: bool = False
     ISCE2_WSL_DISTRO: str = "Ubuntu-24.04"
@@ -678,6 +679,8 @@ class Settings(BaseSettings):
             object.__setattr__(self, "ISCE2_RUNTIME_ID", "isce2_runtime_v1")
         if not self.PYINT_RUNTIME_ID:
             object.__setattr__(self, "PYINT_RUNTIME_ID", "gamma_pyint_runtime_v1")
+        if not self.LANDSAR_RUNTIME_ID:
+            object.__setattr__(self, "LANDSAR_RUNTIME_ID", "landsar_runtime_v1")
         if not self.PYINT_WSL_DISTRO:
             object.__setattr__(self, "PYINT_WSL_DISTRO", self.WSL_DISTRO or self.ISCE2_WSL_DISTRO)
         if not self.PYINT_WSL_PYTHON:

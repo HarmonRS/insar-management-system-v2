@@ -71,9 +71,11 @@ def _current_pointer_path(results_root_dir: str, *, engine_code: str, profile_co
 def _runtime_id_for_engine(engine_code: str) -> Optional[str]:
     normalized = str(engine_code or "").strip().lower()
     if normalized == "isce2":
-        return settings.ISCE2_RUNTIME_ID or None
+        return getattr(settings, "ISCE2_RUNTIME_ID", "") or None
+    if normalized == "landsar":
+        return getattr(settings, "LANDSAR_RUNTIME_ID", "") or None
     if normalized in {"pyint", "gamma"}:
-        return settings.PYINT_RUNTIME_ID or None
+        return getattr(settings, "PYINT_RUNTIME_ID", "") or None
     return None
 
 
@@ -137,9 +139,17 @@ def repair_managed_completion_files(
     task_name = _first_text(payload.get("task_name"), payload.get("task_alias"), run_key)
     task_alias = _first_text(payload.get("task_alias"), payload.get("task_name"), task_name)
     output_dir = _normalize_path(payload.get("output_dir") or normalized_run_dir)
+    if normalized_primary.startswith(normalized_run_dir + os.sep):
+        output_dir = normalized_run_dir
     native_output_dir = _normalize_path(
         payload.get("native_output_dir") or os.path.join(normalized_run_dir, "native")
     )
+    if not native_output_dir.startswith(normalized_run_dir + os.sep):
+        local_native_dir = os.path.join(normalized_run_dir, "native")
+        if os.path.isdir(local_native_dir):
+            native_output_dir = _normalize_path(local_native_dir)
+        else:
+            native_output_dir = output_dir
     results_root_dir = _infer_results_root_dir(normalized_run_dir, pair_key)
     publish_root_dir = _normalize_path(os.path.dirname(results_root_dir))
 

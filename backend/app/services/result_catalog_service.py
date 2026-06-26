@@ -142,9 +142,11 @@ def _coerce_optional_int(value: Any) -> Optional[int]:
 def _runtime_id_for_engine(engine_code: Optional[str]) -> Optional[str]:
     normalized = str(engine_code or "").strip().lower()
     if normalized == "isce2":
-        return settings.ISCE2_RUNTIME_ID or None
+        return getattr(settings, "ISCE2_RUNTIME_ID", "") or None
+    if normalized == "landsar":
+        return getattr(settings, "LANDSAR_RUNTIME_ID", "") or None
     if normalized in {"pyint", "gamma"}:
-        return settings.PYINT_RUNTIME_ID or None
+        return getattr(settings, "PYINT_RUNTIME_ID", "") or None
     return None
 
 
@@ -822,6 +824,13 @@ class ResultCatalogService:
                 package_dir = _ensure_directory(os.path.join(target_root, pair_key, "runs", run_key))
                 source_dir = _normalize_path(candidate["source_dir"])
                 in_place_source = _is_path_within(package_dir, source_dir)
+                if candidate_meta["engine_code"] in {"isce2", "landsar"} and in_place_source:
+                    candidate_meta = dict(candidate_meta)
+                    candidate_meta["output_dir"] = package_dir
+                    native_dir = os.path.join(package_dir, RUN_NATIVE_DIRNAME)
+                    candidate_meta["native_output_dir"] = (
+                        native_dir if os.path.isdir(native_dir) else package_dir
+                    )
                 task_item = await self._lookup_task_item(
                     db,
                     pair_key=pair_key,
@@ -994,7 +1003,7 @@ class ResultCatalogService:
                 manifest_path = os.path.join(package_dir, "manifest.json")
                 with open(manifest_path, "w", encoding="utf-8") as fp:
                     json.dump(manifest, fp, ensure_ascii=False, indent=2)
-                if candidate["engine_code"] == "isce2" and in_place_source:
+                if candidate["engine_code"] in {"isce2", "landsar"} and in_place_source:
                     try:
                         completion_files_result = repair_managed_completion_files(
                             package_dir,

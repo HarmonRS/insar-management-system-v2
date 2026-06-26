@@ -26,6 +26,8 @@ from .asset_inventory_service import asset_inventory_service
 from .cluster_transport import (
     _is_remote_worker,
     materialize_cluster_input,
+    resolve_cluster_local_run_dir,
+    resolve_cluster_local_task_dir,
     upload_cluster_result,
 )
 from .dinsar_compat_service import dinsar_compat_service
@@ -164,15 +166,30 @@ def _normalize_positive_int(value: Any) -> Optional[int]:
 def _cluster_source_task_dir_ready(path: str) -> bool:
     if not path or not os.path.isdir(path):
         return False
+
+    def _has_landsar_source_file(directory: str) -> bool:
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
+                    name = entry.name.lower()
+                    if name.startswith("lt1") and name.endswith((".xml", ".tif", ".tiff")):
+                        return True
+        except OSError:
+            return False
+        return False
+
+    input_data_dir = os.path.join(path, "Input_Data")
+    if os.path.isdir(input_data_dir) and _has_landsar_source_file(input_data_dir):
+        return True
+
+    if not os.path.isfile(os.path.join(path, ".dinsar_pair.json")):
+        return False
+
     for child_name in ("master", "slave"):
         child_dir = os.path.join(path, child_name)
-        if not os.path.isdir(child_dir):
-            return False
-        try:
-            with os.scandir(child_dir) as entries:
-                if not any(entries):
-                    return False
-        except OSError:
+        if not os.path.isdir(child_dir) or not _has_landsar_source_file(child_dir):
             return False
     return True
 
@@ -3275,14 +3292,14 @@ async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
             raise ValueError(f"LandSAR cluster item not found: {item_id}")
 
         await db.refresh(item)
-        source_task_dir = os.path.normpath(str(item.source_task_dir or ""))
-        if source_task_dir and not _cluster_source_task_dir_ready(source_task_dir):
-            await materialize_cluster_input(item, source_task_dir, job.task_id)
-
         item_status = str(item.status or "").strip().upper()
         if item_status in {"COMPLETED", "FAILED", "SKIPPED", "CANCELLED"}:
             await dinsar_production_service.finalize_cluster_run_if_complete(run, db=db)
             return
+        source_task_dir = os.path.normpath(str(item.source_task_dir or ""))
+        local_task_dir = resolve_cluster_local_task_dir(item)
+        if local_task_dir and not _cluster_source_task_dir_ready(local_task_dir):
+            await materialize_cluster_input(item, local_task_dir, job.task_id)
 
         current_task = await task_service.get_task(job.task_id)
         task_cancelled = bool(current_task and current_task.status == "CANCELLED")
@@ -3323,10 +3340,12 @@ async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
         item_index = max(1, int(item.order_index or 1))
         item_label = item.task_alias or item.task_name
         run_key = f"{build_run_key('landsar', run.profile_code, started_at=datetime.utcnow())}_{item.id}_{uuid.uuid4().hex[:6]}"
+        local_run_dir = os.path.normpath(resolve_cluster_local_run_dir(item, run_key))
         execution = await dinsar_production_service.begin_item_execution(
             run=run,
             item=item,
             run_key=run_key,
+            output_dir_override=local_run_dir,
             db=db,
         )
 
@@ -3425,7 +3444,7 @@ async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
         request = RunRequest(
             engine_code="landsar",
             profile=run.profile_code,
-            root_dir=str(item.source_task_dir),
+            root_dir=local_task_dir,
             job_id=job.job_id,
             num_to_process=1,
             timeout_seconds=per_task_timeout or None,
@@ -3438,6 +3457,7 @@ async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
                 "__managed_orbit_output_dir": managed_orbit_output_dir,
                 "__managed_run_key": run_key,
                 "__source_root_override": run.source_root,
+                "__source_task_dir_override": source_task_dir,
                 "__rerun_mode": "rerun_all",
                 "__cluster_item": True,
             },
@@ -3497,24 +3517,17 @@ async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
                 native_output_dir=native_output_dir,
                 metrics=metrics,
             )
-            await asyncio.to_thread(
-                dinsar_production_service.write_current_pointer,
-                run=run,
-                item=item,
-                execution=execution,
-                manifest_path=manifest_path,
-                primary_file=primary_file,
-                source_files=source_files,
-                native_output_dir=native_output_dir,
-            )
-            await dinsar_production_service.mark_item_completed(
-                run=run,
-                item=item,
-                execution=execution,
-                manifest_path=manifest_path,
-                metrics=metrics,
-                db=db,
-            )
+            if not _is_remote_worker():
+                await asyncio.to_thread(
+                    dinsar_production_service.write_current_pointer,
+                    run=run,
+                    item=item,
+                    execution=execution,
+                    manifest_path=manifest_path,
+                    primary_file=primary_file,
+                    source_files=source_files,
+                    native_output_dir=native_output_dir,
+                )
 
             # ---- Post-flight: upload or local publish ----
             if _is_remote_worker():
@@ -3544,6 +3557,14 @@ async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
                         "WARNING",
                         f"[cluster {item_index}/{total_items}] Result catalog publish failed for {item_label}: {publish_error}",
                     )
+                await dinsar_production_service.mark_item_completed(
+                    run=run,
+                    item=item,
+                    execution=execution,
+                    manifest_path=manifest_path,
+                    metrics=metrics,
+                    db=db,
+                )
 
             await task_service.add_log(
                 job.task_id,
@@ -3554,28 +3575,46 @@ async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
         except Exception as exc:
             run_exception_text = str(exc)
             item_error = run_exception_text
-            await dinsar_production_service.mark_item_failed(
-                run=run,
-                item=item,
-                execution=execution,
-                error_message=item_error,
-                db=db,
-            )
-            await task_service.add_log(
-                job.task_id,
-                "WARNING",
-                f"[cluster {item_index}/{total_items}] Failed {item_label}: {item_error}",
-            )
-            dinsar_production_service.append_run_log(
-                run.run_id,
-                f"[cluster-item-failed] {item_index}/{total_items} {item_label}: {item_error}",
-            )
-            if task_result.get("command"):
-                await task_service.add_log(job.task_id, "INFO", f"LandSAR command [{item_label}]: {task_result.get('command')}")
-            if task_result.get("stdout_tail"):
-                await task_service.add_log(job.task_id, "INFO", f"LandSAR stdout tail [{item_label}]:\n{task_result.get('stdout_tail')}")
-            if task_result.get("stderr_tail"):
-                await task_service.add_log(job.task_id, "WARNING", f"LandSAR stderr tail [{item_label}]:\n{task_result.get('stderr_tail')}")
+            remote_completed = False
+            if _is_remote_worker():
+                try:
+                    await db.refresh(item)
+                    remote_completed = str(item.status or "").strip().upper() == "COMPLETED"
+                except Exception:
+                    remote_completed = False
+            if remote_completed:
+                await task_service.add_log(
+                    job.task_id,
+                    "INFO",
+                    f"[cluster {item_index}/{total_items}] Main server already completed {item_label}; keeping completed state after local error: {item_error}",
+                )
+                dinsar_production_service.append_run_log(
+                    run.run_id,
+                    f"[cluster-item-ok-after-upload] {item_index}/{total_items} {item_label}: {item_error}",
+                )
+            else:
+                await dinsar_production_service.mark_item_failed(
+                    run=run,
+                    item=item,
+                    execution=execution,
+                    error_message=item_error,
+                    db=db,
+                )
+                await task_service.add_log(
+                    job.task_id,
+                    "WARNING",
+                    f"[cluster {item_index}/{total_items}] Failed {item_label}: {item_error}",
+                )
+                dinsar_production_service.append_run_log(
+                    run.run_id,
+                    f"[cluster-item-failed] {item_index}/{total_items} {item_label}: {item_error}",
+                )
+                if task_result.get("command"):
+                    await task_service.add_log(job.task_id, "INFO", f"LandSAR command [{item_label}]: {task_result.get('command')}")
+                if task_result.get("stdout_tail"):
+                    await task_service.add_log(job.task_id, "INFO", f"LandSAR stdout tail [{item_label}]:\n{task_result.get('stdout_tail')}")
+                if task_result.get("stderr_tail"):
+                    await task_service.add_log(job.task_id, "WARNING", f"LandSAR stderr tail [{item_label}]:\n{task_result.get('stderr_tail')}")
         finally:
             keepalive_task.cancel()
             try:
