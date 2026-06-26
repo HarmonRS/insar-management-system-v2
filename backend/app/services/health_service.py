@@ -20,6 +20,7 @@ from ..models import (
     SARSceneGeoORM,
     SceneOrbitBindingORM,
     SourceProductAssetORM,
+    SystemTaskORM,
     SystemWorkerHeartbeatORM,
 )
 from ..idl_service import get_idl_status
@@ -1434,6 +1435,50 @@ async def _check_wsl_runtime() -> Dict[str, Any]:
     return status
 
 
+
+STUCK_TASK_THRESHOLD_SECONDS = read_int_env(
+    "HEALTH_STUCK_TASK_THRESHOLD_SECONDS",
+    3600,
+    minimum=300,
+    maximum=86400,
+)
+
+
+async def _check_stuck_tasks() -> Dict[str, Any]:
+    """Detect RUNNING tasks whose updated_at has not changed for too long."""
+    from datetime import timedelta
+
+    from ..database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        now = datetime.utcnow()
+        cutoff = now - timedelta(seconds=STUCK_TASK_THRESHOLD_SECONDS)
+        result = await db.execute(
+            select(SystemTaskORM).where(
+                SystemTaskORM.status == "RUNNING",
+                SystemTaskORM.updated_at < cutoff,
+            ).order_by(SystemTaskORM.updated_at.asc())
+        )
+        stuck = result.scalars().all()
+        items = []
+        for task in stuck:
+            minutes_stuck = max(0.0, (now - task.updated_at).total_seconds()) / 60.0
+            items.append({
+                "task_id": task.task_id,
+                "task_type": task.task_type,
+                "task_name": task.task_name,
+                "progress": task.progress,
+                "message": task.message,
+                "stuck_minutes": round(minutes_stuck, 1),
+                "started_at": task.started_at.isoformat() if task.started_at else None,
+                "last_updated_at": task.updated_at.isoformat() if task.updated_at else None,
+            })
+        return {
+            "ok": len(items) == 0,
+            "stuck_count": len(items),
+            "threshold_seconds": STUCK_TASK_THRESHOLD_SECONDS,
+            "stuck_tasks": items,
+        }
+
 async def get_health_status(
     include_external: bool = True,
     include_details: bool = False,
@@ -1464,6 +1509,7 @@ async def get_health_status(
     asset_inventory_status = await _check_asset_inventory()
     wsl_runtime_status = await _check_wsl_runtime()
     pairing_system_status = await pairing_state_service.get_pairing_system_status()
+    stuck_task_status = await _check_stuck_tasks()
     engines_status = {"ok": None, "overall": None, "engines": []}
     if full or include_details:
         engines_status = await _check_dinsar_engines()
@@ -1482,6 +1528,7 @@ async def get_health_status(
             asset_inventory_status.get("ok"),
             wsl_runtime_status.get("ok"),
             pairing_system_status.get("ok"),
+            stuck_task_status.get("ok"),
             (not settings.TIMESERIES_ENABLED) or timeseries_result_catalog_status.get("ok"),
             (not (settings.GAMMA_SBAS_ENABLED or settings.LANDSAR_SBAS_ENABLED))
             or sbas_insar_result_catalog_status.get("ok"),
@@ -1511,6 +1558,7 @@ async def get_health_status(
         "asset_inventory": asset_inventory_status,
         "wsl_runtime": wsl_runtime_status,
         "pairing_system": pairing_system_status,
+        "stuck_tasks": stuck_task_status,
         "idl": {
             "ok": idl_ok,
             "status": idl_status,

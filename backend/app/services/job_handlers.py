@@ -23,6 +23,11 @@ from ..models import SystemJobORM, DinsarResultORM, HazardPointORM, DinsarTaskIt
 from ..scheduler import scan_data_job
 from .data_service import data_service
 from .asset_inventory_service import asset_inventory_service
+from .cluster_transport import (
+    _is_remote_worker,
+    materialize_cluster_input,
+    upload_cluster_result,
+)
 from .dinsar_compat_service import dinsar_compat_service
 from .dinsar_naming import build_run_key
 from .dinsar_production_service import dinsar_production_service
@@ -154,6 +159,22 @@ def _normalize_positive_int(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _cluster_source_task_dir_ready(path: str) -> bool:
+    if not path or not os.path.isdir(path):
+        return False
+    for child_name in ("master", "slave"):
+        child_dir = os.path.join(path, child_name)
+        if not os.path.isdir(child_dir):
+            return False
+        try:
+            with os.scandir(child_dir) as entries:
+                if not any(entries):
+                    return False
+        except OSError:
+            return False
+    return True
 
 
 def _dedupe_existing_dirs(paths: Any) -> List[str]:
@@ -3254,6 +3275,10 @@ async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
             raise ValueError(f"LandSAR cluster item not found: {item_id}")
 
         await db.refresh(item)
+        source_task_dir = os.path.normpath(str(item.source_task_dir or ""))
+        if source_task_dir and not _cluster_source_task_dir_ready(source_task_dir):
+            await materialize_cluster_input(item, source_task_dir, job.task_id)
+
         item_status = str(item.status or "").strip().upper()
         if item_status in {"COMPLETED", "FAILED", "SKIPPED", "CANCELLED"}:
             await dinsar_production_service.finalize_cluster_run_if_complete(run, db=db)
@@ -3491,26 +3516,34 @@ async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
                 db=db,
             )
 
-            try:
-                publish_result = await result_catalog_service.publish_from_sources(db, [managed_run_dir])
-                processed_count = int(publish_result.get("processed", 0) or 0)
-                failed_count = int(publish_result.get("failed", 0) or 0)
-                if processed_count > 0:
-                    await result_catalog_service.rebuild_catalog(db, full_rebuild=True)
-                if processed_count != 1 or failed_count != 0:
-                    raise RuntimeError(f"expected processed=1 failed=0, got processed={processed_count} failed={failed_count}")
-                await task_service.add_log(
-                    job.task_id,
-                    "INFO",
-                    f"[cluster {item_index}/{total_items}] Published {item_label}",
+            # ---- Post-flight: upload or local publish ----
+            if _is_remote_worker():
+                upload_success = await upload_cluster_result(
+                    item, run, managed_run_dir, run_key, job.task_id,
                 )
-            except Exception as exc:
-                publish_error = str(exc)
-                await task_service.add_log(
-                    job.task_id,
-                    "WARNING",
-                    f"[cluster {item_index}/{total_items}] Result catalog publish failed for {item_label}: {publish_error}",
-                )
+                if not upload_success:
+                    raise RuntimeError("Cluster result upload failed or not registered.")
+            else:
+                try:
+                    publish_result = await result_catalog_service.publish_from_sources(db, [managed_run_dir])
+                    processed_count = int(publish_result.get("processed", 0) or 0)
+                    failed_count = int(publish_result.get("failed", 0) or 0)
+                    if processed_count > 0:
+                        await result_catalog_service.rebuild_catalog(db, full_rebuild=True)
+                    if processed_count != 1 or failed_count != 0:
+                        raise RuntimeError(f"expected processed=1 failed=0, got processed={processed_count} failed={failed_count}")
+                    await task_service.add_log(
+                        job.task_id,
+                        "INFO",
+                        f"[cluster {item_index}/{total_items}] Published {item_label}",
+                    )
+                except Exception as exc:
+                    publish_error = str(exc)
+                    await task_service.add_log(
+                        job.task_id,
+                        "WARNING",
+                        f"[cluster {item_index}/{total_items}] Result catalog publish failed for {item_label}: {publish_error}",
+                    )
 
             await task_service.add_log(
                 job.task_id,

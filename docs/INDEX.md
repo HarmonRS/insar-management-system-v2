@@ -37,6 +37,8 @@
   LandSAR D-InSAR/SBAS 鐨勫叏鐞?DEM 涓€娆℃€?Int16 鏍囧噯鍖栥€佸尯鍩熻鍓?tif銆佺敓浜ч厤缃拰 guardrail 绾﹀畾銆?
 - [LANDSAR_CLUSTER_WORKER_DEPLOYMENT_20260624.md](LANDSAR_CLUSTER_WORKER_DEPLOYMENT_20260624.md)  
   LandSAR D-InSAR 集群 worker 的队列分片设计、主服务器 IP 白名单、远端 Windows 节点 192.168.1.6 部署和运行约束。
+- [LANDSAR_CLUSTER_DATA_TRANSPORT_DESIGN_20260625.md](LANDSAR_CLUSTER_DATA_TRANSPORT_DESIGN_20260625.md)
+  LandSAR 集群数据搬运（HTTP Task_Pool 下载 + 结果回传）、Windows 集群运维（Task Scheduler 开机自启 + 心跳监控）。
 - [UNC_SOURCE_ARCHIVE_AND_MATERIALIZE_DESIGN_20260615.md](UNC_SOURCE_ARCHIVE_AND_MATERIALIZE_DESIGN_20260615.md)  
   LT-1/Sentinel-1 鏈湴婧愬帇缂╁寘绠＄悊銆佸寘鍐?XML/manifest 璧勪骇鍖栥€佹湰鍦?Task_Pool materialize锛屼互鍙?UNC 閫€鍑哄悗鐨勬湰鏈洪儴缃茶竟鐣屻€?
 - [SOURCE_ARCHIVE_INTEGRITY_AUDIT_20260620.md](SOURCE_ARCHIVE_INTEGRITY_AUDIT_20260620.md)  

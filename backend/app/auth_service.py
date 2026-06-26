@@ -25,7 +25,7 @@ VALID_ROLES = {ROLE_ADMIN, ROLE_VIEWER}
 
 SESSION_COOKIE_NAME = settings.AUTH_SESSION_COOKIE_NAME
 SESSION_TTL_HOURS = read_int_env("SESSION_TTL_HOURS", 12)
-COOKIE_SECURE = read_bool_env("AUTH_COOKIE_SECURE", True)
+COOKIE_SECURE = read_bool_env("AUTH_COOKIE_SECURE", False)
 COOKIE_SAMESITE = (settings.AUTH_COOKIE_SAMESITE or "lax").strip().lower()
 if COOKIE_SAMESITE not in {"lax", "strict", "none"}:
     COOKIE_SAMESITE = "lax"

@@ -52,6 +52,162 @@ function Resolve-PythonPath {
     throw "Python interpreter not found. Set PYTHON_PATH in .env or pass -PythonPath."
 }
 
+function Read-BoolDotEnvValue {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [bool]$DefaultValue
+    )
+    $value = Read-DotEnvValue -Path $Path -Name $Name
+    if (-not $value) {
+        return $DefaultValue
+    }
+    return @("1", "true", "yes", "on") -contains $value.Trim().ToLowerInvariant()
+}
+
+function Read-IntDotEnvValue {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [int]$DefaultValue
+    )
+    $value = Read-DotEnvValue -Path $Path -Name $Name
+    if (-not $value) {
+        return $DefaultValue
+    }
+    $parsed = 0
+    if ([int]::TryParse($value.Trim(), [ref]$parsed)) {
+        return $parsed
+    }
+    return $DefaultValue
+}
+
+function Test-TcpPort {
+    param(
+        [string]$HostName,
+        [int]$Port
+    )
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $async = $client.BeginConnect($HostName, $Port, $null, $null)
+        $ok = $async.AsyncWaitHandle.WaitOne(1000, $false)
+        if ($ok) {
+            $client.EndConnect($async)
+        }
+        $client.Close()
+        return $ok
+    } catch {
+        return $false
+    }
+}
+
+function Get-LandSARConfigEndpoint {
+    param(
+        [string]$Path
+    )
+    $row = Read-DotEnvValue -Path $Path -Name "LANDSAR_CONFIG_ROW"
+    if ($row) {
+        $parts = $row.Split(",") | ForEach-Object { $_.Trim() }
+        if ($parts.Count -ge 4) {
+            $port = 6666
+            [void][int]::TryParse($parts[3], [ref]$port)
+            return [pscustomobject]@{
+                Mode = $parts[0]
+                Host = $(if ($parts[2]) { $parts[2] } else { "127.0.0.1" })
+                Port = $port
+            }
+        }
+    }
+    return [pscustomobject]@{
+        Mode = $(Read-DotEnvValue -Path $Path -Name "LANDSAR_LICENSE_MODE")
+        Host = $(Read-DotEnvValue -Path $Path -Name "LANDSAR_LICENSE_HOST")
+        Port = $(Read-IntDotEnvValue -Path $Path -Name "LANDSAR_LICENSE_PORT" -DefaultValue 6666)
+    }
+}
+
+function Resolve-LandSARAuthServerPath {
+    param(
+        [string]$RepoRoot,
+        [string]$EnvPath
+    )
+    $explicit = Read-DotEnvValue -Path $EnvPath -Name "LANDSAR_AUTH_SERVER_EXE"
+    $candidates = @(
+        $explicit,
+        (Join-Path $RepoRoot "third_party\LandSAR\tools\_portable_release\LandSAR_auth_tools_win64\landsar_net_auth_server.exe"),
+        (Join-Path $RepoRoot "third_party\LandSAR\landsar_net_auth_server.exe")
+    ) | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    return $candidates | Select-Object -First 1
+}
+
+function Start-LandSARAuthServerIfNeeded {
+    param(
+        [string]$RepoRoot,
+        [string]$EnvPath
+    )
+    $endpoint = Get-LandSARConfigEndpoint -Path $EnvPath
+    $mode = $(if ($endpoint.Mode) { $endpoint.Mode } else { "netVersion" })
+    if ($mode.Trim().ToLowerInvariant() -ne "netversion") {
+        Write-Host "LandSAR auth: skipped for license mode $mode"
+        return
+    }
+
+    $clientHost = $(if ($endpoint.Host) { $endpoint.Host } else { "127.0.0.1" })
+    $clientPort = [int]$endpoint.Port
+    if (Test-TcpPort -HostName $clientHost -Port $clientPort) {
+        Write-Host "LandSAR auth: already listening on $clientHost`:$clientPort"
+        return
+    }
+
+    $autoStart = Read-BoolDotEnvValue -Path $EnvPath -Name "LANDSAR_AUTH_SERVER_AUTO_START" -DefaultValue $true
+    if (-not $autoStart) {
+        throw "LandSAR auth server is not listening on $clientHost`:$clientPort and LANDSAR_AUTH_SERVER_AUTO_START=false."
+    }
+
+    $authExe = Resolve-LandSARAuthServerPath -RepoRoot $RepoRoot -EnvPath $EnvPath
+    if (-not $authExe -or -not (Test-Path -LiteralPath $authExe)) {
+        throw "LandSAR auth server executable not found: $authExe. Set LANDSAR_AUTH_SERVER_EXE in .env."
+    }
+
+    $serverDir = Split-Path -Parent $authExe
+    $memoryBin = Join-Path $serverDir "dongle_0xa0.bin"
+    if (-not (Test-Path -LiteralPath $memoryBin)) {
+        $fallbackBin = Join-Path $RepoRoot "third_party\LandSAR\tools\dongle_0xa0.bin"
+        if (Test-Path -LiteralPath $fallbackBin) {
+            Copy-Item -LiteralPath $fallbackBin -Destination $memoryBin -Force
+        } else {
+            throw "LandSAR auth memory image missing: $memoryBin"
+        }
+    }
+
+    $bindHost = Read-DotEnvValue -Path $EnvPath -Name "LANDSAR_AUTH_SERVER_HOST"
+    if (-not $bindHost) {
+        $bindHost = $clientHost
+    }
+    $bindPort = Read-IntDotEnvValue -Path $EnvPath -Name "LANDSAR_AUTH_SERVER_PORT" -DefaultValue $clientPort
+
+    Write-Host "LandSAR auth: starting $authExe on $bindHost`:$bindPort"
+    Start-Process `
+        -FilePath $authExe `
+        -ArgumentList @("--host", $bindHost, "--port", [string]$bindPort) `
+        -WorkingDirectory $serverDir `
+        -WindowStyle Hidden | Out-Null
+
+    $deadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-TcpPort -HostName $clientHost -Port $clientPort) {
+            Write-Host "LandSAR auth: started and reachable on $clientHost`:$clientPort"
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "LandSAR auth server was started but $clientHost`:$clientPort is not reachable."
+}
+
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 $envPath = Join-Path $RepoRoot ".env"
 $templatePath = Join-Path $RepoRoot "config\landsar_cluster_worker.env.example"
@@ -75,6 +231,10 @@ $python = Resolve-PythonPath -ExplicitPath $PythonPath -EnvPath $dotenvPythonPat
 $allowedTypes = Read-DotEnvValue -Path $envPath -Name "JOB_WORKER_ALLOWED_TYPES"
 if (-not $allowedTypes) {
     $env:JOB_WORKER_ALLOWED_TYPES = "LANDSAR_CLUSTER_ITEM"
+}
+$clusterToken = Read-DotEnvValue -Path $envPath -Name "CLUSTER_SHARED_TOKEN"
+if (-not $clusterToken) {
+    throw "CLUSTER_SHARED_TOKEN is required for LandSAR cluster input download and result upload."
 }
 $concurrency = Read-DotEnvValue -Path $envPath -Name "JOB_WORKER_CONCURRENCY"
 if (-not $concurrency) {
@@ -101,6 +261,7 @@ Write-Host "Log:      $stdoutLog"
 Write-Host "Mode:     $(if ($Background) { 'background' } else { 'foreground' })"
 
 Set-Location $RepoRoot
+Start-LandSARAuthServerIfNeeded -RepoRoot $RepoRoot -EnvPath $envPath
 
 if ($Background) {
     if (Test-Path -LiteralPath $pidFile) {

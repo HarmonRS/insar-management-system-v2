@@ -11,6 +11,7 @@ ensure_project_env_loaded()
 
 from . import database
 from .api import router as api_router
+from .routers.cluster import router as cluster_router
 from .db_maintenance import ensure_database_ready
 from .scheduler import scheduler_manager
 from .services.health_service import get_health_status
@@ -301,6 +302,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(cluster_router, prefix="/api")
 app.include_router(api_router, prefix="/api")
 
 
