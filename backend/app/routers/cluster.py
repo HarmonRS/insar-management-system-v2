@@ -22,10 +22,10 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     UploadFile,
 )
-from fastapi.responses import FileResponse
-from starlette.background import BackgroundTask
+from fastapi.responses import FileResponse, StreamingResponse
 
 from ..config import settings
 from ..database import get_db
@@ -35,26 +35,14 @@ from ..models.orm import (
     DinsarProductionRunORM,
 )
 from ..services.cluster_transport import safe_extract_zip
+from ..services.cluster_transport import (
+    build_cluster_input_manifest,
+    iter_cluster_input_package_files,
+    normalize_cluster_relative_path,
+    stream_zip_files,
+)
 
 router = APIRouter()
-
-
-def _cluster_materialize_temp_dir() -> str:
-    explicit = str(os.environ.get("CLUSTER_MATERIALIZE_TEMP_DIR") or "").strip()
-    if not explicit:
-        explicit = str(
-            getattr(settings, "CLUSTER_MATERIALIZE_TEMP_DIR", "") or ""
-        ).strip()
-    if explicit:
-        return os.path.normpath(explicit)
-    task_pool = str(getattr(settings, "TASK_POOL_ROOT", "") or "").strip()
-    if task_pool:
-        return os.path.normpath(os.path.join(task_pool, "_cluster_temp"))
-    return os.path.normpath(
-        os.path.join(
-            os.path.dirname(__file__), "..", "..", "runtime", "_cluster_temp"
-        )
-    )
 
 
 def _cluster_shared_token() -> str:
@@ -78,6 +66,61 @@ def _require_cluster_token(
 # Download input package
 # ---------------------------------------------------------------------------
 
+async def _get_cluster_item_source_dir(
+    item_id: int,
+    db: AsyncSession,
+) -> tuple[DinsarProductionRunItemORM, str]:
+    item = await db.get(DinsarProductionRunItemORM, int(item_id))
+    if item is None:
+        raise HTTPException(status_code=404, detail="Cluster item not found.")
+
+    source_dir = os.path.normpath(str(item.source_task_dir or ""))
+    if not source_dir or not os.path.isdir(source_dir):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source task directory not found: {source_dir}",
+        )
+    return item, source_dir
+
+
+@router.get("/cluster/input-manifest/{item_id}")
+async def get_cluster_input_manifest(
+    item_id: int,
+    _cluster_token: None = Depends(_require_cluster_token),
+    db: AsyncSession = Depends(get_db),
+):
+    _, source_dir = await _get_cluster_item_source_dir(item_id, db)
+    manifest = build_cluster_input_manifest(source_dir)
+    if int(manifest.get("file_count") or 0) <= 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No packageable LandSAR input files found: {source_dir}",
+        )
+    return manifest
+
+
+@router.get("/cluster/input-file/{item_id}")
+async def download_cluster_input_file(
+    item_id: int,
+    relative_path: str = Query(...),
+    _cluster_token: None = Depends(_require_cluster_token),
+    db: AsyncSession = Depends(get_db),
+):
+    _, source_dir = await _get_cluster_item_source_dir(item_id, db)
+    normalized_rel = normalize_cluster_relative_path(relative_path)
+    package_files = {
+        normalize_cluster_relative_path(rel_path): abs_path
+        for abs_path, rel_path in iter_cluster_input_package_files(source_dir)
+    }
+    source_path = package_files.get(normalized_rel)
+    if not source_path or not os.path.isfile(source_path):
+        raise HTTPException(status_code=404, detail="Cluster input file not found.")
+    return FileResponse(
+        path=source_path,
+        media_type="application/octet-stream",
+        filename=os.path.basename(source_path),
+    )
+
 @router.get("/cluster/input-package/{item_id}")
 async def download_cluster_input_package(
     item_id: int,
@@ -95,56 +138,23 @@ async def download_cluster_input_package(
           orbit/  ...
           pair_metadata.json
     """
-    item = await db.get(DinsarProductionRunItemORM, int(item_id))
-    if item is None:
-        raise HTTPException(status_code=404, detail="Cluster item not found.")
-
-    source_dir = os.path.normpath(str(item.source_task_dir or ""))
-    if not source_dir or not os.path.isdir(source_dir):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Source task directory not found: {source_dir}",
-        )
+    _, source_dir = await _get_cluster_item_source_dir(item_id, db)
 
     task_name = os.path.basename(source_dir)
-    parent_dir = os.path.dirname(source_dir)
-    temp_root = _cluster_materialize_temp_dir()
-    os.makedirs(temp_root, exist_ok=True)
-
-    package_root = tempfile.mkdtemp(
-        prefix=f"cluster_input_{item_id}_",
-        dir=temp_root,
-    )
-    tmp_base = os.path.join(package_root, task_name)
-    try:
-        zip_path = shutil.make_archive(
-            tmp_base,
-            "zip",
-            root_dir=parent_dir,
-            base_dir=task_name,
-        )
-    except Exception as exc:
-        try:
-            shutil.rmtree(package_root)
-        except Exception:
-            pass
+    package_files = list(iter_cluster_input_package_files(source_dir))
+    if not package_files:
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to create input package: {exc}",
+            status_code=404,
+            detail=f"No packageable LandSAR input files found: {source_dir}",
         )
 
-    def _cleanup():
-        try:
-            if os.path.isdir(package_root):
-                shutil.rmtree(package_root)
-        except Exception:
-            pass
-
-    return FileResponse(
-        path=zip_path,
+    return StreamingResponse(
+        stream_zip_files(package_files, top_level_dir=task_name),
         media_type="application/zip",
-        filename=f"{task_name}.zip",
-        background=BackgroundTask(_cleanup),
+        headers={
+            "Content-Disposition": f'attachment; filename="{task_name}.zip"',
+            "X-Cluster-Package-File-Count": str(len(package_files)),
+        },
     )
 
 
@@ -304,7 +314,12 @@ async def upload_cluster_result(
                 f"current pointer was not created: {current_pointer_path or '<empty>'}"
             )
 
-        run = await db.get(DinsarProductionRunORM, str(item.run_id or ""))
+        run_result = await db.execute(
+            select(DinsarProductionRunORM).where(
+                DinsarProductionRunORM.run_id == str(item.run_id or "").strip()
+            )
+        )
+        run = run_result.scalar_one_or_none()
         if run is None:
             raise RuntimeError(f"Cluster run not found for item {item_id}: {item.run_id}")
         execution_result = await db.execute(
@@ -319,6 +334,7 @@ async def upload_cluster_result(
                 f"Cluster execution not found for item={item.id} run_key={normalized_run_key}"
             )
         execution.output_dir = extract_dir
+        execution.error_message = None
         item.latest_output_dir = extract_dir
         await dinsar_production_service.mark_item_completed(
             run=run,

@@ -709,6 +709,11 @@ if (Test-Path -LiteralPath "$NginxConfPath") {
         '(location\s+/api/tasks/active/stream\s*\{[\s\S]*?proxy_pass\s+)http://(127\.0\.0\.1|localhost):\d+(;)',
         "`${1}$BackendProxy`${3}"
     )
+    $NewConfContent = [regex]::Replace(
+        $NewConfContent,
+        '(location\s+/api/cluster/\s*\{[\s\S]*?proxy_pass\s+)http://(127\.0\.0\.1|localhost):\d+(;)',
+        "`${1}$BackendProxy`${3}"
+    )
     # 使用 UTF8 无 BOM 编码写入
     $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText("$NginxConfPath", $NewConfContent, $Utf8NoBom)

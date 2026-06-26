@@ -189,10 +189,9 @@
 
  ```env
  # 集群传输配置
- CLUSTER_SHARED_TOKEN=<same-long-random-token-on-main-and-workers>
- CLUSTER_TRANSFER_TIMEOUT_SECONDS=3600
- CLUSTER_MATERIALIZE_TEMP_DIR=D:\Task_Pool\_cluster_temp
- ```
+CLUSTER_SHARED_TOKEN=<same-long-random-token-on-main-and-workers>
+CLUSTER_TRANSFER_TIMEOUT_SECONDS=3600
+```
 
  Worker 端 `.env` 新增（或保持现有模板字段）：
 
@@ -241,3 +240,13 @@
  - [LANDSAR_DEM_PREPARATION_CONTRACT_20260618.md](LANDSAR_DEM_PREPARATION_CONTRACT_20260618.md) — LandSAR DEM 准备约定
  - [THREE_SENSOR_LOCAL_PRODUCTION_CONTRACT_20260616.md](THREE_SENSOR_LOCAL_PRODUCTION_CONTRACT_20260616.md) — 三数据本机生产约定
  - [DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md](DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md) — Task_Pool 与三引擎 refactor
+
+## 2026-06-26 Remote 1.6 E2E Findings
+
+- Remote worker `landsar-worker-192-168-1-6` can reach PostgreSQL on `192.168.1.62:5432`, authenticate to `/api/cluster/...`, heartbeat into `system_worker_heartbeats`, and claim `LANDSAR_CLUSTER_ITEM` jobs.
+- The first remote E2E attempt failed before LandSAR execution with `HTTP 504` while downloading `/api/cluster/input-package/{item_id}` through nginx.
+- Root cause: the old input endpoint synchronously built a full Task directory zip inside the FastAPI request. The tested Task directory was 15.47 GB because it contained duplicate `Input_Data`, `master`, and `slave` copies. nginx's default 60s upstream timeout returned 504 while the backend was still packaging, and the synchronous packaging could also block normal UI API responses.
+- Current behavior: the input endpoint streams a ZIP directly to the worker and uses `ZIP_STORED` to avoid wasting CPU on already-compressed TIFF data.
+- Current package selection: if `Input_Data` contains a valid LandSAR SLC xml/tif pair, only `Input_Data`, `orbit`, and `.dinsar_pair.json` are shipped. Otherwise, only direct raw files from `master` and `slave`, plus `orbit` and `.dinsar_pair.json`, are shipped. For item `135`, this reduced the transfer set from 15.47 GB to 5.18 GB.
+- nginx now has a dedicated `/api/cluster/` location with large body support, disabled proxy buffering for cluster transfers, and 7200s send/read timeouts. `scripts/start_app.ps1` also rewrites this location's backend port when `PORT` changes.
+- Upload registration now resolves `DinsarProductionRunORM` by business `run_id`; using `db.get()` with the string run id was invalid because the table primary key is integer.
