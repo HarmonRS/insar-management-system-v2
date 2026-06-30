@@ -25,6 +25,22 @@ const toneColor = {
     text: '#b91c1c',
     fill: '#dc2626',
   },
+  partial: {
+    border: '#fcd34d',
+    bg: '#fffbeb',
+    text: '#92400e',
+    fill: '#d97706',
+  },
+};
+
+const TASK_STATUS_LABEL = {
+  PENDING: '等待中',
+  RUNNING: '运行中',
+  COMPLETED: '已完成',
+  PARTIAL_SUCCESS: '部分成功',
+  FAILED: '失败',
+  CANCELLED: '已取消',
+  CANCELED: '已取消',
 };
 
 const normalizeProgress = (value) => {
@@ -34,6 +50,11 @@ const normalizeProgress = (value) => {
 };
 
 const isFailed = (task) => String(task?.status || '').toUpperCase() === 'FAILED';
+const isPartialSuccess = (task) => String(task?.status || '').toUpperCase() === 'PARTIAL_SUCCESS';
+const formatTaskStatus = (status) => {
+  const normalized = String(status || '-').toUpperCase();
+  return TASK_STATUS_LABEL[normalized] || normalized;
+};
 
 export default function TaskStatusPanel({
   title = '任务状态',
@@ -48,7 +69,9 @@ export default function TaskStatusPanel({
 }) {
   const task = latestTask || activeTasks[0] || recentTasks[0] || null;
   const showingRecent = !isBusy && !!task;
-  const tone = task ? (isFailed(task) ? 'error' : (showingRecent ? 'recent' : 'active')) : 'idle';
+  const tone = task
+    ? (isFailed(task) ? 'error' : (isPartialSuccess(task) ? 'partial' : (showingRecent ? 'recent' : 'active')))
+    : 'idle';
   const colors = toneColor[tone];
   const progress = normalizeProgress(task?.progress);
 
@@ -82,7 +105,7 @@ export default function TaskStatusPanel({
           <div style={{ marginTop: 8, color: colors.text, fontSize: 12, wordBreak: 'break-all' }}>
             <span style={{ fontWeight: 700 }}>{getTaskTypeLabel(task.task_type)}</span>
             <span style={{ margin: '0 6px' }}>·</span>
-            <span>{String(task.status || '-').toUpperCase()}</span>
+            <span>{formatTaskStatus(task.status)}</span>
             {task.task_id && (
               <>
                 <span style={{ margin: '0 6px' }}>·</span>

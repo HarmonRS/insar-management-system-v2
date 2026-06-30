@@ -18,7 +18,18 @@ const RUN_HISTORY_PAGE_SIZE = 200;
 const TASK_HISTORY_PAGE_SIZE = 200;
 const TASK_LOG_PAGE_SIZE = 1000;
 const INLINE_TASK_LOG_LIMIT = 200;
-const TERMINAL_STATUS_VALUES = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'CANCELED', 'success', 'failed', 'cancelled', 'canceled']);
+const TERMINAL_STATUS_VALUES = new Set([
+  'COMPLETED',
+  'PARTIAL_SUCCESS',
+  'FAILED',
+  'CANCELLED',
+  'CANCELED',
+  'success',
+  'partial_success',
+  'failed',
+  'cancelled',
+  'canceled',
+]);
 
 const ENGINE_STATUS_COLOR = {
   ok: '#22c55e',
@@ -54,10 +65,12 @@ const STATUS_LABEL = {
   PENDING: '等待中',
   RUNNING: '运行中',
   COMPLETED: '已完成',
+  PARTIAL_SUCCESS: '部分成功',
   FAILED: '失败',
   CANCELLED: '已取消',
   CANCELED: '已取消',
   success: '成功',
+  partial_success: '部分成功',
   failed: '失败',
   running: '运行中',
   pending: '等待中',
@@ -133,6 +146,7 @@ function taskTypeToEngine(taskType) {
 function taskStatusToRunStatus(status) {
   const normalized = String(status || '').toUpperCase();
   if (normalized === 'COMPLETED') return 'success';
+  if (normalized === 'PARTIAL_SUCCESS') return 'partial_success';
   if (normalized === 'FAILED') return 'failed';
   if (normalized === 'CANCELLED' || normalized === 'CANCELED') return 'cancelled';
   if (normalized === 'RUNNING') return 'running';
@@ -309,6 +323,7 @@ function formatRunCounts(run) {
 function statusToneClass(status) {
   const normalized = String(status || '').toLowerCase();
   if (normalized === 'success' || normalized === 'completed') return 'tone-ready';
+  if (normalized === 'partial_success' || normalized === 'partial' || normalized === 'completed_with_errors') return 'tone-partial';
   if (normalized === 'failed') return 'tone-error';
   if (normalized === 'running') return 'tone-info';
   if (normalized === 'cancelled' || normalized === 'canceled') return 'tone-neutral';
@@ -828,7 +843,10 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                 ? (latestRunWithTask.mode === 'cluster' ? 'LANDSAR_CLUSTER_RUN' : 'LANDSAR_RUN')
                 : 'IDL_RUN_DINSAR',
         status: latestRunWithTask.raw_status || latestRunWithTask.status,
-        progress: latestRunWithTask.raw_status === 'COMPLETED' || latestRunWithTask.status === 'success' ? 100 : null,
+        progress: ['COMPLETED', 'PARTIAL_SUCCESS'].includes(String(latestRunWithTask.raw_status || '').toUpperCase())
+          || ['success', 'partial_success'].includes(String(latestRunWithTask.status || '').toLowerCase())
+          ? 100
+          : null,
         message: latestRunWithTask.message || '最近一次任务',
       }
       : null
@@ -836,7 +854,12 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
   const logTaskId = monitoredTask?.task_id || '';
   const showingRecentTask = !taskMonitor.isBusy && !!monitoredTask;
   const activeRunCount = runs.filter(run => ['running', 'pending'].includes(String(run.status || '').toLowerCase())).length;
-  const failedRunCount = runs.filter(run => ['failed', 'FAILED'].includes(String(run.status || ''))).length;
+  const issueRunCount = runs.filter(run => {
+    const status = String(run.status || '').toLowerCase();
+    const rawStatus = String(run.raw_status || '').toUpperCase();
+    return ['failed', 'partial_success'].includes(status)
+      || ['FAILED', 'PARTIAL_SUCCESS'].includes(rawStatus);
+  }).length;
   const productionReady = !!currentEngineObj?.available && !!rootDir.trim() && !pyintPreviewBlocksSubmit && !readOnly;
 
   const loadEngines = useCallback(async () => {
@@ -1471,9 +1494,9 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
             <span>运行中</span>
             <strong>{activeRunCount}</strong>
           </div>
-          <div className={`dinsar-production-signal ${failedRunCount > 0 ? 'warn' : ''}`}>
-            <span>失败记录</span>
-            <strong>{failedRunCount}</strong>
+          <div className={`dinsar-production-signal ${issueRunCount > 0 ? 'warn' : ''}`}>
+            <span>异常记录</span>
+            <strong>{issueRunCount}</strong>
           </div>
         </div>
       </div>

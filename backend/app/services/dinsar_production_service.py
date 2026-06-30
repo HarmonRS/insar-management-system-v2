@@ -39,6 +39,7 @@ TASK_TYPE_LANDSAR_CLUSTER_PRODUCTION = "LANDSAR_CLUSTER_RUN"
 RUN_STATUS_PENDING = "PENDING"
 RUN_STATUS_RUNNING = "RUNNING"
 RUN_STATUS_COMPLETED = "COMPLETED"
+RUN_STATUS_PARTIAL_SUCCESS = "PARTIAL_SUCCESS"
 RUN_STATUS_FAILED = "FAILED"
 RUN_STATUS_CANCELLED = "CANCELLED"
 RUN_ITEM_STATUS_PENDING = "PENDING"
@@ -66,6 +67,7 @@ RUNS_STEP_ID = "execute_items"
 RUNS_STEP_NAME = "Execute ENVI D-InSAR items"
 TERMINAL_RUN_STATUSES = {
     RUN_STATUS_COMPLETED,
+    RUN_STATUS_PARTIAL_SUCCESS,
     RUN_STATUS_FAILED,
     RUN_STATUS_CANCELLED,
 }
@@ -549,6 +551,8 @@ def _public_run_status(value: str) -> str:
     normalized = str(value or "").strip().upper()
     if normalized == RUN_STATUS_COMPLETED:
         return "success"
+    if normalized == RUN_STATUS_PARTIAL_SUCCESS:
+        return "partial_success"
     if normalized == RUN_STATUS_FAILED:
         return "failed"
     if normalized == RUN_STATUS_CANCELLED:
@@ -573,12 +577,14 @@ class DinsarProductionService:
         task_status = str(task.status or "").strip().upper()
         if run_status in TERMINAL_RUN_STATUSES:
             return False
-        if task_status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+        if task_status not in {"COMPLETED", "PARTIAL_SUCCESS", "FAILED", "CANCELLED", "CANCELED"}:
             return False
 
         if task_status == "COMPLETED":
             next_status = RUN_STATUS_COMPLETED
-        elif task_status == "CANCELLED":
+        elif task_status == "PARTIAL_SUCCESS":
+            next_status = RUN_STATUS_PARTIAL_SUCCESS
+        elif task_status in {"CANCELLED", "CANCELED"}:
             next_status = RUN_STATUS_CANCELLED
             run.cancel_requested = True
         else:
@@ -1131,6 +1137,12 @@ class DinsarProductionService:
             latest_message = (
                 f"LandSAR cluster cancelled. completed={completed} failed={failed} "
                 f"cancelled={cancelled} total={total_items}"
+            )
+        elif failed > 0 and (completed > 0 or skipped > 0):
+            final_status = RUN_STATUS_PARTIAL_SUCCESS
+            latest_message = (
+                f"LandSAR cluster partially completed. completed={completed} "
+                f"failed={failed} skipped={skipped} total={total_items}"
             )
         elif failed > 0:
             final_status = RUN_STATUS_FAILED

@@ -5857,6 +5857,12 @@ input[type="checkbox"] {
   border-color: rgba(245, 158, 11, 0.25);
 }
 
+.dinsar-status-pill.tone-partial {
+  background: rgba(217, 119, 6, 0.13);
+  color: #92400e;
+  border-color: rgba(217, 119, 6, 0.28);
+}
+
 .dinsar-status-pill.tone-error {
   background: rgba(220, 38, 38, 0.12);
   color: #b91c1c;

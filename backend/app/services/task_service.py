@@ -48,6 +48,13 @@ TASK_QUERY_MAX_OFFSET = read_int_env(
     minimum=0,
     maximum=20000000,
 )
+TERMINAL_TASK_STATUSES = {
+    "COMPLETED",
+    "PARTIAL_SUCCESS",
+    "FAILED",
+    "CANCELLED",
+    "CANCELED",
+}
 
 
 def _clamp_pagination(limit: int, offset: int, *, default_limit: int, max_limit: int) -> tuple[int, int]:
@@ -270,7 +277,7 @@ class TaskService:
                         await self._add_log(task_id, "INFO", message, db=db)
 
                 # 如果任务结束，更新结束时间
-                if status in ["COMPLETED", "FAILED", "CANCELLED"]:
+                if status and str(status).strip().upper() in TERMINAL_TASK_STATUSES:
                     task.ended_at = datetime.now()
                     await self._add_log(task_id, "INFO", f"任务已结束: {status}", db=db)
                 else:

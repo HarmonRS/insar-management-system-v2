@@ -3,6 +3,7 @@ import apiClient from '../api/client';
 import { normalizeTaskStatus } from '../utils/appUiHelpers';
 
 const ACTIVE_TASK_FALLBACK_POLL_MS = 10000;
+const TERMINAL_TASK_STATUSES = new Set(['COMPLETED', 'PARTIAL_SUCCESS', 'FAILED', 'CANCELLED', 'CANCELED']);
 
 export default function useGlobalTaskControl({
   currentUser,
@@ -56,7 +57,7 @@ export default function useGlobalTaskControl({
             const taskStatus = normalizeTaskStatus(taskInfo?.status);
 
             // 检查任务是否真正完成：解析 message 中的进度信息
-            let isReallyFinished = taskStatus === 'COMPLETED' || taskStatus === 'FAILED';
+            let isReallyFinished = TERMINAL_TASK_STATUSES.has(taskStatus);
 
             // 如果任务状态是 PENDING，检查进度信息
             if (taskStatus === 'PENDING' && taskInfo?.message) {
@@ -77,7 +78,7 @@ export default function useGlobalTaskControl({
 
             if (isReallyFinished) {
               reallyFinishedIds.push(taskId);
-              if (taskStatus === 'COMPLETED' || taskStatus === 'FAILED') {
+              if (TERMINAL_TASK_STATUSES.has(taskStatus)) {
                 handleTaskCompletionRef.current?.(taskInfo);
               }
             }

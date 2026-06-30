@@ -32,7 +32,14 @@ from .cluster_transport import (
 )
 from .dinsar_compat_service import dinsar_compat_service
 from .dinsar_naming import build_run_key
-from .dinsar_production_service import dinsar_production_service
+from .dinsar_production_service import (
+    RUN_STATUS_CANCELLED,
+    RUN_STATUS_COMPLETED,
+    RUN_STATUS_FAILED,
+    RUN_STATUS_PARTIAL_SUCCESS,
+    TERMINAL_RUN_STATUSES,
+    dinsar_production_service,
+)
 from .dinsar_read_service import dinsar_read_service
 from .dinsar_result_layout_service import (
     get_run_disp_asset_paths,
@@ -71,6 +78,16 @@ from ..ai_service import (
 
 
 JobHandler = Callable[[SystemJobORM], Awaitable[None]]
+
+
+FINAL_TASK_STATUSES = {
+    RUN_STATUS_COMPLETED,
+    RUN_STATUS_PARTIAL_SUCCESS,
+    RUN_STATUS_FAILED,
+    RUN_STATUS_CANCELLED,
+    "CANCELED",
+    "CANCELLED",
+}
 
 
 JOB_TYPE_SCAN_DATA = "SCAN_DATA"
@@ -244,6 +261,28 @@ def _classify_dinsar_failure(error_message: Any) -> str:
         return "Result catalog publish failed"
     compact = _compact_failure_text(text, max_length=120)
     return compact if compact != "Unknown error" else "Unclassified D-InSAR failure"
+
+
+def _dinsar_final_status(completed: Any, failed: Any, skipped: Any = 0) -> str:
+    completed_count = int(completed or 0)
+    failed_count = int(failed or 0)
+    skipped_count = int(skipped or 0)
+    if failed_count > 0 and (completed_count > 0 or skipped_count > 0):
+        return RUN_STATUS_PARTIAL_SUCCESS
+    if failed_count > 0:
+        return RUN_STATUS_FAILED
+    return RUN_STATUS_COMPLETED
+
+
+def _task_status_for_dinsar_run(final_status: str) -> str:
+    normalized = str(final_status or "").strip().upper()
+    if normalized == RUN_STATUS_COMPLETED:
+        return "COMPLETED"
+    if normalized == RUN_STATUS_PARTIAL_SUCCESS:
+        return "PARTIAL_SUCCESS"
+    if normalized in {RUN_STATUS_CANCELLED, "CANCELLED"}:
+        return "CANCELLED"
+    return "FAILED"
 
 
 async def _build_dinsar_failure_summary(db, run) -> Dict[str, Any]:
@@ -2204,22 +2243,28 @@ async def _run_dinsar_production_controller(job: SystemJobORM) -> None:
         cancelled = await _refresh_cancel_state()
         await db.refresh(run)
         latest_message = ""
-        final_status = "COMPLETED"
+        final_status = RUN_STATUS_COMPLETED
         if publish_error:
-            final_status = "FAILED"
+            final_status = RUN_STATUS_FAILED
             latest_message = f"Result catalog publish failed: {publish_error}"
         elif cancelled:
-            final_status = "CANCELLED"
+            final_status = RUN_STATUS_CANCELLED
             latest_message = (
                 f"D-InSAR production cancelled. completed={run.completed_items} "
                 f"failed={run.failed_items} total={run.total_items}"
             )
         elif int(run.failed_items or 0) > 0:
-            final_status = "FAILED"
-            latest_message = (
-                f"D-InSAR production finished with failures. completed={run.completed_items} "
-                f"failed={run.failed_items} total={run.total_items}"
-            )
+            final_status = _dinsar_final_status(run.completed_items, run.failed_items, run.skipped_items)
+            if final_status == RUN_STATUS_PARTIAL_SUCCESS:
+                latest_message = (
+                    f"D-InSAR production partially completed. completed={run.completed_items} "
+                    f"failed={run.failed_items} total={run.total_items}"
+                )
+            else:
+                latest_message = (
+                    f"D-InSAR production failed. completed={run.completed_items} "
+                    f"failed={run.failed_items} total={run.total_items}"
+                )
         else:
             latest_message = (
                 f"D-InSAR production completed. completed={run.completed_items} "
@@ -2259,23 +2304,23 @@ async def _run_dinsar_production_controller(job: SystemJobORM) -> None:
         )
         run_log(run.run_id, f"[finish] status={final_status} message={latest_message}")
 
-        if final_status == "COMPLETED":
+        if final_status in {RUN_STATUS_COMPLETED, RUN_STATUS_PARTIAL_SUCCESS}:
             await task_service.update_task(
                 job.task_id,
-                status="COMPLETED",
+                status=_task_status_for_dinsar_run(final_status),
                 progress=100,
                 message=latest_message,
             )
             return
 
-        task_status = "CANCELLED" if final_status == "CANCELLED" else "FAILED"
         await task_service.update_task(
             job.task_id,
-            status=task_status,
+            status=_task_status_for_dinsar_run(final_status),
             progress=100,
             message=latest_message,
         )
-        raise RuntimeError(latest_message)
+        if final_status == RUN_STATUS_FAILED:
+            raise RuntimeError(latest_message)
 
 
 async def _handle_idl_run_import(job: SystemJobORM) -> None:
@@ -2298,7 +2343,7 @@ async def _handle_idl_run_dinsar(job: SystemJobORM) -> None:
             try:
                 async with AsyncSessionLocal() as db:
                     run = await dinsar_production_service.get_run(production_run_id, db)
-                    if run is not None and str(run.status or "").strip().upper() not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                    if run is not None and str(run.status or "").strip().upper() not in TERMINAL_RUN_STATUSES:
                         summary_payload = dict(run.summary_json or {})
                         summary_payload["controller_error"] = str(exc)
                         await dinsar_production_service.finalize_run(
@@ -2317,7 +2362,7 @@ async def _handle_idl_run_dinsar(job: SystemJobORM) -> None:
 
             try:
                 current_task = await task_service.get_task(job.task_id)
-                if current_task and current_task.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                if current_task and str(current_task.status or "").strip().upper() not in FINAL_TASK_STATUSES:
                     await task_service.add_log(job.task_id, "ERROR", latest_message)
                     await task_service.update_task(
                         job.task_id,
@@ -3191,22 +3236,28 @@ async def _run_wsl_dinsar_production_controller(
         cancelled = await _refresh_cancel_state()
         await dinsar_production_service.refresh_run_counters(run, db=db)
         if publish_error:
-            final_status = "FAILED"
+            final_status = RUN_STATUS_FAILED
             latest_message = f"Result catalog publish failed: {publish_error}"
         elif cancelled:
-            final_status = "CANCELLED"
+            final_status = RUN_STATUS_CANCELLED
             latest_message = (
                 f"{engine_title} D-InSAR production cancelled. completed={run.completed_items} "
                 f"failed={run.failed_items} total={run.total_items}"
             )
         elif int(run.failed_items or 0) > 0:
-            final_status = "FAILED"
-            latest_message = (
-                f"{engine_title} D-InSAR production finished with failures. completed={run.completed_items} "
-                f"failed={run.failed_items} total={run.total_items}"
-            )
+            final_status = _dinsar_final_status(run.completed_items, run.failed_items, run.skipped_items)
+            if final_status == RUN_STATUS_PARTIAL_SUCCESS:
+                latest_message = (
+                    f"{engine_title} D-InSAR production partially completed. completed={run.completed_items} "
+                    f"failed={run.failed_items} total={run.total_items}"
+                )
+            else:
+                latest_message = (
+                    f"{engine_title} D-InSAR production failed. completed={run.completed_items} "
+                    f"failed={run.failed_items} total={run.total_items}"
+                )
         else:
-            final_status = "COMPLETED"
+            final_status = RUN_STATUS_COMPLETED
             latest_message = (
                 f"{engine_title} D-InSAR production completed. completed={run.completed_items} "
                 f"failed={run.failed_items} total={run.total_items}"
@@ -3246,23 +3297,23 @@ async def _run_wsl_dinsar_production_controller(
         )
         run_log(run.run_id, f"[finish] status={final_status} message={latest_message}")
 
-        if final_status == "COMPLETED":
+        if final_status in {RUN_STATUS_COMPLETED, RUN_STATUS_PARTIAL_SUCCESS}:
             await task_service.update_task(
                 job.task_id,
-                status="COMPLETED",
+                status=_task_status_for_dinsar_run(final_status),
                 progress=100,
                 message=latest_message,
             )
             return
 
-        task_status = "CANCELLED" if final_status == "CANCELLED" else "FAILED"
         await task_service.update_task(
             job.task_id,
-            status=task_status,
+            status=_task_status_for_dinsar_run(final_status),
             progress=100,
             message=latest_message,
         )
-        raise RuntimeError(latest_message)
+        if final_status == RUN_STATUS_FAILED:
+            raise RuntimeError(latest_message)
 
 
 async def _handle_isce2_run(job: SystemJobORM) -> None:
@@ -3281,7 +3332,7 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
             try:
                 async with AsyncSessionLocal() as db:
                     run = await dinsar_production_service.get_run(production_run_id, db)
-                    if run is not None and str(run.status or "").strip().upper() not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                    if run is not None and str(run.status or "").strip().upper() not in TERMINAL_RUN_STATUSES:
                         summary_payload = dict(run.summary_json or {})
                         summary_payload["controller_error"] = str(exc)
                         await dinsar_production_service.finalize_run(
@@ -3300,7 +3351,7 @@ async def _handle_isce2_run(job: SystemJobORM) -> None:
 
             try:
                 current_task = await task_service.get_task(job.task_id)
-                if current_task and current_task.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                if current_task and str(current_task.status or "").strip().upper() not in FINAL_TASK_STATUSES:
                     await task_service.add_log(job.task_id, "ERROR", latest_message)
                     await task_service.update_task(
                         job.task_id,
@@ -3335,7 +3386,7 @@ async def _handle_pyint_run(job: SystemJobORM) -> None:
             try:
                 async with AsyncSessionLocal() as db:
                     run = await dinsar_production_service.get_run(production_run_id, db)
-                    if run is not None and str(run.status or "").strip().upper() not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                    if run is not None and str(run.status or "").strip().upper() not in TERMINAL_RUN_STATUSES:
                         summary_payload = dict(run.summary_json or {})
                         summary_payload["controller_error"] = str(exc)
                         await dinsar_production_service.finalize_run(
@@ -3354,7 +3405,7 @@ async def _handle_pyint_run(job: SystemJobORM) -> None:
 
             try:
                 current_task = await task_service.get_task(job.task_id)
-                if current_task and current_task.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                if current_task and str(current_task.status or "").strip().upper() not in FINAL_TASK_STATUSES:
                     await task_service.add_log(job.task_id, "ERROR", latest_message)
                     await task_service.update_task(
                         job.task_id,
@@ -3389,7 +3440,7 @@ async def _handle_landsar_run(job: SystemJobORM) -> None:
             try:
                 async with AsyncSessionLocal() as db:
                     run = await dinsar_production_service.get_run(production_run_id, db)
-                    if run is not None and str(run.status or "").strip().upper() not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                    if run is not None and str(run.status or "").strip().upper() not in TERMINAL_RUN_STATUSES:
                         summary_payload = dict(run.summary_json or {})
                         summary_payload["controller_error"] = str(exc)
                         await dinsar_production_service.finalize_run(
@@ -3408,7 +3459,7 @@ async def _handle_landsar_run(job: SystemJobORM) -> None:
 
             try:
                 current_task = await task_service.get_task(job.task_id)
-                if current_task and current_task.status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                if current_task and str(current_task.status or "").strip().upper() not in FINAL_TASK_STATUSES:
                     await task_service.add_log(job.task_id, "ERROR", latest_message)
                     await task_service.update_task(
                         job.task_id,
@@ -4002,10 +4053,9 @@ async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
         )
 
         if final_status:
-            task_status = "COMPLETED" if final_status == "COMPLETED" else ("CANCELLED" if final_status == "CANCELLED" else "FAILED")
             await task_service.update_task(
                 job.task_id,
-                status=task_status,
+                status=_task_status_for_dinsar_run(final_status),
                 progress=100,
                 message=run.latest_message,
             )
