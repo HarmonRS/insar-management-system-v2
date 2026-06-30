@@ -315,9 +315,17 @@ function hasMixedRunOutcome(run) {
   return Number(failed || 0) > 0 && (Number(completed || 0) > 0 || Number(skipped || 0) > 0);
 }
 
+function isActiveRunStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  return normalized === 'running' || normalized === 'pending';
+}
+
 function getDisplayRunStatus(run) {
   const rawStatus = String(run?.raw_status || '').toUpperCase();
   const status = String(run?.status || '').toLowerCase();
+  if (isActiveRunStatus(rawStatus) || isActiveRunStatus(status)) {
+    return run?.status;
+  }
   if (rawStatus === 'PARTIAL_SUCCESS' || status === 'partial_success' || hasMixedRunOutcome(run)) {
     return 'partial_success';
   }
@@ -326,7 +334,11 @@ function getDisplayRunStatus(run) {
 
 function getDisplayTaskStatus(task, relatedRun = null) {
   if (!task) return '';
-  if (String(task?.status || '').toUpperCase() === 'PARTIAL_SUCCESS' || hasMixedRunOutcome(relatedRun)) {
+  const taskStatus = String(task?.status || '').trim();
+  if (isActiveRunStatus(taskStatus) || isActiveRunStatus(relatedRun?.raw_status) || isActiveRunStatus(relatedRun?.status)) {
+    return task.status;
+  }
+  if (taskStatus.toUpperCase() === 'PARTIAL_SUCCESS' || hasMixedRunOutcome(relatedRun)) {
     return 'PARTIAL_SUCCESS';
   }
   return task.status;
