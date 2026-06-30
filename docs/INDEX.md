@@ -31,14 +31,22 @@
   褰撳墠闄嗘帰涓€鍙枫€丼entinel-1銆侀珮鍒嗕笁鏈満鐢熶骇銆佹寜闇€瑙ｅ寘銆丟F3 澶栭儴鐢熶骇鐧昏銆佺粨鏋滅鐞嗗拰 UNC 閫€鍑虹害瀹氥€?
 - [PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md](PRODUCTION_RESULTS_MULTI_ENGINE_DESIGN_20260423.md)  
   缁熶竴缁撴灉鐩綍銆佹爣鍑嗕骇鍝佸寘銆乧atalog 涓庡寮曟搸缁撴灉鍏卞瓨绾﹀畾銆?
+- [RESULT_EXTRACTION_ACCESS_CONTROL_AUDIT_20260630.md](RESULT_EXTRACTION_ACCESS_CONTROL_AUDIT_20260630.md)
+  Result extraction and access-control audit: current D-InSAR export/registration boundaries, placeholder channels, admin/viewer limitations, and recommended exporter/operator/admin permission model.
 - [DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md](DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md)  
   D-InSAR 淇濈暀 ENVI/SARscape銆丩andSAR銆丟amma/PyINT 涓夊紩鎿庯紝閫€鍑?ISCE2锛岀粺涓€ Task_Pool銆佺粨鏋滆仛鍚堝拰涓棿鏂囦欢娓呯悊鐨勫綋鍓嶈璁°€?
 - [LANDSAR_DEM_PREPARATION_CONTRACT_20260618.md](LANDSAR_DEM_PREPARATION_CONTRACT_20260618.md)  
   LandSAR D-InSAR/SBAS 鐨勫叏鐞?DEM 涓€娆℃€?Int16 鏍囧噯鍖栥€佸尯鍩熻鍓?tif銆佺敓浜ч厤缃拰 guardrail 绾﹀畾銆?
+- [DEM_PRODUCTION_SOURCE_CONTRACT_20260628.md](DEM_PRODUCTION_SOURCE_CONTRACT_20260628.md)
+  Production DEM source contract: SRTM-derived common source family, engine-specific derived formats, and non-default DEM guardrails.
 - [LANDSAR_CLUSTER_WORKER_DEPLOYMENT_20260624.md](LANDSAR_CLUSTER_WORKER_DEPLOYMENT_20260624.md)  
   LandSAR D-InSAR 集群 worker 的队列分片设计、主服务器 IP 白名单、远端 Windows 节点 192.168.1.6 部署和运行约束。
 - [LANDSAR_CLUSTER_DATA_TRANSPORT_DESIGN_20260625.md](LANDSAR_CLUSTER_DATA_TRANSPORT_DESIGN_20260625.md)
   LandSAR 集群数据搬运（HTTP Task_Pool 下载 + 结果回传）、Windows 集群运维（Task Scheduler 开机自启 + 心跳监控）。
+- [PRODUCTION_NODE_SUBSYSTEM_DESIGN_20260627.md](PRODUCTION_NODE_SUBSYSTEM_DESIGN_20260627.md)
+  D-InSAR 与 LT-1/Sentinel-1 单景影像生产的统一生产节点子系统设计，明确 LandSAR 集群 MVP、worker-only 部署、安全边界和后续本机/集群双模式路线。
+- [LANDSAR_LT1_SCENE_STACK_PRODUCTION_DESIGN_20260627.md](LANDSAR_LT1_SCENE_STACK_PRODUCTION_DESIGN_20260627.md)
+  LandSAR 陆探一号单景/多景生产 proID 与参数链探索，设计 `100016/100206` 导入产品化、结果 catalog、本机/集群双模式和后续影像产品验证路线。
 - [UNC_SOURCE_ARCHIVE_AND_MATERIALIZE_DESIGN_20260615.md](UNC_SOURCE_ARCHIVE_AND_MATERIALIZE_DESIGN_20260615.md)  
   LT-1/Sentinel-1 鏈湴婧愬帇缂╁寘绠＄悊銆佸寘鍐?XML/manifest 璧勪骇鍖栥€佹湰鍦?Task_Pool materialize锛屼互鍙?UNC 閫€鍑哄悗鐨勬湰鏈洪儴缃茶竟鐣屻€?
 - [SOURCE_ARCHIVE_INTEGRITY_AUDIT_20260620.md](SOURCE_ARCHIVE_INTEGRITY_AUDIT_20260620.md)  

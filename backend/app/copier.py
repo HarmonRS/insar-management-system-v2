@@ -305,6 +305,10 @@ def _normalize_source_bundle_archive_path(source_path: str) -> str:
 
 def _safe_archive_member_name(member_name: str, archive_path: str) -> str:
     name = str(member_name or "").replace("\\", "/").strip("/")
+    while name.startswith("./"):
+        name = name[2:]
+    if name in {"", "."}:
+        return ""
     if not name or name.startswith("../") or "/../" in f"/{name}/":
         raise ValueError(f"Unsafe archive member path in {archive_path}: {member_name}")
     if os.path.isabs(name) or os.path.splitdrive(name)[0]:
@@ -318,6 +322,11 @@ def _extract_archive_to_dir(archive_path: str, dest_dir: str) -> int:
         with zipfile.ZipFile(archive_path) as zip_obj:
             for info in zip_obj.infolist():
                 rel_name = _safe_archive_member_name(info.filename, archive_path)
+                if not rel_name:
+                    if info.is_dir():
+                        os.makedirs(dest_dir, exist_ok=True)
+                        continue
+                    raise ValueError(f"Unsafe ZIP member path: {info.filename}")
                 dest_path = os.path.abspath(os.path.join(dest_dir, rel_name))
                 if not dest_path.startswith(os.path.abspath(dest_dir) + os.sep):
                     raise ValueError(f"Unsafe ZIP member path: {info.filename}")
@@ -335,6 +344,11 @@ def _extract_archive_to_dir(archive_path: str, dest_dir: str) -> int:
         with tarfile.open(archive_path, "r:*") as tar_obj:
             for member in tar_obj:
                 rel_name = _safe_archive_member_name(member.name, archive_path)
+                if not rel_name:
+                    if member.isdir():
+                        os.makedirs(dest_dir, exist_ok=True)
+                        continue
+                    raise ValueError(f"Unsafe TAR member path: {member.name}")
                 dest_path = os.path.abspath(os.path.join(dest_dir, rel_name))
                 if not dest_path.startswith(os.path.abspath(dest_dir) + os.sep):
                     raise ValueError(f"Unsafe TAR member path: {member.name}")

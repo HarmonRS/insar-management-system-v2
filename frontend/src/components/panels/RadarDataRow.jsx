@@ -12,10 +12,16 @@ function RadarDataRow({
     onRebuildPreview,
     onToggleLayer,
 }) {
+    const isProduced = Boolean(item.lt1_image_produced || item.lt1_landsar_produced);
     return (
         <li className="data-item radar-data-item" onClick={() => onFlyTo(item)}>
             <span className="data-item-name" title={item.displayName}>
                 {item.displayName}
+                {isProduced && (
+                    <small style={{ marginLeft: 8, color: '#166534', fontWeight: 700 }}>
+                        已生产 GeoTIFF
+                    </small>
+                )}
             </span>
             <div className="data-item-controls">
                 <span

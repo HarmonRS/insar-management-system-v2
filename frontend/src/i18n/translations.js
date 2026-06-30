@@ -1,7 +1,7 @@
 ﻿const TRANSLATION_PAIRS = [
   { zh: '正在检查登录状态...', en: 'Checking login status...' },
   { zh: '请稍候，系统正在验证会话。', en: 'Please wait, verifying your session.' },
-  { zh: 'InSAR 自动化管理系统', en: 'InSAR Automation Management System' },
+  { zh: '雷达数据生产管理系统', en: 'Radar Data Production Management System' },
   { zh: '科研工程模式', en: 'Research Engineering Mode' },
   { zh: '已授权', en: 'Licensed' },
   { zh: '未授权', en: 'Unlicensed' },

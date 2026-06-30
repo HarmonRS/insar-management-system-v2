@@ -16,7 +16,6 @@ from .dependencies import _require_admin, _get_current_user, _validate_export_pa
 from ..models import AuthUserORM
 from ..services import envi_service
 from ..services.job_queue_service import job_queue_service
-from ..services.result_catalog_service import result_catalog_service
 from ..services.task_service import task_service
 
 router = APIRouter()
@@ -59,38 +58,6 @@ class SarscapeSbasInspectRequest(BaseModel):
     task_names: Optional[List[str]] = None
     include_parameters: bool = False
     timeout_seconds: Optional[int] = Field(default=120, ge=10, le=600)
-
-
-def _normalize_existing_dir(path: Optional[str]) -> Optional[str]:
-    text = str(path or "").strip()
-    if not text:
-        return None
-    normalized = os.path.normpath(os.path.abspath(text))
-    if not os.path.isdir(normalized):
-        return None
-    return normalized
-
-
-def _dedupe_publish_roots(*paths: Optional[str]) -> list[str]:
-    ordered: list[str] = []
-    for raw_path in paths:
-        normalized = _normalize_existing_dir(raw_path)
-        if not normalized:
-            continue
-
-        if any(
-            normalized == existing or normalized.startswith(existing + os.sep)
-            for existing in ordered
-        ):
-            continue
-
-        ordered = [
-            existing
-            for existing in ordered
-            if not existing.startswith(normalized + os.sep)
-        ]
-        ordered.append(normalized)
-    return ordered
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +259,7 @@ async def get_task_overview_endpoint(
     return result
 
 
-@router.post("/idl/extract-disp")
+@router.post("/idl/extract-disp", status_code=202)
 async def extract_disp_endpoint(
     request: ExtractDispRequest,
     admin_user: AuthUserORM = Depends(_require_admin),
@@ -303,52 +270,29 @@ async def extract_disp_endpoint(
     if request.dest_dir:
         _validate_export_path(request.dest_dir, "dest_dir")
     try:
-        result = await asyncio.to_thread(
-            envi_service.extract_disp_results, request.root_dir, request.dest_dir
+        payload = {
+            "root_dir": request.root_dir,
+            "dest_dir": request.dest_dir,
+        }
+        task_id = await task_service.create_task(
+            "EXTRACT_DINSAR_PRODUCTS",
+            "D-InSAR 结果提取与登记",
+            params=payload,
+            db=db,
         )
+        job_id = await job_queue_service.create_job(
+            "EXTRACT_DINSAR_PRODUCTS",
+            payload=payload,
+            task_id=task_id,
+            db=db,
+        )
+        await db.commit()
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    publish_roots = _dedupe_publish_roots(result.get("target_dir"))
-    catalog_status: Dict[str, Any] = {
-        "attempted": False,
-        "status": "skipped",
-        "source_directories": publish_roots,
-        "message": "catalog publish skipped",
+    return {
+        "queued": True,
+        "task_id": task_id,
+        "job_id": job_id,
+        "message": "D-InSAR 结果提取与登记任务已入队",
     }
-    if publish_roots:
-        try:
-            catalog_status["attempted"] = True
-            publish_result = await result_catalog_service.publish_from_sources(
-                db,
-                publish_roots,
-            )
-            rebuild_result = None
-            if int(publish_result.get("processed", 0) or 0) > 0:
-                rebuild_result = await result_catalog_service.rebuild_catalog(
-                    db,
-                    full_rebuild=True,
-                )
-            catalog_status = {
-                "attempted": True,
-                "status": "ok",
-                "source_directories": publish_roots,
-                "publish": publish_result,
-                "rebuild": rebuild_result,
-                "message": (
-                    "catalog published and rebuilt"
-                    if rebuild_result is not None
-                    else "catalog publish finished with no rebuild needed"
-                ),
-            }
-        except Exception as exc:
-            await db.rollback()
-            catalog_status = {
-                "attempted": True,
-                "status": "error",
-                "source_directories": publish_roots,
-                "message": str(exc),
-            }
-
-    result["catalog"] = catalog_status
-    return result

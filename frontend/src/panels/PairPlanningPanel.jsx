@@ -21,6 +21,8 @@ const formatActionMode = (mode, en = false) => {
             return en ? 'Full rebuild' : '全量重建';
         case 'incremental_reconcile':
             return en ? 'Incremental reconcile' : '增量修复';
+        case 'auto_reconcile':
+            return en ? 'Automatic repair queued' : '自动修复已提交';
         case 'noop':
             return en ? 'No-op reconcile' : '无需修复';
         default:
@@ -244,6 +246,22 @@ export default function PairPlanningPanel({
                             >
                                 {pairingActionResult.error ? (
                                     <div style={{ color: '#b91c1c' }}>{pairingActionResult.error}</div>
+                                ) : pairingActionResult.queued ? (
+                                    <>
+                                        <div style={{ color: '#0f172a', fontWeight: 600 }}>
+                                            {formatActionMode(pairingActionResult.mode, en)}
+                                        </div>
+                                        <div>
+                                            {en
+                                                ? `Task queued: ${pairingActionResult.task_id || '-'}`
+                                                : `任务已提交：${pairingActionResult.task_id || '-'}`}
+                                        </div>
+                                        <div>
+                                            {en
+                                                ? 'Track progress in the task center. Refresh this status after the task completes.'
+                                                : '请在任务中心查看进度，任务完成后刷新这里的状态。'}
+                                        </div>
+                                    </>
                                 ) : (
                                     <>
                                         <div style={{ color: '#0f172a', fontWeight: 600 }}>

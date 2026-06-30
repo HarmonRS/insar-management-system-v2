@@ -14,6 +14,7 @@ from . import (
     hazard,
     health,
     idl,
+    landsar_lt1_production,
     license,
     logs,
     monitor,
@@ -55,6 +56,7 @@ def include_all_routers(router: APIRouter) -> None:
     router.include_router(dinsar.router)
     router.include_router(dinsar_products.router)
     router.include_router(dinsar_production.router)
+    router.include_router(landsar_lt1_production.router)
     router.include_router(sbas_insar_production.router)
     router.include_router(sbas_insar_products.router)
     router.include_router(timeseries_production.router)

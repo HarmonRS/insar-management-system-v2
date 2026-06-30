@@ -31,12 +31,12 @@ PathTransform = Callable[[str | Path], Path]
 
 
 DEFAULT_WINDOWS_DEM_CANDIDATES = (
-    r"D:\SRTM30m\SRTMDEM_RSP_SARscape.wgs84",
-    r"D:\SRTM30m\SRTMDEM_RSP_SARscape",
+    r"D:\DEM\SRTMDEM_RSP_SARscape.wgs84",
+    r"D:\DEM\SRTMDEM_RSP_SARscape",
 )
 DEFAULT_WSL_DEM_CANDIDATES = (
-    "/mnt/d/SRTM30m/SRTMDEM_RSP_SARscape.wgs84",
-    "/mnt/d/SRTM30m/SRTMDEM_RSP_SARscape",
+    "/mnt/d/DEM/SRTMDEM_RSP_SARscape.wgs84",
+    "/mnt/d/DEM/SRTMDEM_RSP_SARscape",
 )
 DEFAULT_WINDOWS_ORBIT_POOL_CANDIDATES = (r"D:\orbit_pools\isce2",)
 DEM_SIDECAR_PROPERTY_NAMES = ("file_name", "metadata_location", "extra_file_name")

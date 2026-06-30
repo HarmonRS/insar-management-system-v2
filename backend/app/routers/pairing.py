@@ -26,7 +26,10 @@ from ..models import (
     TimeseriesStackPlanORM,
 )
 from ..services.pairing_cache_service import pairing_cache_service
+from ..services.job_handlers import JOB_TYPE_PAIRING_CACHE_REBUILD
+from ..services.job_queue_service import job_queue_service
 from ..services.spatial_service import spatial_service
+from ..services.task_service import task_service
 from .dependencies import (
     _parse_aoi_from_files,
     _parse_aoi_geojson_form_value,
@@ -36,6 +39,49 @@ from .dependencies import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _queue_pairing_cache_job(
+    *,
+    db: AsyncSession,
+    mode: str,
+    force_full: bool = False,
+) -> Dict[str, object]:
+    full_rebuild = mode in {"full", "full_rebuild"} or force_full
+    task_name = (
+        "D-InSAR pairing cache full rebuild"
+        if full_rebuild
+        else "D-InSAR pairing cache dirty reconcile"
+    )
+    payload = {
+        "mode": "full_rebuild" if full_rebuild else "auto_reconcile",
+        "force_full": bool(full_rebuild),
+    }
+    try:
+        task_id = await task_service.create_task(
+            JOB_TYPE_PAIRING_CACHE_REBUILD,
+            task_name,
+            params=payload,
+            db=db,
+        )
+        job_id = await job_queue_service.create_job(
+            JOB_TYPE_PAIRING_CACHE_REBUILD,
+            payload=payload,
+            max_attempts=1,
+            task_id=task_id,
+            db=db,
+        )
+        await db.commit()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "queued": True,
+        "mode": payload["mode"],
+        "task_id": task_id,
+        "job_id": job_id,
+        "message": f"{task_name} queued",
+    }
 
 
 def get_pairing_request_from_form(
@@ -130,26 +176,26 @@ async def get_pairing_health_endpoint(
     return await pairing_cache_service.get_admin_summary(db)
 
 
-@router.post("/pairing/rebuild-cache")
+@router.post("/pairing/rebuild-cache", status_code=202)
 async def rebuild_pairing_cache_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: AuthUserORM = Depends(_require_admin),
 ):
     _ = current_user
-    return await pairing_cache_service.rebuild_metric_cache(db, commit=True)
+    return await _queue_pairing_cache_job(db=db, mode="full_rebuild", force_full=True)
 
 
-@router.post("/pairing/reconcile-dirty")
+@router.post("/pairing/reconcile-dirty", status_code=202)
 async def reconcile_dirty_pairing_endpoint(
     force_full: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     current_user: AuthUserORM = Depends(_require_admin),
 ):
     _ = current_user
-    return await pairing_cache_service.reconcile_dirty_scenes(
-        db,
+    return await _queue_pairing_cache_job(
+        db=db,
+        mode="full_rebuild" if force_full else "auto_reconcile",
         force_full=force_full,
-        commit=True,
     )
 
 

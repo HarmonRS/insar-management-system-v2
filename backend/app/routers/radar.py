@@ -23,6 +23,7 @@ from ..models import (
     RadarDataORM,
     RadarDataPage,
     RadarPreviewStatusInfo,
+    SARSceneGeoORM,
     ScanRequest,
 )
 from ..services.data_service import data_service
@@ -154,6 +155,51 @@ def _normalize_list_pagination(limit: int, offset: int) -> Tuple[int, int]:
     return safe_limit, safe_offset
 
 
+def _lt1_image_marker(scene: SARSceneGeoORM) -> Dict[str, Any]:
+    return {
+        "scene_id": scene.id,
+        "radar_data_id": scene.radar_data_id,
+        "product_id": f"sar_scene_geo:{scene.id}",
+        "product_family": "lt1_analysis_ready_geotiff",
+        "engine_code": scene.analysis_engine,
+        "profile_code": scene.analysis_profile,
+        "analysis_tif_path": scene.analysis_tif_path,
+        "analysis_dir": scene.analysis_dir,
+        "analysis_preview_path": scene.analysis_preview_path,
+        "status": scene.status,
+        "published_at": scene.updated_at.isoformat() if scene.updated_at else None,
+    }
+
+
+async def _decorate_lt1_landsar_status(db: AsyncSession, items: List[RadarDataORM]) -> List[RadarData]:
+    payloads = [RadarData.model_validate(item) for item in items]
+    radar_ids = [
+        int(item.id)
+        for item in items
+        if item.id and str(item.satellite_family or item.satellite or "").upper().replace("-", "") in {"LT1", "LT"}
+    ]
+    if not radar_ids:
+        return payloads
+    result = await db.execute(
+        select(SARSceneGeoORM).where(
+            SARSceneGeoORM.radar_data_id.in_(radar_ids),
+            SARSceneGeoORM.status == "DONE",
+            SARSceneGeoORM.analysis_tif_path.isnot(None),
+            SARSceneGeoORM.analysis_engine == "lt_gamma",
+            SARSceneGeoORM.analysis_profile == "lt1_gamma_geocoded_mli",
+        )
+    )
+    produced = {int(scene.radar_data_id): _lt1_image_marker(scene) for scene in result.scalars().all()}
+    for payload in payloads:
+        marker = produced.get(int(payload.id or 0))
+        if marker:
+            payload.lt1_image_produced = True
+            payload.lt1_image_product = marker
+            payload.lt1_landsar_produced = True
+            payload.lt1_landsar_product = marker
+    return payloads
+
+
 def _normalize_optional_text(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -253,6 +299,24 @@ def _build_radar_preview_status(
         fallback_in_use=(not has_geo_cache and has_raw_cache),
         message=message or default_message,
         error=error if error is not None else record.preview_cache_error,
+    )
+
+
+def _build_cached_radar_preview_status(record: RadarDataORM) -> RadarPreviewStatusInfo:
+    raw_cache_path, geo_cache_path = _radar_preview_paths(record)
+    preview_cache_path = str(record.preview_cache_path or "")
+    has_geo_cache = (
+        os.path.exists(geo_cache_path)
+        or bool(preview_cache_path and os.path.exists(preview_cache_path))
+    )
+    has_raw_cache = os.path.exists(raw_cache_path)
+    cached_status = str(record.preview_cache_status or "NONE").upper()
+    source_found = cached_status in {"READY", "FAILED"} or has_geo_cache or has_raw_cache
+    return _build_radar_preview_status(
+        record=record,
+        source_found=source_found,
+        has_geo_cache=has_geo_cache,
+        has_raw_cache=has_raw_cache,
     )
 
 
@@ -510,10 +574,13 @@ async def search_radar_data_endpoint(
     limit: int = Form(500),
     offset: int = Form(0),
     satellite: Optional[str] = Form(None),
+    satellite_family: Optional[str] = Form(None),
+    source_format: Optional[str] = Form(None),
     satellite_mode: Optional[str] = Form(None),
     receiving_station: Optional[str] = Form(None),
     imaging_mode: Optional[str] = Form(None),
     orbit_circle: Optional[str] = Form(None),
+    relative_orbit: Optional[str] = Form(None),
     acquisition_time_utc: Optional[str] = Form(None),
     product_type: Optional[str] = Form(None),
     polarization: Optional[str] = Form(None),
@@ -536,10 +603,13 @@ async def search_radar_data_endpoint(
     n_satellite_list: Optional[List[str]] = None
     if n_satellite_raw and "," in n_satellite_raw:
         n_satellite_list = [s.strip() for s in n_satellite_raw.split(",") if s.strip()]
+    n_satellite_family = _normalize_optional_text(satellite_family)
+    n_source_format = _normalize_optional_text(source_format)
     n_satellite_mode = _normalize_optional_text(satellite_mode)
     n_receiving_station = _normalize_optional_text(receiving_station)
     n_imaging_mode = _normalize_optional_text(imaging_mode)
     n_orbit_circle = _normalize_optional_text(orbit_circle)
+    n_relative_orbit = _normalize_optional_text(relative_orbit)
     n_acquisition_time = _normalize_optional_text(acquisition_time_utc)
     n_product_type = _normalize_optional_text(product_type)
     n_polarization = _normalize_optional_text(polarization)
@@ -584,6 +654,10 @@ async def search_radar_data_endpoint(
         filters.append(RadarDataORM.satellite.in_(n_satellite_list))
     elif n_satellite_raw:
         filters.append(RadarDataORM.satellite.ilike(f"%{n_satellite_raw}%"))
+    if n_satellite_family:
+        filters.append(func.upper(RadarDataORM.satellite_family) == n_satellite_family.upper())
+    if n_source_format:
+        filters.append(func.upper(RadarDataORM.source_format) == n_source_format.upper())
     if n_satellite_mode:
         filters.append(RadarDataORM.satellite_mode.ilike(f"%{n_satellite_mode}%"))
     if n_receiving_station:
@@ -592,6 +666,8 @@ async def search_radar_data_endpoint(
         filters.append(RadarDataORM.imaging_mode.ilike(f"%{n_imaging_mode}%"))
     if n_orbit_circle:
         filters.append(RadarDataORM.orbit_circle.ilike(f"%{n_orbit_circle}%"))
+    if n_relative_orbit:
+        filters.append(RadarDataORM.relative_orbit.ilike(f"%{n_relative_orbit}%"))
     if n_acquisition_time:
         filters.append(RadarDataORM.acquisition_time_utc.ilike(f"%{n_acquisition_time}%"))
     if n_product_type:
@@ -606,10 +682,11 @@ async def search_radar_data_endpoint(
         filters.append(RadarDataORM.orbit_direction.ilike(f"%{n_orbit_direction}%"))
     if has_orbit_data is not None:
         filters.append(RadarDataORM.has_orbit_data == has_orbit_data)
+    normalized_imaging_date = func.replace(RadarDataORM.imaging_date, "-", "")
     if n_date_from:
-        filters.append(RadarDataORM.imaging_date >= n_date_from)
+        filters.append(normalized_imaging_date >= n_date_from.replace("-", ""))
     if n_date_to:
-        filters.append(RadarDataORM.imaging_date <= n_date_to)
+        filters.append(normalized_imaging_date <= n_date_to.replace("-", ""))
     if resolved_aoi_wkt:
         aoi_geom = func.ST_GeomFromText(resolved_aoi_wkt, 4326)
         filters.append(ST_Intersects(RadarDataORM.geom, aoi_geom))
@@ -630,8 +707,9 @@ async def search_radar_data_endpoint(
     result = await db.execute(data_stmt)
     items = result.scalars().all()
 
+    decorated_items = await _decorate_lt1_landsar_status(db, items)
     return RadarDataSearchPageResponse(
-        items=items,
+        items=decorated_items,
         total=total,
         limit=limit,
         offset=offset,
@@ -663,8 +741,9 @@ async def get_all_data_endpoint(
         .limit(limit)
     )
     items = result.scalars().all()
+    decorated_items = await _decorate_lt1_landsar_status(db, items)
     return RadarDataPage(
-        items=items,
+        items=decorated_items,
         total=total,
         limit=limit,
         offset=offset,
@@ -724,16 +803,7 @@ async def get_radar_preview_status_endpoint(data_id: int, db: AsyncSession = Dep
     if _is_gf3_native_preview_record(record):
         return _build_gf3_native_preview_status(record)
 
-    raw_cache_path, geo_cache_path = _radar_preview_paths(record)
-    has_geo_cache = os.path.exists(geo_cache_path)
-    has_raw_cache = os.path.exists(raw_cache_path)
-    source_found = bool(await asyncio.to_thread(data_service.find_radar_preview_source, record.file_path))
-    return _build_radar_preview_status(
-        record=record,
-        source_found=source_found,
-        has_geo_cache=has_geo_cache,
-        has_raw_cache=has_raw_cache,
-    )
+    return _build_cached_radar_preview_status(record)
 
 
 @router.post("/radar-data/{data_id}/rebuild-preview-cache", response_model=RadarPreviewStatusInfo)

@@ -216,24 +216,46 @@ export default function usePairingLogic({
         }
     };
 
-    const createDinsarBatch = async () => {
+    const createDinsarBatch = async (options = {}) => {
         if (!ensureCanOperate()) return;
+        const chunkSize = Number(options?.chunkSize || 0);
         const foundPairs = usePairingStore.getState().foundPairs;
         const selectedPairs = foundPairs.filter(p => p.isSelected);
         if (selectedPairs.length === 0) {
             addLog('warn', '没有选中的配对可保存。');
             return;
         }
+        if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+            addLog('warn', '每批条数必须是大于 0 的整数。');
+            return;
+        }
         try {
-            const batchPairs = selectedPairs.map(compactDinsarBatchPair);
-            const response = await apiClient.post('/task-batches/dinsar', {
-                name: `DINSAR_${new Date().toISOString().slice(0, 10)}`,
-                pairs: batchPairs,
-            });
-            const batchId = response.data?.batch_id || '';
-            addLog('success', `已创建 D-InSAR 批次: ${batchId || 'OK'}`);
-            if (batchId) {
-                await focusBatchAfterCreate('dinsar', batchId);
+            const createdBatchIds = [];
+            const createdAt = new Date().toISOString().slice(0, 10);
+            const totalChunks = Math.ceil(selectedPairs.length / chunkSize);
+            for (let offset = 0; offset < selectedPairs.length; offset += chunkSize) {
+                const chunkIndex = Math.floor(offset / chunkSize) + 1;
+                const chunkPairs = selectedPairs
+                    .slice(offset, offset + chunkSize)
+                    .map(compactDinsarBatchPair);
+                const response = await apiClient.post('/task-batches/dinsar', {
+                    name: totalChunks > 1
+                        ? `DINSAR_${createdAt}_${String(chunkIndex).padStart(3, '0')}_of_${String(totalChunks).padStart(3, '0')}`
+                        : `DINSAR_${createdAt}`,
+                    pairs: chunkPairs,
+                });
+                const batchId = response.data?.batch_id || '';
+                if (batchId) {
+                    createdBatchIds.push(batchId);
+                }
+                addLog(
+                    'success',
+                    `已创建 D-InSAR 批次 ${chunkIndex}/${totalChunks}: ${batchId || 'OK'} (${chunkPairs.length} 条)`
+                );
+            }
+            if (createdBatchIds.length > 0) {
+                addLog('info', `已按每批 ${chunkSize} 条拆分为 ${createdBatchIds.length} 个 D-InSAR 批次。`);
+                await focusBatchAfterCreate('dinsar', createdBatchIds[0]);
             }
         } catch (error) {
             const errorMessage = error.response?.data?.detail || error.message || '未知错误';

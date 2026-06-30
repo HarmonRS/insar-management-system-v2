@@ -88,6 +88,15 @@ def run_lt_gamma_scene_preprocess(
     if not runner.is_file():
         raise FileNotFoundError(f"Gamma scene runner not found: {runner}")
 
+    analysis_dem_path = (
+        settings.SAR_ANALYSIS_DEM_PATH
+        or settings.GAMMA_SBAS_DEM_PATH
+        or settings.PYINT_PREPARED_DEM_PATH
+        or _prepared_dem_path()
+    )
+    if not analysis_dem_path:
+        raise RuntimeError("SAR_ANALYSIS_DEM_PATH is not configured for LT analysis GeoTIFF production")
+
     args = [
         pyint_python,
         to_wsl_path(str(runner)),
@@ -102,7 +111,11 @@ def run_lt_gamma_scene_preprocess(
         "--dem-root",
         to_wsl_path(str(settings.PYINT_DEM_ROOT)),
         "--prepared-dem-path",
-        to_wsl_path(_prepared_dem_path()),
+        to_wsl_path(str(analysis_dem_path)),
+        "--dem-resolution-m",
+        str(float(settings.SAR_ANALYSIS_DEM_RESOLUTION_M or 30.0)),
+        "--target-grid-size-m",
+        str(float(settings.SAR_ANALYSIS_TARGET_GRID_SIZE_M or 30.0)),
         "--project-name",
         run_name,
         "--date",
@@ -110,9 +123,13 @@ def run_lt_gamma_scene_preprocess(
         "--satellite-family",
         "LT1",
         "--range-looks",
-        str(DEFAULT_RANGE_LOOKS),
+        str(int(settings.SAR_ANALYSIS_RANGE_LOOKS or DEFAULT_RANGE_LOOKS)),
         "--azimuth-looks",
-        str(DEFAULT_AZIMUTH_LOOKS),
+        str(int(settings.SAR_ANALYSIS_AZIMUTH_LOOKS or DEFAULT_AZIMUTH_LOOKS)),
+        "--speckle-filter-method",
+        str(settings.SAR_ANALYSIS_SPECKLE_FILTER_METHOD or "none"),
+        "--speckle-filter-size",
+        str(int(settings.SAR_ANALYSIS_SPECKLE_FILTER_SIZE or 5)),
         "--geo-interp",
         str(settings.PYINT_GEO_INTERP or "1"),
         "--nodata-value",

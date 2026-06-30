@@ -26,6 +26,7 @@ export default function AppOverlays({
     licenseFileName,
     licenseUploadStatus,
     activeTasks,
+    runtimeSummary,
     showCancelTask,
     cancelTaskPwd,
     onShowCancelTask,
@@ -97,11 +98,12 @@ export default function AppOverlays({
                 </Suspense>
             )}
 
-            {activeTasks.length > 0 && (
+            {(activeTasks.length > 0 || Number(runtimeSummary?.jobs?.active_count || 0) > 0) && (
                 <Suspense fallback={<ModalLoadingFallback message="正在加载任务中心..." />}>
                     <LazyGlobalTaskCenter
-                        isVisible={activeTasks.length > 0}
+                        isVisible={activeTasks.length > 0 || Number(runtimeSummary?.jobs?.active_count || 0) > 0}
                         activeTasks={activeTasks}
+                        runtimeSummary={runtimeSummary}
                         t={t}
                         isAdmin={isAdmin}
                         showCancelTask={showCancelTask}

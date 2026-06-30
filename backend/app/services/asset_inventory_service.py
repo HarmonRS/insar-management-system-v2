@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import hashlib
+import logging
 import math
 import multiprocessing as mp
 import os
@@ -48,6 +49,8 @@ from ..utils import (
 )
 from .pairing_state_service import pairing_state_service
 from .data_service import DataService
+
+logger = logging.getLogger(__name__)
 from .image_service import image_service
 from .orbit_converter import sync_orbit_pools
 from .task_service import task_service
@@ -2599,6 +2602,53 @@ def _image_data_format_for_source(row: Dict[str, Any]) -> str:
     return "DIRECTORY"
 
 
+PAIRING_RELEVANT_RADAR_FIELDS = {
+    "satellite",
+    "satellite_family",
+    "imaging_date",
+    "imaging_mode",
+    "orbit_direction",
+    "polarization",
+    "look_direction",
+    "relative_orbit",
+    "insar_source_ready",
+    "file_path",
+    "coverage_polygon",
+    "min_lon",
+    "min_lat",
+    "max_lon",
+    "max_lat",
+    "scene_center_lon",
+    "scene_center_lat",
+}
+
+
+def _normalize_pairing_compare_value(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, (int, float)):
+        return round(float(value), 9)
+    if isinstance(value, list):
+        return [_normalize_pairing_compare_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_normalize_pairing_compare_value(item) for item in value]
+    return value
+
+
+def _radar_pairing_fields_changed(existing: RadarDataORM, new_values: Dict[str, Any]) -> bool:
+    for field in PAIRING_RELEVANT_RADAR_FIELDS:
+        if field not in new_values:
+            continue
+        before = _normalize_pairing_compare_value(getattr(existing, field, None))
+        after = _normalize_pairing_compare_value(new_values.get(field))
+        if before != after:
+            return True
+    return False
+
+
 class AssetInventoryService:
     async def _progress(self, task_id: Optional[str], message: str, progress: int) -> None:
         if not task_id:
@@ -2784,6 +2834,13 @@ class AssetInventoryService:
                 raw_cache_path = DataService.get_radar_raw_cache_path(unique_id, record.file_path)
                 geo_cache_path = DataService.get_radar_geo_cache_path(unique_id, record.file_path)
                 product_name = os.path.basename(str(record.file_path or ""))
+                if task_id:
+                    progress = progress_start + int(index / max(1, total) * max(1, progress_end - progress_start))
+                    await task_service.update_task(
+                        task_id,
+                        message=f"Building archive preview cache ({index}/{total}): {product_name}",
+                        progress=min(progress_end, progress),
+                    )
                 preview_source = await asyncio.to_thread(DataService.find_radar_preview_source, record.file_path)
 
                 if not preview_source:
@@ -4675,6 +4732,7 @@ class AssetInventoryService:
                     profile_inputs.append((row, asset_id, int(scene.id)))
             else:
                 before_orbit_id = existing.selected_orbit_asset_id
+                pairing_fields_changed = _radar_pairing_fields_changed(existing, radar_values)
                 for key, value in radar_values.items():
                     setattr(existing, key, value)
                 if not existing.orbit_binding_status:
@@ -4682,16 +4740,15 @@ class AssetInventoryService:
                 db.add(existing)
                 if existing.id is not None:
                     profile_inputs.append((row, asset_id, int(existing.id)))
-                if existing.id is not None and before_orbit_id != existing.selected_orbit_asset_id:
+                if existing.id is not None and (
+                    pairing_fields_changed or before_orbit_id != existing.selected_orbit_asset_id
+                ):
                     dirty_scene_ids.append(int(existing.id))
 
         await db.flush()
         if profile_inputs:
             await self._upsert_geometry_profiles(db, profile_inputs)
             await self._attach_radar_ids_to_metadata_documents(db, profile_inputs)
-            for _, _, radar_id in profile_inputs:
-                if radar_id not in dirty_scene_ids:
-                    dirty_scene_ids.append(radar_id)
         if dirty_scene_ids:
             await pairing_state_service.mark_scenes_dirty(db, scene_ids=dirty_scene_ids, reason="asset_inventory_source_update", commit=False)
 
@@ -4988,7 +5045,6 @@ class AssetInventoryService:
         matched = 0
         missing = 0
         candidate_count = 0
-        dirty_scene_ids: List[int] = []
         for scene in scenes:
             candidates = await self._find_orbit_candidates(db, scene)
             if not candidates:
@@ -5018,8 +5074,6 @@ class AssetInventoryService:
                         },
                     )
                 )
-                if scene.id is not None:
-                    dirty_scene_ids.append(int(scene.id))
                 continue
 
             candidate_count += len(candidates)
@@ -5049,8 +5103,6 @@ class AssetInventoryService:
             scene.orbit_binding_reason = selected[2]
             db.add(scene)
             matched += 1
-            if scene.id is not None:
-                dirty_scene_ids.append(int(scene.id))
 
             if len(candidates) > 1 and abs(float(candidates[0][1]) - float(candidates[1][1])) < 0.001:
                 db.add(
@@ -5068,13 +5120,8 @@ class AssetInventoryService:
                     )
                 )
 
-        if dirty_scene_ids:
-            await pairing_state_service.mark_scenes_dirty(
-                db,
-                scene_ids=sorted(set(dirty_scene_ids)),
-                reason="asset_inventory_orbit_binding",
-                commit=False,
-            )
+        # Pairing queries join radar_data and filter has_orbit_data live; orbit rebinding
+        # does not change the cached geometric/time pairing metrics.
         return {
             "scene_count": len(scenes),
             "matched_count": matched,
@@ -5279,8 +5326,15 @@ class AssetInventoryService:
                 .limit(safe_limit)
             )
         ).scalars().all()
+        items = [self._source_asset_payload(row) for row in rows]
+        try:
+            from .landsar_lt1_production_service import landsar_lt1_production_service
+
+            await landsar_lt1_production_service.decorate_source_asset_payloads(db, items)
+        except Exception:
+            logger.debug("Failed to decorate LT-1 LandSAR production status", exc_info=True)
         return {
-            "items": [self._source_asset_payload(row) for row in rows],
+            "items": items,
             "total": total,
             "limit": safe_limit,
             "offset": safe_offset,

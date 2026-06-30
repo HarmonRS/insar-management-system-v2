@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -380,6 +380,15 @@ def _incremental_insert_sql() -> str:
 
 
 class PairingCacheService:
+    async def _notify_progress(
+        self,
+        progress_callback: Optional[Callable[[str, int], Awaitable[None]]],
+        message: str,
+        progress: int,
+    ) -> None:
+        if progress_callback is not None:
+            await progress_callback(message, progress)
+
     async def _get_state_row(self, db: AsyncSession) -> PairingCacheStateORM:
         payload = await pairing_state_service.ensure_pairing_cache_state(db, commit=False)
         result = await db.execute(
@@ -501,11 +510,24 @@ class PairingCacheService:
         db: AsyncSession,
         *,
         commit: bool = True,
+        progress_callback: Optional[Callable[[str, int], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         await pairing_state_service.ensure_pairing_cache_state(db, commit=False)
         await self._set_state_rebuilding(db)
+        if commit:
+            await db.commit()
         try:
+            await self._notify_progress(
+                progress_callback,
+                "Pairing cache full rebuild: clearing old metric rows",
+                10,
+            )
             delete_result = await db.execute(delete(PairingMetricCacheORM))
+            await self._notify_progress(
+                progress_callback,
+                "Pairing cache full rebuild: computing spatial/temporal metrics",
+                20,
+            )
             await db.execute(
                 text(_full_rebuild_insert_sql()),
                 {
@@ -513,7 +535,17 @@ class PairingCacheService:
                     "orientation_rule_version": pairing_state_service.orientation_rule_version,
                 },
             )
+            await self._notify_progress(
+                progress_callback,
+                "Pairing cache full rebuild: resolving dirty scene markers",
+                80,
+            )
             resolved_dirty = await self._resolve_dirty_rows(db)
+            await self._notify_progress(
+                progress_callback,
+                "Pairing cache full rebuild: finalizing state",
+                90,
+            )
             summary = await self._finalize_state_success(db, full_rebuild=True)
             if commit:
                 await db.commit()
@@ -539,6 +571,7 @@ class PairingCacheService:
         *,
         force_full: bool = False,
         commit: bool = True,
+        progress_callback: Optional[Callable[[str, int], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         await pairing_state_service.ensure_pairing_cache_state(db, commit=False)
         dirty_result = await db.execute(
@@ -557,12 +590,21 @@ class PairingCacheService:
             pair_count=pair_count,
             force_full=force_full,
         ):
-            result = await self.rebuild_metric_cache(db, commit=commit)
+            result = await self.rebuild_metric_cache(
+                db,
+                commit=commit,
+                progress_callback=progress_callback,
+            )
             result["trigger_dirty_scene_count"] = dirty_scene_count
             result["forced"] = force_full
             return result
 
         if dirty_scene_count == 0:
+            await self._notify_progress(
+                progress_callback,
+                "Pairing cache reconcile: no dirty scenes, refreshing state",
+                80,
+            )
             summary = await self._finalize_state_success(db, full_rebuild=False)
             if commit:
                 await db.commit()
@@ -582,13 +624,24 @@ class PairingCacheService:
             pair_count=pair_count,
             force_full=force_full,
         ):
-            result = await self.rebuild_metric_cache(db, commit=commit)
+            result = await self.rebuild_metric_cache(
+                db,
+                commit=commit,
+                progress_callback=progress_callback,
+            )
             result["trigger_dirty_scene_count"] = dirty_scene_count
             result["forced"] = force_full
             return result
 
         await self._set_state_rebuilding(db)
+        if commit:
+            await db.commit()
         try:
+            await self._notify_progress(
+                progress_callback,
+                f"Pairing cache incremental reconcile: deleting stale rows for {dirty_scene_count} dirty scenes",
+                20,
+            )
             delete_result = await db.execute(
                 delete(PairingMetricCacheORM).where(
                     or_(
@@ -600,7 +653,7 @@ class PairingCacheService:
 
             insert_attempts = 0
             insert_sql = text(_incremental_insert_sql())
-            for dirty_scene_id in dirty_scene_ids:
+            for index, dirty_scene_id in enumerate(dirty_scene_ids, start=1):
                 insert_result = await db.execute(
                     insert_sql,
                     {
@@ -610,8 +663,28 @@ class PairingCacheService:
                     },
                 )
                 insert_attempts += int(insert_result.rowcount or 0)
+                if index == 1 or index == dirty_scene_count or index % 25 == 0:
+                    progress = 20 + int(index / max(1, dirty_scene_count) * 55)
+                    await self._notify_progress(
+                        progress_callback,
+                        (
+                            "Pairing cache incremental reconcile: "
+                            f"processed {index}/{dirty_scene_count} dirty scenes"
+                        ),
+                        progress,
+                    )
 
+            await self._notify_progress(
+                progress_callback,
+                "Pairing cache incremental reconcile: resolving dirty scene markers",
+                80,
+            )
             resolved_dirty = await self._resolve_dirty_rows(db, scene_ids=dirty_scene_ids)
+            await self._notify_progress(
+                progress_callback,
+                "Pairing cache incremental reconcile: finalizing state",
+                90,
+            )
             summary = await self._finalize_state_success(db, full_rebuild=False)
             if commit:
                 await db.commit()

@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { scanDinsarResults } from './api/dinsar';
 import { listTaskRoots } from './api/dinsarProduction';
 import { extractDispResults } from './api/idl';
 import { clearTaskLogs, deleteTaskLog, getTaskLogs } from './api/tasks';
@@ -8,10 +7,16 @@ import DinsarCatalogPanel from './components/DinsarCatalogPanel';
 import useTaskMonitor from './hooks/useTaskMonitor';
 
 const PRODUCT_TASK_TYPES = [
+  'EXTRACT_DINSAR_PRODUCTS',
   'SCAN_DINSAR',
+  'PUBLISH_DINSAR_PRODUCTS',
+  'REBUILD_DINSAR_CATALOG',
 ];
 
 const TASK_TYPE_LABEL = {
+  EXTRACT_DINSAR_PRODUCTS: 'D-InSAR 结果提取与登记',
+  PUBLISH_DINSAR_PRODUCTS: 'D-InSAR 结果发布',
+  REBUILD_DINSAR_CATALOG: 'D-InSAR 结果目录重建',
   SCAN_DINSAR: 'D-InSAR 结果扫描',
 };
 
@@ -167,7 +172,7 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
     try {
       const result = await extractDispResults(productionRoot.trim(), null);
       setExtractResult(result);
-      const scanResult = await scanDinsarResults();
+      const scanResult = result;
       setActionMessage(scanResult?.message || `D-InSAR 结果登记任务已提交：${scanResult?.task_id || '-'}`);
       if (scanResult?.task_id) {
         onJobQueued?.(scanResult.task_id);
@@ -262,6 +267,8 @@ export default function DinsarProductsPanel({ readOnly = false, onJobQueued }) {
             <div className={`dinsar-products-result-card ${extractResult.error ? 'error' : 'success'}`}>
               {extractResult.error ? (
                 <span>提取失败：{extractResult.error}</span>
+              ) : extractResult.queued ? (
+                <span>D-InSAR 结果提取与登记任务已入队：{extractResult.task_id || '-'}</span>
               ) : (
                 <>
                   <div>提取完成：复制 {extractResult.copied || 0} 个文件，覆盖 {extractResult.overwritten || 0} 个文件。</div>

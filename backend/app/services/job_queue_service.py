@@ -299,10 +299,11 @@ class JobQueueService:
             )
             stale_jobs = result.scalars().all()
             if not stale_jobs:
-                return {"recovered": 0, "failed": 0}
+                return {"recovered": 0, "failed": 0, "failed_task_ids": []}
 
             recovered = 0
             failed = 0
+            failed_task_ids = []
             for job in stale_jobs:
                 attempts = int(job.attempts or 0) + 1
                 if attempts < int(job.max_attempts or 1):
@@ -315,6 +316,8 @@ class JobQueueService:
                     next_run_at = None
                     failed += 1
                     finished_at = now
+                    if job.task_id:
+                        failed_task_ids.append(str(job.task_id))
 
                 await db.execute(
                     update(SystemJobORM)
@@ -331,7 +334,7 @@ class JobQueueService:
                     )
                 )
             await db.commit()
-            return {"recovered": recovered, "failed": failed}
+            return {"recovered": recovered, "failed": failed, "failed_task_ids": failed_task_ids}
         finally:
             if gen_db:
                 await db.close()

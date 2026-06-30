@@ -1,6 +1,7 @@
 import apiClient from './client';
 
 export const getActiveTasks = () => apiClient.get('/tasks/active').then(r => r.data);
+export const getTaskRuntimeSummary = () => apiClient.get('/tasks/runtime-summary').then(r => r.data);
 export const getRecentTasks = (taskTypes = [], statuses = [], limit = 20, offset = 0) =>
   apiClient.get('/tasks/recent', {
     params: {

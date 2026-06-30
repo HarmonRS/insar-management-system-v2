@@ -174,7 +174,24 @@ SET
     )
 FROM radar_data m, radar_data s
 WHERE pmc.master_scene_ref_id = m.id
-  AND pmc.slave_scene_ref_id = s.id;
+  AND pmc.slave_scene_ref_id = s.id
+  AND (
+      (pmc.scene_center_distance_meters IS NULL AND pmc.spatial_baseline_meters IS NOT NULL)
+      OR (pmc.master_satellite_family IS NULL AND m.satellite_family IS NOT NULL)
+      OR (pmc.slave_satellite_family IS NULL AND s.satellite_family IS NOT NULL)
+      OR (pmc.master_look_direction IS NULL AND m.look_direction IS NOT NULL)
+      OR (pmc.slave_look_direction IS NULL AND s.look_direction IS NOT NULL)
+      OR pmc.same_satellite_family IS DISTINCT FROM (
+          NULLIF(COALESCE(m.satellite_family, m.satellite), '') IS NOT NULL
+          AND NULLIF(COALESCE(s.satellite_family, s.satellite), '') IS NOT NULL
+          AND COALESCE(m.satellite_family, m.satellite) = COALESCE(s.satellite_family, s.satellite)
+      )
+      OR pmc.same_look_direction IS DISTINCT FROM (
+          NULLIF(m.look_direction, '') IS NULL
+          OR NULLIF(s.look_direction, '') IS NULL
+          OR m.look_direction = s.look_direction
+      )
+  );
 
 UPDATE pairing_cache_state
 SET

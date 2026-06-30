@@ -288,6 +288,8 @@ def _radar_archive_expected_preview_rank(archive_path: str, member_name: str) ->
         return None
 
     member = str(member_name or "").replace("\\", "/").strip("/")
+    while member.startswith("./"):
+        member = member[2:].strip("/")
     member_lower = member.lower()
     product_lower = product_stem.lower()
     expected_names = [
@@ -315,7 +317,10 @@ def _radar_archive_expected_preview_rank(archive_path: str, member_name: str) ->
 
 
 def _radar_archive_preview_score(member_name: str, size_bytes: int = 0) -> Optional[Tuple[int, int, int, int, str]]:
-    lower_name = str(member_name or "").replace("\\", "/").lower()
+    normalized_name = str(member_name or "").replace("\\", "/").strip("/")
+    while normalized_name.startswith("./"):
+        normalized_name = normalized_name[2:].strip("/")
+    lower_name = normalized_name.lower()
     base_name = os.path.basename(lower_name)
     if not base_name.endswith(_RADAR_PREVIEW_EXTENSIONS):
         return None
@@ -1024,7 +1029,6 @@ class DataService:
         # 3. 更新缺失精轨的现有记录
         update_progress("正在关联精轨数据...", 85)
         updated_orbits = 0
-        updated_orbit_scene_ids = set()
         if orbit_files_map:
             stmt_select = select(RadarDataORM).where(RadarDataORM.has_orbit_data == False)
             result = await db.execute(stmt_select)
@@ -1037,8 +1041,6 @@ class DataService:
                     record.orbit_file_path = orbit_files_map[key]
                     db.add(record)
                     updated_orbits += 1
-                    if record.id is not None:
-                        updated_orbit_scene_ids.add(int(record.id))
 
         for data_type, root_path, mtime in scan_state_updates:
             await DataService._upsert_scan_state(db, data_type, root_path, mtime)
@@ -1046,7 +1048,9 @@ class DataService:
         await db.commit()
 
         pairing_dirty_summary: Dict[str, Any] = {}
-        dirty_scene_ids = set(updated_orbit_scene_ids)
+        # Orbit availability is filtered live by pairing queries; it is not part of
+        # pairing_metric_cache, so orbit-only updates should not dirty the cache.
+        dirty_scene_ids = set()
         processed_unique_ids = [key for key in radar_cache_candidates.keys() if key]
         for chunk in _chunked(processed_unique_ids, 500):
             id_result = await db.execute(
@@ -1061,7 +1065,7 @@ class DataService:
                 reason="radar_scan",
                 commit=True,
             )
-        elif processed_scenes > 0 or updated_orbits > 0:
+        elif processed_scenes > 0:
             pairing_dirty_summary = await pairing_state_service.mark_global_dirty(
                 db,
                 reason="radar_scan",

@@ -252,6 +252,14 @@ class Settings(BaseSettings):
     SAR_ANALYSIS_WORK_ROOT: str = ""
     SAR_ANALYSIS_NODATA_VALUE: float = -9999.0
     SAR_ANALYSIS_OUTPUT_COG: bool = True
+    SAR_ANALYSIS_DEM_PATH: str = ""
+    SAR_ANALYSIS_TARGET_GRID_SIZE_M: float = 30.0
+    SAR_ANALYSIS_DEM_RESOLUTION_M: float = 30.0
+    SAR_ANALYSIS_RANGE_LOOKS: int = 6
+    SAR_ANALYSIS_AZIMUTH_LOOKS: int = 5
+    SAR_ANALYSIS_SPECKLE_FILTER_ENABLED: bool = True
+    SAR_ANALYSIS_SPECKLE_FILTER_METHOD: str = "lee"
+    SAR_ANALYSIS_SPECKLE_FILTER_SIZE: int = 5
 
     SRTM_DEM_DIR: str = ""
     GF3_GEO_DEM_PATH: str = ""
@@ -318,7 +326,7 @@ class Settings(BaseSettings):
     ISCE2_WSL_DISTRO: str = "Ubuntu-24.04"
     ISCE2_PYTHON: str = "/home/administrator/miniconda3/envs/isce2/bin/python"
     ISCE2_PROFILE: str = "lt1_stripmap"
-    ISCE2_DEM_PATH: str = "D:\\SRTM30m\\SRTMDEM_RSP_SARscape.wgs84"
+    ISCE2_DEM_PATH: str = "D:\\DEM\\SRTMDEM_RSP_SARscape.wgs84"
     ISCE2_WORK_ROOT: str = ""
     ISCE2_OUTPUT_ROOT: str = ""
     ISCE2_PER_TASK_TIMEOUT_SECONDS: int = 43200
@@ -355,7 +363,7 @@ class Settings(BaseSettings):
     PYINT_DEM_MODE: str = "local_fabdem"
     PYINT_FABDEM_ROOT: str = ""
     PYINT_PREPARED_DEM_PATH: str = ""
-    PYINT_DEM_RESOLUTION_M: float = 30.0
+    PYINT_DEM_RESOLUTION_M: float = 90.0
     PYINT_OPENTOPO_DEM_TYPE: str = "SRTMGL1"
     PYINT_OPENTOPO_API_KEY: str = ""
     PYINT_DEM_STRICT: bool = True
@@ -423,6 +431,7 @@ class Settings(BaseSettings):
     JOB_WORKER_STALE_RECOVER_INTERVAL: float = 15.0
     JOB_WORKER_STALE_RUNNING_SECONDS: int = 300
     JOB_WORKER_HEARTBEAT_INTERVAL: float = 5.0
+    JOB_WORKER_CONCURRENCY: int = 1
     JOB_WORKER_ALLOWED_TYPES: str = ""
 
     TIMESERIES_ENABLED: bool = False
@@ -500,6 +509,39 @@ class Settings(BaseSettings):
             "SAR_ANALYSIS_NODATA_VALUE",
             float(self.SAR_ANALYSIS_NODATA_VALUE if self.SAR_ANALYSIS_NODATA_VALUE is not None else -9999.0),
         )
+        if not self.SAR_ANALYSIS_DEM_PATH:
+            object.__setattr__(
+                self,
+                "SAR_ANALYSIS_DEM_PATH",
+                self.GAMMA_SBAS_DEM_PATH
+                or self.PYINT_PREPARED_DEM_PATH
+                or self.ISCE2_DEM_PATH
+                or self.IDL_DINSAR_DEM_BASE_FILE,
+            )
+        object.__setattr__(
+            self,
+            "SAR_ANALYSIS_TARGET_GRID_SIZE_M",
+            max(1.0, float(self.SAR_ANALYSIS_TARGET_GRID_SIZE_M or 30.0)),
+        )
+        object.__setattr__(
+            self,
+            "SAR_ANALYSIS_DEM_RESOLUTION_M",
+            max(1.0, float(self.SAR_ANALYSIS_DEM_RESOLUTION_M or self.SAR_ANALYSIS_TARGET_GRID_SIZE_M or 30.0)),
+        )
+        object.__setattr__(self, "SAR_ANALYSIS_RANGE_LOOKS", max(1, int(self.SAR_ANALYSIS_RANGE_LOOKS or 6)))
+        object.__setattr__(self, "SAR_ANALYSIS_AZIMUTH_LOOKS", max(1, int(self.SAR_ANALYSIS_AZIMUTH_LOOKS or 5)))
+        filter_method = str(self.SAR_ANALYSIS_SPECKLE_FILTER_METHOD or "lee").strip().lower()
+        if filter_method in {"", "0", "false", "none", "off", "disabled", "no"}:
+            filter_method = "none"
+        elif filter_method not in {"lee"}:
+            filter_method = "lee"
+        if not self.SAR_ANALYSIS_SPECKLE_FILTER_ENABLED:
+            filter_method = "none"
+        filter_size = max(3, min(99, int(self.SAR_ANALYSIS_SPECKLE_FILTER_SIZE or 5)))
+        if filter_size % 2 == 0:
+            filter_size += 1
+        object.__setattr__(self, "SAR_ANALYSIS_SPECKLE_FILTER_METHOD", filter_method)
+        object.__setattr__(self, "SAR_ANALYSIS_SPECKLE_FILTER_SIZE", filter_size)
         if not self.SRTM_DEM_DIR:
             object.__setattr__(self, "SRTM_DEM_DIR", os.path.join(backend_dir, "dem_data"))
         object.__setattr__(self, "ASSET_SCAN_PARSE_WORKERS", max(1, int(self.ASSET_SCAN_PARSE_WORKERS or 1)))
@@ -514,6 +556,7 @@ class Settings(BaseSettings):
             max(60, int(self.ASSET_SCAN_PARSE_TIMEOUT_SECONDS or 600)),
         )
         object.__setattr__(self, "ASSET_SCAN_DB_BATCH_SIZE", max(1, int(self.ASSET_SCAN_DB_BATCH_SIZE or 1)))
+        object.__setattr__(self, "JOB_WORKER_CONCURRENCY", max(1, int(self.JOB_WORKER_CONCURRENCY or 1)))
         if not self.GF3_ARCHIVE_SOURCE_DIRS:
             object.__setattr__(
                 self,
@@ -725,7 +768,7 @@ class Settings(BaseSettings):
         if pyint_dem_mode not in {"local_fabdem", "opentopo", "prepared_file"}:
             pyint_dem_mode = "local_fabdem"
         object.__setattr__(self, "PYINT_DEM_MODE", pyint_dem_mode)
-        object.__setattr__(self, "PYINT_DEM_RESOLUTION_M", max(0.1, float(self.PYINT_DEM_RESOLUTION_M or 30.0)))
+        object.__setattr__(self, "PYINT_DEM_RESOLUTION_M", max(0.1, float(self.PYINT_DEM_RESOLUTION_M or 90.0)))
         object.__setattr__(
             self,
             "PYINT_UNWRAP_COH_THRESHOLD",
@@ -1291,6 +1334,7 @@ def validate_runtime_config() -> dict[str, Any]:
     _check_path(label="WATER_RESULTS_DIR", value=settings.WATER_RESULTS_DIR, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="SAR_ANALYSIS_READY_ROOT", value=settings.SAR_ANALYSIS_READY_ROOT, errors=errors, warnings=warnings, expect_file=False)
     _check_path(label="SAR_ANALYSIS_WORK_ROOT", value=settings.SAR_ANALYSIS_WORK_ROOT, errors=errors, warnings=warnings, expect_file=False)
+    _check_path(label="SAR_ANALYSIS_DEM_PATH", value=settings.SAR_ANALYSIS_DEM_PATH, errors=errors, warnings=warnings, expect_file=True)
     _check_path(label="MONITOR_ORBIT_DIR", value=settings.MONITOR_ORBIT_DIR, errors=errors, warnings=warnings, expect_file=False)
     for label, value in (
         ("SOURCE_PRODUCT_DIRS", settings.SOURCE_PRODUCT_DIRS),

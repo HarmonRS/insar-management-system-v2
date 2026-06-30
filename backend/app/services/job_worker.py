@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import socket
 import uuid
@@ -50,20 +51,35 @@ def _new_session():
     return database.AsyncSessionLocal()
 
 
-async def _touch_worker(worker_id: str) -> None:
+async def _touch_worker(
+    worker_id: str,
+    *,
+    concurrency: int,
+    allowed_job_types: Optional[Set[str]],
+) -> None:
     host = socket.gethostname()
     pid = os.getpid()
+    note = json.dumps(
+        {
+            "concurrency": max(1, int(concurrency or 1)),
+            "allowed_job_types": sorted(allowed_job_types or []),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     async with _new_session() as db:
         stmt = pg_insert(SystemWorkerHeartbeatORM).values(
             worker_id=worker_id,
             hostname=host,
             pid=pid,
+            note=note,
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=["worker_id"],
             set_={
                 "hostname": host,
                 "pid": pid,
+                "note": note,
                 "last_seen": func.now(),
             },
         )
@@ -172,7 +188,11 @@ async def run_worker_loop(
         now = time.monotonic()
         if now - last_heartbeat >= heartbeat_interval:
             try:
-                await _touch_worker(worker_id)
+                await _touch_worker(
+                    worker_id,
+                    concurrency=concurrency,
+                    allowed_job_types=allowed_job_types,
+                )
             except Exception as exc:
                 print(f"[WARN] worker cleanup: {exc}")
             last_heartbeat = now
@@ -184,6 +204,12 @@ async def run_worker_loop(
                         f"[*] Recovered stale jobs: retry={recovered.get('recovered', 0)} "
                         f"failed={recovered.get('failed', 0)}"
                     )
+                    for task_id in recovered.get("failed_task_ids", []) or []:
+                        await task_service.update_task(
+                            task_id,
+                            status="FAILED",
+                            message="后台任务心跳超时，任务已被标记为失败",
+                        )
             except Exception as exc:
                 print(f"[WARN] recover_stale: {exc}")
             last_recover = now

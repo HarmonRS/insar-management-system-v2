@@ -61,6 +61,15 @@ The binding step is currently a full re-evaluation of active LT-1/Sentinel-1 sou
 
 If a scan must be stopped before retrying with new concurrency settings, stop the running worker processes and mark the active `system_jobs`, `system_tasks`, and `asset_inventory_states` rows as terminal failed states. This prevents the job queue from recovering and re-claiming the old job.
 
+The main application worker is expected to support more than one queued job at a time so long-running preview generation does not block independent production jobs. Current main-server baseline:
+
+```env
+JOB_WORKER_CONCURRENCY=2
+JOB_WORKER_ALLOWED_TYPES=
+```
+
+Do not start ad-hoc one-off workers during formal testing. Change the configured worker concurrency, stop stale processes, and let the operator restart the application normally.
+
 Recommended health checks during a source scan:
 
 - Task log should show `workers=16` and `pending=64` / `active_or_queued=64` after the parser pool fills.

@@ -9,6 +9,7 @@ export default function useGlobalTaskControl({
   licenseOk,
   activeTasks,
   setActiveTasks,
+  setRuntimeSummary,
   pendingTaskIds,
   setPendingTaskIds,
   setIsCheckingTasks,
@@ -21,8 +22,11 @@ export default function useGlobalTaskControl({
   const pendingTaskIdsRef = useRef(pendingTaskIds);
   useEffect(() => { pendingTaskIdsRef.current = pendingTaskIds; }, [pendingTaskIds]);
 
-  const handleTasksUpdate = useCallback(async (tasks) => {
+  const handleTasksUpdate = useCallback(async (tasks, runtimeSummary = null) => {
     setActiveTasks(tasks);
+    if (setRuntimeSummary) {
+      setRuntimeSummary(runtimeSummary);
+    }
     const hasRunningTasks = tasks.length > 0;
 
     // 首次检查完成，清除检查状态
@@ -93,21 +97,45 @@ export default function useGlobalTaskControl({
 
   }, [
     setActiveTasks,
+    setRuntimeSummary,
     setIsCheckingTasks,
     handleTaskCompletionRef,
     setPendingTaskIds,
   ]);
 
+  const normalizeRuntimeSummary = useCallback((payload) => {
+    if (!payload || typeof payload !== 'object') return null;
+    const items = payload.tasks?.items;
+    return {
+      ...payload,
+      tasks: {
+        ...(payload.tasks || {}),
+        items: Array.isArray(items) ? items : [],
+      },
+    };
+  }, []);
+
   // Fallback polling (used when SSE is unavailable)
   const syncActiveTasks = useCallback(async () => {
     try {
+      const response = await apiClient.get('/tasks/runtime-summary');
+      const summary = normalizeRuntimeSummary(response.data);
+      if (summary) {
+        await handleTasksUpdate(summary.tasks.items, summary);
+        return;
+      }
+    } catch (error) {
+      console.error('同步任务运行概览失败:', error);
+    }
+
+    try {
       const response = await apiClient.get('/tasks/active');
       const tasks = Array.isArray(response.data) ? response.data : [];
-      await handleTasksUpdate(tasks);
+      await handleTasksUpdate(tasks, null);
     } catch (error) {
       console.error('同步任务状态失败:', error);
     }
-  }, [handleTasksUpdate]);
+  }, [handleTasksUpdate, normalizeRuntimeSummary]);
 
   useEffect(() => {
     if (!currentUser || !licenseOk) return;
@@ -121,12 +149,14 @@ export default function useGlobalTaskControl({
 
     const startSSE = () => {
       const baseURL = apiClient.defaults.baseURL || '';
-      es = new EventSource(`${baseURL}/tasks/active/stream`);
+      es = new EventSource(`${baseURL}/tasks/runtime-summary/stream`);
 
       es.onmessage = (event) => {
         try {
-          const tasks = JSON.parse(event.data);
-          handleTasksUpdate(Array.isArray(tasks) ? tasks : []);
+          const summary = normalizeRuntimeSummary(JSON.parse(event.data));
+          if (summary) {
+            handleTasksUpdate(summary.tasks.items, summary);
+          }
         } catch (e) {
           console.error('SSE parse error:', e);
         }

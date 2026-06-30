@@ -207,15 +207,20 @@ def _raster_quality(path: Path) -> dict[str, Any]:
         return quality
 
 
+def _is_geographic_crs(crs_text: str) -> bool:
+    text = str(crs_text or "").upper()
+    return "4326" in text or "GEOGCS" in text or 'UNIT["DEGREE"' in text or "UNIT['DEGREE'" in text
+
+
 def _pixel_size_m_from_quality(quality: dict[str, Any]) -> float | None:
     try:
         transform = quality.get("transform") or []
         xres = abs(float(transform[0]))
         yres = abs(float(transform[4]))
-        crs = str(quality.get("crs") or "").upper()
+        crs = str(quality.get("crs") or "")
         if not xres or not yres:
             return None
-        if crs and "4326" not in crs:
+        if crs and not _is_geographic_crs(crs):
             return round((xres + yres) / 2.0, 3)
         bounds = quality.get("bounds") or {}
         lat = (float(bounds.get("bottom", 0.0)) + float(bounds.get("top", 0.0))) / 2.0

@@ -711,6 +711,11 @@ if (Test-Path -LiteralPath "$NginxConfPath") {
     )
     $NewConfContent = [regex]::Replace(
         $NewConfContent,
+        '(location\s+/api/tasks/runtime-summary/stream\s*\{[\s\S]*?proxy_pass\s+)http://(127\.0\.0\.1|localhost):\d+(;)',
+        "`${1}$BackendProxy`${3}"
+    )
+    $NewConfContent = [regex]::Replace(
+        $NewConfContent,
         '(location\s+/api/cluster/\s*\{[\s\S]*?proxy_pass\s+)http://(127\.0\.0\.1|localhost):\d+(;)',
         "`${1}$BackendProxy`${3}"
     )

@@ -63,6 +63,17 @@ const STATUS_LABEL = {
   pending: '等待中',
 };
 
+const FAILURE_REASON_LABEL = {
+  'LandSAR access violation during coherence mask/phase unwrapping': 'LandSAR 访问冲突（相干性掩膜/相位解缠）',
+  'Insufficient tie/GCP points for DEM/geocoding': 'DEM / 地理编码控制点不足',
+  'DEM/sub-terrain processing failed': 'DEM / 去地形阶段失败',
+  'Insufficient GCPs for baseline/calibration': '基线精估计控制点不足',
+  'Coherence mask/phase unwrapping failed': '相干性掩膜 / 相位解缠失败',
+  'Processing timeout': '处理超时',
+  'Result catalog publish failed': '结果目录发布失败',
+  'Unclassified D-InSAR failure': '未分类失败',
+};
+
 const PYINT_DEM_MODE_LABEL = {
   local_fabdem: '本地 FABDEM',
   opentopo: 'OpenTopography',
@@ -267,6 +278,123 @@ function formatTaskRootUpdatedAt(value) {
   }
 }
 
+function safeCount(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getRunCounts(run) {
+  const completed = safeCount(run?.completed_items);
+  const failed = safeCount(run?.failed_items);
+  const skipped = safeCount(run?.skipped_items);
+  const total = safeCount(run?.total_items);
+  return { completed, failed, skipped, total };
+}
+
+function hasRunCounts(run) {
+  const { completed, failed, skipped, total } = getRunCounts(run);
+  return [completed, failed, skipped, total].some(value => value != null);
+}
+
+function formatRunCounts(run) {
+  const { completed, failed, skipped, total } = getRunCounts(run);
+  const parts = [];
+  if (completed != null) parts.push(`成功 ${completed}`);
+  if (failed != null) parts.push(`失败 ${failed}`);
+  if (skipped != null && skipped > 0) parts.push(`跳过 ${skipped}`);
+  if (total != null) parts.push(`总数 ${total}`);
+  return parts.join(' / ');
+}
+
+function statusToneClass(status) {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'success' || normalized === 'completed') return 'tone-ready';
+  if (normalized === 'failed') return 'tone-error';
+  if (normalized === 'running') return 'tone-info';
+  if (normalized === 'cancelled' || normalized === 'canceled') return 'tone-neutral';
+  return 'tone-warn';
+}
+
+function formatFailureReason(reason) {
+  return FAILURE_REASON_LABEL[reason] || reason || '未分类失败';
+}
+
+function compactText(value, maxLength = 180) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1).trim()}…` : text;
+}
+
+function classifyFailureReason(errorMessage) {
+  const text = String(errorMessage || '');
+  const lower = text.toLowerCase();
+  if (text.includes('3221225477') || lower.includes('status_access_violation')) {
+    return 'LandSAR access violation during coherence mask/phase unwrapping';
+  }
+  if (lower.includes('not enough gcps') || lower.includes('space insar calibration failed')) {
+    return 'Insufficient GCPs for baseline/calibration';
+  }
+  if (
+    lower.includes('no enough points')
+    || lower.includes('not enough points')
+    || lower.includes('geo_extract_gcp')
+    || lower.includes('无满足snr')
+    || text.includes('离散采样点')
+  ) {
+    return 'Insufficient tie/GCP points for DEM/geocoding';
+  }
+  if (lower.includes('dem/sub-terrain') || lower.includes('subterrain') || lower.includes('sub-terrain')) {
+    return 'DEM/sub-terrain processing failed';
+  }
+  if (text.includes('相干性掩膜') && text.includes('相位解缠')) {
+    return 'Coherence mask/phase unwrapping failed';
+  }
+  if (lower.includes('timeout') || lower.includes('timed out') || text.includes('超时')) {
+    return 'Processing timeout';
+  }
+  if (lower.includes('publish')) {
+    return 'Result catalog publish failed';
+  }
+  return 'Unclassified D-InSAR failure';
+}
+
+function buildFailureSummaryFromItems(run) {
+  const items = Array.isArray(run?.items) ? run.items : [];
+  const failedItems = items.filter(item => String(item?.status || '').toUpperCase() === 'FAILED' || item?.last_error);
+  if (failedItems.length === 0) return null;
+
+  const groupsByReason = new Map();
+  const detailItems = failedItems.map(item => {
+    const reason = classifyFailureReason(item?.last_error);
+    const label = item?.task_alias || item?.task_name || item?.pair_key || '未命名任务';
+    const group = groupsByReason.get(reason) || { reason, count: 0, items: [] };
+    group.count += 1;
+    group.items.push(label);
+    groupsByReason.set(reason, group);
+    return {
+      task_alias: item?.task_alias,
+      task_name: item?.task_name,
+      reason,
+      error: compactText(item?.last_error, 260),
+    };
+  });
+
+  return {
+    failed_count: failedItems.length,
+    partial: true,
+    groups: Array.from(groupsByReason.values()),
+    items: detailItems,
+  };
+}
+
+function getRunFailureSummary(run) {
+  const summary = run?.summary_json?.failure_summary;
+  if (summary && Number(summary.failed_count || 0) > 0) {
+    return summary;
+  }
+  return buildFailureSummaryFromItems(run);
+}
+
 function RunPathBlock({ run }) {
   const items = Array.isArray(run?.items) ? run.items : [];
   const item = items.find(entry => entry?.status === 'RUNNING') || items[0] || null;
@@ -295,6 +423,67 @@ function RunPathBlock({ run }) {
           </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+function RunStatusBlock({ run }) {
+  return (
+    <div style={{ display: 'grid', gap: 4, minWidth: 120 }}>
+      <span className={`dinsar-status-pill ${statusToneClass(run?.status)}`}>
+        {formatStatus(run?.status)}
+      </span>
+      {hasRunCounts(run) && (
+        <span style={{ color: '#475569', fontSize: 11, lineHeight: 1.35 }}>
+          {formatRunCounts(run)}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function RunSituationBlock({ run }) {
+  const failureSummary = getRunFailureSummary(run);
+  const countsText = hasRunCounts(run) ? formatRunCounts(run) : '';
+  const message = compactText(run?.message, 220);
+  if (!countsText && !failureSummary && !message) return null;
+
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        padding: '8px 10px',
+        borderRadius: 6,
+        border: '1px solid #e2e8f0',
+        background: '#f8fafc',
+        color: '#334155',
+        lineHeight: 1.45,
+      }}
+    >
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: failureSummary ? 6 : 0 }}>
+        <strong style={{ fontSize: 12, color: '#0f172a' }}>运行情况</strong>
+        {countsText && <span style={{ fontSize: 11, color: '#475569' }}>{countsText}</span>}
+      </div>
+      {failureSummary ? (
+        <div style={{ display: 'grid', gap: 5 }}>
+          {(failureSummary.groups || []).slice(0, 4).map((group, index) => (
+            <div key={`${group.reason || 'reason'}-${index}`} style={{ fontSize: 11, color: '#7f1d1d' }}>
+              <strong>{formatFailureReason(group.reason)}</strong>
+              <span>：{Number(group.count || 0)} 项</span>
+              {Array.isArray(group.items) && group.items.length > 0 && (
+                <span style={{ color: '#475569' }}>（{group.items.slice(0, 3).join('、')}{group.items.length > 3 ? ' 等' : ''}）</span>
+              )}
+            </div>
+          ))}
+          {failureSummary.partial && Number(run?.failed_items || 0) > Number(failureSummary.failed_count || 0) && (
+            <div style={{ fontSize: 11, color: '#92400e' }}>
+              当前接口仅返回部分失败明细，请查看日志获取完整失败项。
+            </div>
+          )}
+        </div>
+      ) : message ? (
+        <div style={{ marginTop: 6, fontSize: 11, color: '#475569' }}>{message}</div>
+      ) : null}
     </div>
   );
 }
@@ -1957,19 +2146,15 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                       <td style={{ padding: '6px 8px', fontFamily: 'monospace', fontSize: 11 }}>{run.run_id}</td>
                       <td style={{ padding: '6px 8px' }}>{formatEngineLabel(run.engine)}</td>
                       <td style={{ padding: '6px 8px' }}>{formatSatelliteFamilyLabel(inferSatelliteFamilyFromResultLike(run))}</td>
-                      <td
-                        style={{
-                          padding: '6px 8px',
-                          color: run.status === 'success' ? '#16a34a' : run.status === 'failed' ? '#ef4444' : '#64748b',
-                        }}
-                      >
-                        {formatStatus(run.status)}
+                      <td style={{ padding: '6px 8px', verticalAlign: 'top' }}>
+                        <RunStatusBlock run={run} />
                       </td>
                       <td style={{ padding: '6px 8px', color: '#94a3b8', whiteSpace: 'nowrap' }}>
                         {run.started_at ? new Date(run.started_at * 1000).toLocaleString() : '-'}
                       </td>
                       <td style={{ padding: '6px 8px', maxWidth: 520, fontSize: 11 }}>
                         <RunPathBlock run={run} />
+                        <RunSituationBlock run={run} />
                       </td>
                       <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>
                         <button

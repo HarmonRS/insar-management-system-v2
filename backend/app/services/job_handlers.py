@@ -41,7 +41,7 @@ from .dinsar_result_layout_service import (
 )
 from .dinsar_scan_service import dinsar_scan_service
 from .engine_lock_service import engine_lock_service
-from .envi_service import build_envi_runner_command, get_envi_runner_cwd, get_envi_runner_env
+from .envi_service import build_envi_runner_command, extract_disp_results, get_envi_runner_cwd, get_envi_runner_env
 from .psinsar_catalog_service import psinsar_catalog_service
 from .result_catalog_service import result_catalog_service
 from .sbas_insar_catalog_service import sbas_insar_catalog_service
@@ -101,10 +101,13 @@ JOB_TYPE_ISCE2_RUN = "ISCE2_RUN"
 JOB_TYPE_PYINT_RUN = "PYINT_RUN"
 JOB_TYPE_LANDSAR_RUN = "LANDSAR_RUN"
 JOB_TYPE_LANDSAR_CLUSTER_ITEM = "LANDSAR_CLUSTER_ITEM"
+JOB_TYPE_LANDSAR_LT1_IMPORT = "LANDSAR_LT1_IMPORT"
+JOB_TYPE_EXTRACT_DINSAR_PRODUCTS = "EXTRACT_DINSAR_PRODUCTS"
 JOB_TYPE_PUBLISH_DINSAR_PRODUCTS = "PUBLISH_DINSAR_PRODUCTS"
 JOB_TYPE_REBUILD_DINSAR_CATALOG = "REBUILD_DINSAR_CATALOG"
 JOB_TYPE_REBUILD_PSINSAR_CATALOG = "REBUILD_PSINSAR_CATALOG"
 JOB_TYPE_REBUILD_SBAS_INSAR_CATALOG = "REBUILD_SBAS_INSAR_CATALOG"
+JOB_TYPE_PAIRING_CACHE_REBUILD = "PAIRING_CACHE_REBUILD"
 JOB_TYPE_SCAN_ASSET_INVENTORY = "SCAN_ASSET_INVENTORY"
 JOB_TYPE_AUDIT_SOURCE_ARCHIVE_INTEGRITY = "AUDIT_SOURCE_ARCHIVE_INTEGRITY"
 JOB_TYPE_SBAS_COREGISTRATION = "SBAS_COREGISTRATION"
@@ -204,6 +207,142 @@ def _dedupe_existing_dirs(paths: Any) -> List[str]:
             continue
         ordered.append(path)
     return ordered
+
+
+def _compact_failure_text(value: Any, *, max_length: int = 700) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return "Unknown error"
+    if len(text) <= max_length:
+        return text
+    return text[: max(0, max_length - 3)].rstrip() + "..."
+
+
+def _classify_dinsar_failure(error_message: Any) -> str:
+    text = str(error_message or "")
+    lowered = text.lower()
+    if "3221225477" in text or "status_access_violation" in lowered:
+        return "LandSAR access violation during coherence mask/phase unwrapping"
+    if "not enough gcps" in lowered or "space insar calibration failed" in lowered:
+        return "Insufficient GCPs for baseline/calibration"
+    if (
+        "no enough points" in lowered
+        or "not enough points" in lowered
+        or "geo_extract_gcp" in lowered
+        or "无满足snr" in lowered
+        or "离散采样点" in text
+    ):
+        return "Insufficient tie/GCP points for DEM/geocoding"
+    if "dem/sub-terrain" in lowered or "subterrain" in lowered or "sub-terrain" in lowered:
+        return "DEM/sub-terrain processing failed"
+    if "相干性掩膜" in text and "相位解缠" in text:
+        return "Coherence mask/phase unwrapping failed"
+    if "timeout" in lowered or "timed out" in lowered or "超时" in text:
+        return "Processing timeout"
+    if "publish" in lowered:
+        return "Result catalog publish failed"
+    compact = _compact_failure_text(text, max_length=120)
+    return compact if compact != "Unknown error" else "Unclassified D-InSAR failure"
+
+
+async def _build_dinsar_failure_summary(db, run) -> Dict[str, Any]:
+    result = await db.execute(
+        select(DinsarProductionRunItemORM)
+        .where(
+            DinsarProductionRunItemORM.run_id == run.run_id,
+            DinsarProductionRunItemORM.status == "FAILED",
+        )
+        .order_by(
+            DinsarProductionRunItemORM.order_index.asc().nullslast(),
+            DinsarProductionRunItemORM.id.asc(),
+        )
+    )
+    failed_items = result.scalars().all()
+    details: List[Dict[str, Any]] = []
+    grouped: Dict[str, Dict[str, Any]] = {}
+
+    for item in failed_items:
+        label = str(item.task_alias or item.task_name or f"item-{item.id}").strip()
+        reason = _classify_dinsar_failure(item.last_error)
+        compact_error = _compact_failure_text(item.last_error)
+        detail = {
+            "id": item.id,
+            "order_index": item.order_index,
+            "task_name": item.task_name,
+            "task_alias": item.task_alias,
+            "reason": reason,
+            "error": compact_error,
+            "source_task_dir": item.source_task_dir,
+            "latest_output_dir": item.latest_output_dir,
+            "latest_log_path": item.latest_log_path,
+        }
+        details.append(detail)
+
+        group = grouped.setdefault(reason, {"reason": reason, "count": 0, "items": []})
+        group["count"] += 1
+        if len(group["items"]) < 25:
+            group["items"].append(label)
+
+    groups = sorted(grouped.values(), key=lambda item: (-int(item["count"]), str(item["reason"])))
+    return {
+        "failed_count": len(details),
+        "groups": groups,
+        "items": details,
+    }
+
+
+def _chunk_log_lines(lines: List[str], *, max_chars: int = 3500) -> List[str]:
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current and current_len + line_len > max_chars:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+async def _log_dinsar_failure_summary(
+    *,
+    task_id: str,
+    run_id: str,
+    engine_title: str,
+    run,
+    failure_summary: Dict[str, Any],
+    run_log,
+) -> None:
+    if not failure_summary or int(failure_summary.get("failed_count") or 0) <= 0:
+        return
+
+    lines = [
+        (
+            f"{engine_title} D-InSAR failure summary: "
+            f"completed={run.completed_items} failed={run.failed_items} total={run.total_items}"
+        ),
+        "Failure groups:",
+    ]
+    for group in failure_summary.get("groups") or []:
+        items = ", ".join(str(item) for item in (group.get("items") or []))
+        omitted = int(group.get("count") or 0) - len(group.get("items") or [])
+        suffix = f" (+{omitted} more)" if omitted > 0 else ""
+        lines.append(f"- {group.get('reason')}: {group.get('count')} item(s): {items}{suffix}")
+
+    lines.append("Failed items:")
+    for item in failure_summary.get("items") or []:
+        order_index = item.get("order_index")
+        order_text = f"{order_index}/{run.total_items}" if order_index else f"id={item.get('id')}"
+        label = item.get("task_alias") or item.get("task_name") or f"item-{item.get('id')}"
+        lines.append(f"- [{order_text}] {label}: {item.get('reason')} | {item.get('error')}")
+
+    for chunk in _chunk_log_lines(lines):
+        await task_service.add_log(task_id, "WARNING", chunk)
+        run_log(run_id, f"[failure-summary]\n{chunk}")
 
 
 async def _run_scan_data_custom(task_id: str, payload: Dict[str, Any]) -> None:
@@ -2086,6 +2225,7 @@ async def _run_dinsar_production_controller(job: SystemJobORM) -> None:
                 f"failed={run.failed_items} total={run.total_items}"
             )
 
+        failure_summary = await _build_dinsar_failure_summary(db, run)
         summary_payload = {
             "workflow": workflow,
             "engine_code": run.engine_code,
@@ -2098,7 +2238,17 @@ async def _run_dinsar_production_controller(job: SystemJobORM) -> None:
             "publish": publish_result,
             "publish_error": publish_error,
             "published_output_dirs": publish_dirs,
+            "failure_summary": failure_summary,
         }
+        if failure_summary.get("failed_count"):
+            await _log_dinsar_failure_summary(
+                task_id=job.task_id,
+                run_id=run.run_id,
+                engine_title="ENVI",
+                run=run,
+                failure_summary=failure_summary,
+                run_log=run_log,
+            )
         await dinsar_production_service.finalize_run(
             run,
             db=db,
@@ -3061,6 +3211,7 @@ async def _run_wsl_dinsar_production_controller(
                 f"failed={run.failed_items} total={run.total_items}"
             )
 
+        failure_summary = await _build_dinsar_failure_summary(db, run)
         summary_payload = {
             "workflow": f"dinsar_{engine_code}",
             "engine_code": run.engine_code,
@@ -3074,7 +3225,17 @@ async def _run_wsl_dinsar_production_controller(
             "rebuild": rebuild_result,
             "publish_error": publish_error,
             "published_output_dirs": publish_dirs,
+            "failure_summary": failure_summary,
         }
+        if failure_summary.get("failed_count"):
+            await _log_dinsar_failure_summary(
+                task_id=job.task_id,
+                run_id=run.run_id,
+                engine_title=engine_title,
+                run=run,
+                failure_summary=failure_summary,
+                run_log=run_log,
+            )
         await dinsar_production_service.finalize_run(
             run,
             db=db,
@@ -3264,6 +3425,211 @@ async def _handle_landsar_run(job: SystemJobORM) -> None:
         engine_title="LandSAR",
         fallback_timeout_seconds=int(getattr(settings, "LANDSAR_DINSAR_TIMEOUT_SECONDS", 0) or 43200),
     )
+
+
+async def _handle_landsar_lt1_import(job: SystemJobORM) -> None:
+    from .landsar_lt1_production_service import landsar_lt1_production_service
+    from .asset_inventory_service import asset_inventory_service
+
+    payload = dict(job.payload or {})
+    task_id = job.task_id
+    if not task_id:
+        raise ValueError("LANDSAR_LT1_IMPORT job missing task_id")
+
+    loop = asyncio.get_running_loop()
+
+    def _progress(event: Dict[str, Any]) -> None:
+        message = str(event.get("message") or event.get("event") or "").strip()
+        if not message:
+            return
+        progress = event.get("progress")
+
+        async def _write() -> None:
+            try:
+                await task_service.add_log(task_id, "INFO", message)
+                if progress is not None:
+                    await task_service.update_task(task_id, progress=int(progress), message=message)
+            except Exception:
+                logger.debug("Failed to write LandSAR LT-1 progress", exc_info=True)
+
+        asyncio.run_coroutine_threadsafe(_write(), loop)
+
+    await task_service.start_task(task_id, message="LandSAR LT-1 import started")
+    await task_service.update_task(task_id, progress=5, message="Checking LandSAR LT-1 runtime")
+    try:
+        source_asset_ids = _dedupe_positive_ints(payload.get("source_asset_ids"))
+        radar_data_ids = _dedupe_positive_ints(payload.get("radar_data_ids"))
+        if source_asset_ids or radar_data_ids:
+            await task_service.update_task(task_id, progress=8, message="Preparing LT-1 source assets")
+            prepared = await _prepare_landsar_lt1_source_assets(
+                task_id,
+                payload,
+                source_asset_ids=source_asset_ids,
+                radar_data_ids=radar_data_ids,
+                landsar_lt1_production_service=landsar_lt1_production_service,
+                asset_inventory_service=asset_inventory_service,
+            )
+            payload = {
+                **payload,
+                "source_asset_ids": prepared["source_asset_ids"],
+                "radar_data_ids": prepared["radar_data_ids"],
+                "__prepared_scene_dirs": prepared["scene_dirs"],
+                "__materialized": prepared["materialized"],
+                "__materialize_task_root": prepared["task_root"],
+            }
+
+        async with _local_engine_lock("landsar"):
+            result = await asyncio.to_thread(
+                landsar_lt1_production_service.run_import,
+                payload,
+                progress_callback=_progress,
+            )
+        async with AsyncSessionLocal() as db:
+            catalog_result = await landsar_lt1_production_service.register_manifest(
+                db,
+                result["manifest_path"],
+            )
+        await task_service.add_log(
+            task_id,
+            "INFO",
+            (
+                "LandSAR LT-1 product registered: "
+                f"product_id={catalog_result.get('product_id')}, "
+                f"assets={catalog_result.get('asset_count')}"
+            ),
+        )
+        await task_service.update_task(
+            task_id,
+            status="COMPLETED",
+            progress=100,
+            message=(
+                "LandSAR LT-1 import completed: "
+                f"product_id={catalog_result.get('product_id')}, "
+                f"Input_Data={result.get('input_data_dir')}"
+            ),
+        )
+    except Exception as exc:
+        await task_service.add_log(task_id, "ERROR", f"LandSAR LT-1 import failed: {exc}")
+        await task_service.update_task(
+            task_id,
+            status="FAILED",
+            progress=100,
+            message=f"LandSAR LT-1 import failed: {exc}",
+        )
+        raise
+
+
+def _dedupe_positive_ints(values: Any) -> List[int]:
+    result: List[int] = []
+    if not isinstance(values, list):
+        return result
+    for value in values:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0 and parsed not in result:
+            result.append(parsed)
+    return result
+
+
+async def _prepare_landsar_lt1_source_assets(
+    task_id: str,
+    payload: Dict[str, Any],
+    *,
+    source_asset_ids: List[int],
+    radar_data_ids: List[int],
+    landsar_lt1_production_service: Any,
+    asset_inventory_service: Any,
+) -> Dict[str, Any]:
+    from ..models import SourceProductAssetORM
+
+    scene_dirs = _dedupe_existing_dirs(payload.get("scene_dirs") or [])
+    radar_ids: List[int] = []
+    async with AsyncSessionLocal() as db:
+        if radar_data_ids:
+            rows = (
+                await db.execute(select(RadarDataORM).where(RadarDataORM.id.in_(radar_data_ids)))
+            ).scalars().all()
+            radar_by_id = {int(row.id): row for row in rows}
+            for radar_id in radar_data_ids:
+                radar = radar_by_id.get(int(radar_id))
+                if radar is None:
+                    raise ValueError(f"Radar data not found: {radar_id}")
+                radar_ids.append(int(radar.id))
+                if radar.source_product_ref_id and int(radar.source_product_ref_id) not in source_asset_ids:
+                    source_asset_ids.append(int(radar.source_product_ref_id))
+                elif radar.file_path and os.path.isdir(radar.file_path):
+                    scene_dirs.append(os.path.normpath(os.path.abspath(radar.file_path)))
+                else:
+                    raise ValueError(f"Radar data {radar_id} has no source asset or scene directory.")
+
+        produced = await landsar_lt1_production_service.find_produced_source_asset_map(db, source_asset_ids)
+        if produced:
+            first_id = sorted(produced.keys())[0]
+            product_id = (produced[first_id] or {}).get("product_id")
+            raise ValueError(f"Source asset {first_id} already has a LandSAR LT-1 product: {product_id}")
+
+        assets = []
+        if source_asset_ids:
+            assets = (
+                await db.execute(select(SourceProductAssetORM).where(SourceProductAssetORM.id.in_(source_asset_ids)))
+            ).scalars().all()
+        asset_by_id = {int(asset.id): asset for asset in assets}
+
+    task_root = os.path.join(
+        os.path.normpath(os.path.abspath(settings.LANDSAR_WORK_ROOT)),
+        "lt1_import_tasks",
+        task_id,
+        "scenes",
+    )
+    os.makedirs(task_root, exist_ok=True)
+    materialized: List[Dict[str, Any]] = []
+    overwrite = bool(payload.get("materialize_overwrite", False))
+    for asset_id in source_asset_ids:
+        asset = asset_by_id.get(int(asset_id))
+        if asset is None:
+            raise ValueError(f"Source asset not found: {asset_id}")
+        if str(asset.satellite_family or "").upper() != "LT1":
+            raise ValueError(f"Source asset {asset_id} is not LT-1.")
+        result = await asyncio.to_thread(
+            asset_inventory_service.materialize_source_asset,
+            asset,
+            target_root=task_root,
+            overwrite=overwrite,
+        )
+        target_dir = os.path.normpath(os.path.abspath(str(result.get("safe_dir") or result.get("target_dir") or "")))
+        if not target_dir or not os.path.isdir(target_dir):
+            raise ValueError(f"Source asset {asset_id} materialize did not produce a directory.")
+        if target_dir not in scene_dirs:
+            scene_dirs.append(target_dir)
+        materialized.append(
+            {
+                "source_asset_id": int(asset.id),
+                "asset_uid": asset.asset_uid,
+                "logical_product_uid": asset.logical_product_uid,
+                "source_path": asset.file_path,
+                "scene_dir": target_dir,
+                "status": result.get("status"),
+                "member_count": result.get("member_count"),
+            }
+        )
+        await task_service.add_log(
+            task_id,
+            "INFO",
+            f"Prepared LT-1 source asset {asset.id}: {target_dir} ({result.get('status')})",
+        )
+
+    scene_dirs = list(dict.fromkeys(scene_dirs))
+    if not scene_dirs:
+        raise ValueError("No LT-1 scene directories were prepared.")
+    return {
+        "scene_dirs": scene_dirs,
+        "source_asset_ids": list(dict.fromkeys(source_asset_ids)),
+        "radar_data_ids": radar_ids,
+        "materialized": materialized,
+        "task_root": task_root,
+    }
 
 
 async def _handle_landsar_cluster_item(job: SystemJobORM) -> None:
@@ -4636,6 +5002,85 @@ async def _handle_gf3_sarscape_clean(job: SystemJobORM) -> None:
     await task_service.update_task(job.task_id, status=status, progress=100, message=message)
 
 
+async def _handle_extract_dinsar_products(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("EXTRACT_DINSAR_PRODUCTS requires task_id for progress tracking.")
+
+    payload = job.payload or {}
+    root_dir = str(payload.get("root_dir") or "").strip()
+    dest_dir = payload.get("dest_dir") or None
+    if not root_dir:
+        raise ValueError("EXTRACT_DINSAR_PRODUCTS requires root_dir payload.")
+
+    await task_service.start_task(job.task_id, message="正在提取 D-InSAR 位移结果...")
+    result = await asyncio.to_thread(
+        extract_disp_results,
+        root_dir,
+        dest_dir,
+    )
+    await task_service.update_task(
+        job.task_id,
+        progress=45,
+        message=(
+            "D-InSAR 位移结果提取完成: "
+            f"processed={result.get('processed', 0)}, "
+            f"copied={result.get('copied', 0)}, "
+            f"overwritten={result.get('overwritten', 0)}, "
+            f"failed={result.get('failed', 0)}"
+        ),
+    )
+
+    target_dir = result.get("target_dir")
+    publish_roots = [target_dir] if target_dir and os.path.isdir(str(target_dir)) else []
+    publish_result = None
+    rebuild_result = None
+    if publish_roots:
+        async with AsyncSessionLocal() as db:
+            await task_service.update_task(
+                job.task_id,
+                progress=60,
+                message="正在发布 D-InSAR 标准结果包...",
+            )
+            publish_result = await result_catalog_service.publish_from_sources(
+                db,
+                publish_roots,
+            )
+            if int(publish_result.get("processed", 0) or 0) > 0:
+                await task_service.update_task(
+                    job.task_id,
+                    progress=80,
+                    message="正在重建 D-InSAR 结果目录索引...",
+                )
+                rebuild_result = await result_catalog_service.rebuild_catalog(
+                    db,
+                    full_rebuild=True,
+                )
+
+    failed = int(result.get("failed", 0) or 0)
+    publish_failed = int((publish_result or {}).get("failed", 0) or 0)
+    rebuild_failed = int((rebuild_result or {}).get("failed", 0) or 0)
+    status = "FAILED" if (failed or publish_failed or rebuild_failed) else "COMPLETED"
+    message = (
+        "D-InSAR 结果提取与登记完成: "
+        f"提取 {int(result.get('processed', 0) or 0)} 项, "
+        f"复制 {int(result.get('copied', 0) or 0)} 个, "
+        f"覆盖 {int(result.get('overwritten', 0) or 0)} 个"
+    )
+    if publish_result is not None:
+        message += f", 发布 {int(publish_result.get('processed', 0) or 0)} 项"
+    if rebuild_result is not None:
+        message += f", 入库 {int(rebuild_result.get('registered', 0) or 0)} 项"
+    if status == "FAILED":
+        message += f", 失败 {failed + publish_failed + rebuild_failed} 项"
+
+    await task_service.update_task(
+        job.task_id,
+        status=status,
+        progress=100,
+        message=message,
+    )
+
+
 async def _handle_publish_dinsar_products_clean(job: SystemJobORM) -> None:
     if not job.task_id:
         raise ValueError("PUBLISH_DINSAR_PRODUCTS requires task_id for progress tracking.")
@@ -5669,13 +6114,99 @@ async def _handle_sbas_landsar_workflow(job: SystemJobORM) -> None:
     )
 
 
+async def _handle_pairing_cache_rebuild(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("PAIRING_CACHE_REBUILD requires task_id for progress tracking.")
+
+    from .pairing_cache_service import pairing_cache_service
+
+    payload = job.payload or {}
+    mode = str(payload.get("mode") or "auto_reconcile").strip().lower()
+    force_full = bool(payload.get("force_full", False))
+    full_rebuild = mode in {"full", "full_rebuild"} or force_full
+    action_label = "full rebuild" if full_rebuild else "dirty reconcile"
+
+    await task_service.start_task(
+        job.task_id,
+        message=f"D-InSAR pairing cache {action_label} started",
+    )
+    await task_service.update_task(
+        job.task_id,
+        progress=5,
+        message=f"D-InSAR pairing cache {action_label} is running",
+    )
+    progress_state: Dict[str, Any] = {
+        "progress": 5,
+        "message": f"D-InSAR pairing cache {action_label} is running",
+    }
+
+    async def _report_progress(message: str, progress: int) -> None:
+        safe_progress = max(5, min(95, int(progress)))
+        progress_state["progress"] = safe_progress
+        progress_state["message"] = message
+        await task_service.update_task(
+            job.task_id,
+            progress=safe_progress,
+            message=message,
+        )
+
+    async def _keepalive() -> None:
+        while True:
+            await asyncio.sleep(60)
+            message = str(progress_state.get("message") or f"D-InSAR pairing cache {action_label} is still running")
+            progress = int(progress_state.get("progress") or 5)
+            await task_service.update_task(
+                job.task_id,
+                progress=progress,
+                message=f"{message} (still running)",
+            )
+
+    keepalive_task = asyncio.create_task(_keepalive())
+    try:
+        async with AsyncSessionLocal() as db:
+            if full_rebuild:
+                result = await pairing_cache_service.rebuild_metric_cache(
+                    db,
+                    commit=True,
+                    progress_callback=_report_progress,
+                )
+            else:
+                result = await pairing_cache_service.reconcile_dirty_scenes(
+                    db,
+                    force_full=False,
+                    commit=True,
+                    progress_callback=_report_progress,
+                )
+    finally:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+
+    await task_service.update_task(
+        job.task_id,
+        status="COMPLETED",
+        progress=100,
+        message=(
+            "D-InSAR pairing cache completed: "
+            f"mode={result.get('mode')}, "
+            f"scenes={result.get('scene_count', 0)}, "
+            f"pairs={result.get('pair_count', 0)}, "
+            f"dirty={result.get('dirty_scene_count', 0)}"
+        ),
+    )
+
+
 _HANDLERS = {
     JOB_TYPE_SCAN_DATA: _handle_scan_data,
     JOB_TYPE_SCAN_ASSET_INVENTORY: _handle_scan_asset_inventory,
     JOB_TYPE_AUDIT_SOURCE_ARCHIVE_INTEGRITY: _handle_archive_integrity_audit,
     JOB_TYPE_SCAN_DINSAR: _handle_scan_dinsar,
+    JOB_TYPE_EXTRACT_DINSAR_PRODUCTS: _handle_extract_dinsar_products,
     JOB_TYPE_PUBLISH_DINSAR_PRODUCTS: _handle_publish_dinsar_products_clean,
     JOB_TYPE_REBUILD_DINSAR_CATALOG: _handle_rebuild_dinsar_catalog_clean,
+    JOB_TYPE_PAIRING_CACHE_REBUILD: _handle_pairing_cache_rebuild,
     JOB_TYPE_TIMESERIES_PREPARE: _handle_timeseries_prepare,
     JOB_TYPE_TIMESERIES_STACK_PREP: _handle_timeseries_stack_prep,
     JOB_TYPE_TIMESERIES_MATERIALIZE: _handle_timeseries_materialize,
@@ -5701,6 +6232,7 @@ _HANDLERS = {
     JOB_TYPE_ISCE2_RUN: _handle_isce2_run,
     JOB_TYPE_PYINT_RUN: _handle_pyint_run,
     JOB_TYPE_LANDSAR_RUN: _handle_landsar_run,
+    JOB_TYPE_LANDSAR_LT1_IMPORT: _handle_landsar_lt1_import,
     JOB_TYPE_LANDSAR_CLUSTER_ITEM: _handle_landsar_cluster_item,
     JOB_TYPE_WATER_GEOCODE: _handle_water_geocode,
     JOB_TYPE_SAR_SCENE_PREPROCESS: _handle_sar_scene_preprocess,

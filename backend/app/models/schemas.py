@@ -231,6 +231,10 @@ class RadarData(BaseModel):
     stack_selection_mode: Optional[str] = None
     stack_network_edge_count: Optional[int] = None
     stack_network_warnings: Optional[List[str]] = None
+    lt1_image_produced: bool = False
+    lt1_image_product: Optional[Dict[str, Any]] = None
+    lt1_landsar_produced: bool = False
+    lt1_landsar_product: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(from_attributes=True)
 

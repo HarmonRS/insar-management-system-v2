@@ -2589,11 +2589,105 @@ input[type="checkbox"] {
     text-align: left;
 }
 
+.task-runtime-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.task-runtime-summary > div {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background: #f8fafc;
+    padding: 8px;
+    min-width: 0;
+}
+
+.task-runtime-summary span {
+    display: block;
+    color: #64748b;
+    font-size: 11px;
+    margin-bottom: 3px;
+}
+
+.task-runtime-summary strong {
+    color: #0f172a;
+    font-size: 15px;
+    font-family: var(--font-mono);
+}
+
+.active-jobs-container {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.job-runtime-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) minmax(92px, 0.8fr);
+    align-items: center;
+    gap: 8px;
+    padding: 7px 8px;
+    border: 1px solid #e2e8f0;
+    border-radius: 7px;
+    background: #ffffff;
+    font-size: 12px;
+}
+
+.job-status-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 58px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    border: 1px solid #cbd5e1;
+    color: #475569;
+    background: #f8fafc;
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.job-status-chip.running {
+    border-color: rgba(37, 99, 235, 0.22);
+    color: #1d4ed8;
+    background: rgba(37, 99, 235, 0.08);
+}
+
+.job-status-chip.retry {
+    border-color: rgba(217, 119, 6, 0.24);
+    color: #b45309;
+    background: rgba(245, 158, 11, 0.1);
+}
+
+.job-runtime-title,
+.job-runtime-worker {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.job-runtime-title {
+    color: #334155;
+    font-weight: 600;
+}
+
+.job-runtime-worker {
+    color: #64748b;
+    text-align: right;
+}
+
 .task-progress-item {
     background: #f8fafc;
     padding: 10px;
     border-radius: 8px;
     border: 1px solid #e2e8f0;
+}
+
+.task-progress-item--muted {
+    background: #ffffff;
 }
 
 .task-info-row {
@@ -3502,11 +3596,19 @@ input[type="checkbox"] {
   color: var(--color-text-secondary);
   padding: 4px 8px;
   border-radius: 6px;
+  min-width: 132px;
 }
 
 .status-task.has-active-tasks {
   background: rgba(24, 144, 255, 0.1);
   color: #1890ff;
+}
+
+.status-task small {
+  color: var(--color-text-muted);
+  font-size: 0.86em;
+  line-height: 1.25;
+  white-space: nowrap;
 }
 
 .status-license {
@@ -5615,6 +5717,17 @@ input[type="checkbox"] {
   box-sizing: border-box;
 }
 
+.production-workspace-shell .dinsar-production-shell,
+.production-workspace-shell .dinsar-products-page {
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.production-workspace-shell .dinsar-production-shell {
+  padding: 0;
+}
+
 .dinsar-production-header {
   display: grid;
   grid-template-columns: minmax(280px, 1fr) minmax(420px, 0.95fr);
@@ -6485,6 +6598,18 @@ input[type="checkbox"] {
 .dinsar-products-catalog-section {
   display: grid;
   gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+.dinsar-products-catalog-section .dinsar-catalog-shell {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.dinsar-products-catalog-section .dinsar-catalog-workspace {
+  grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
 }
 
 .sbas-products-page {
@@ -7170,6 +7295,7 @@ input[type="checkbox"] {
   .dinsar-filter-layout,
   .dinsar-catalog-summary,
   .dinsar-catalog-workspace,
+  .dinsar-products-catalog-section .dinsar-catalog-workspace,
   .dinsar-catalog-manage,
   .dinsar-catalog-filter-bar,
   .dinsar-catalog-hero,

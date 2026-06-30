@@ -1007,6 +1007,7 @@ class DinsarProductionService:
                     "root_dir": run.source_root,
                     "publish_root_dir": run.publish_root_dir,
                     "message": run.latest_message,
+                    "summary_json": run.summary_json if isinstance(run.summary_json, dict) else {},
                     "total_items": run.total_items,
                     "completed_items": run.completed_items,
                     "failed_items": run.failed_items,

@@ -14,7 +14,6 @@ import {
   getJobLog,
   deleteRun,
 } from './api/idl';
-import { scanDinsarResults } from './api/dinsar';
 import TaskStatusPanel from './components/tasks/TaskStatusPanel';
 import useTaskMonitor from './hooks/useTaskMonitor';
 
@@ -38,7 +37,7 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
   const [showCancelInput, setShowCancelInput] = useState(false);
   const [cancelPassword, setCancelPassword] = useState('');
   const idlTaskMonitor = useTaskMonitor({
-    taskTypes: ['IDL_IMPORT', 'IDL_DINSAR'],
+    taskTypes: ['IDL_RUN_IMPORT', 'IDL_RUN_DINSAR', 'EXTRACT_DINSAR_PRODUCTS'],
     showRecent: true,
     recentLimit: 1,
   });
@@ -147,17 +146,8 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
     runAction(async () => {
       const r = await extractDispResults(root, dest);
       setExtractResult(r);
-      // 提取完成后自动触发扫描
-      let scanMsg = '';
-      if (r.copied > 0 || r.overwritten > 0) {
-        try {
-          await scanDinsarResults({ results_directories: [r.target_dir] });
-          scanMsg = '，已自动触发结果扫描入库';
-        } catch (e) {
-          scanMsg = '，扫描入库触发失败: ' + (e?.response?.data?.detail || e?.message);
-        }
-      }
-      setMessage(`提取完成: ${r.copied} 新增, ${r.overwritten} 更新, ${r.skipped} 跳过${scanMsg}`);
+      setMessage(`D-InSAR 结果提取与登记任务已入队。task_id=${r?.task_id || '-'}`);
+      if (r?.task_id) onJobQueued?.(r.task_id);
     });
   };
 
@@ -533,16 +523,22 @@ function IDLAutomationPanel({ readOnly = false, onJobQueued }) {
         </div>
         {extractResult && (
           <div style={{ marginTop: '8px', padding: '10px', background: '#f0fdf4', borderRadius: '6px', border: '1px solid #bbf7d0', fontSize: '12px', color: '#166534' }}>
-            <div>目标目录: <code style={{ fontSize: '11px' }}>{extractResult.target_dir}</code></div>
-            <div style={{ marginTop: '4px' }}>
-              处理 {extractResult.processed} 个 Task &nbsp;·&nbsp;
-              新增 {extractResult.copied} &nbsp;·&nbsp;
-              更新 {extractResult.overwritten} &nbsp;·&nbsp;
-              跳过 {extractResult.skipped}
-              {extractResult.failed > 0 && (
-                <span style={{ color: '#dc2626' }}> &nbsp;·&nbsp; 失败 {extractResult.failed}</span>
-              )}
-            </div>
+            {extractResult.queued ? (
+              <div>D-InSAR 结果提取与登记任务已入队。task_id={extractResult.task_id || '-'}</div>
+            ) : (
+              <>
+                <div>目标目录: <code style={{ fontSize: '11px' }}>{extractResult.target_dir}</code></div>
+                <div style={{ marginTop: '4px' }}>
+                  处理 {extractResult.processed} 个 Task &nbsp;·&nbsp;
+                  新增 {extractResult.copied} &nbsp;·&nbsp;
+                  更新 {extractResult.overwritten} &nbsp;·&nbsp;
+                  跳过 {extractResult.skipped}
+                  {extractResult.failed > 0 && (
+                    <span style={{ color: '#dc2626' }}> &nbsp;·&nbsp; 失败 {extractResult.failed}</span>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>

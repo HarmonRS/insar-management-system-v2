@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { usePairingStore, useAuthStore } from '../store';
 import VirtualizedList from '../components/common/VirtualizedList';
@@ -19,6 +19,7 @@ function PairsListPanel({
     })));
     const { currentUser } = useAuthStore();
     const isReadOnlyUser = !!currentUser && currentUser.role !== 'admin';
+    const [batchSizeInput, setBatchSizeInput] = useState('100');
 
     const handlePairSelectionChange = useCallback((index) => {
         setFoundPairs((prevPairs) => {
@@ -45,6 +46,19 @@ function PairsListPanel({
         () => foundPairs.filter((pair) => pair.isSelected).length,
         [foundPairs]
     );
+    const batchSize = useMemo(() => {
+        const parsed = Number(batchSizeInput);
+        return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
+    }, [batchSizeInput]);
+    const plannedBatchCount = useMemo(() => (
+        selectedPairsCount > 0 && batchSize > 0
+            ? Math.ceil(selectedPairsCount / batchSize)
+            : 0
+    ), [batchSize, selectedPairsCount]);
+    const handleCreateDinsarBatch = useCallback(() => {
+        if (typeof onCreateDinsarBatch !== 'function') return;
+        onCreateDinsarBatch({ chunkSize: batchSize });
+    }, [batchSize, onCreateDinsarBatch]);
     const mapPreviewPairs = useMemo(() => {
         const visible = foundPairs.filter((pair) => pair.isVis);
         return visible.slice(0, 24);
@@ -141,9 +155,27 @@ function PairsListPanel({
                 </div>
             </div>
             <footer className="panel-footer">
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginRight: 10 }}>
+                    每批
+                    <input
+                        type="number"
+                        min="1"
+                        max={Math.max(1, selectedPairsCount)}
+                        value={batchSizeInput}
+                        onChange={(event) => setBatchSizeInput(event.target.value)}
+                        style={{ width: 88 }}
+                        disabled={selectedPairsCount === 0 || isReadOnlyUser}
+                    />
+                    条
+                </label>
+                {selectedPairsCount > 0 && batchSize > 0 && (
+                    <span style={{ marginRight: 10, color: '#64748b', fontSize: 12 }}>
+                        将创建 {plannedBatchCount} 个批次
+                    </span>
+                )}
                 <button
-                    onClick={onCreateDinsarBatch}
-                    disabled={selectedPairsCount === 0 || isReadOnlyUser}
+                    onClick={handleCreateDinsarBatch}
+                    disabled={selectedPairsCount === 0 || batchSize <= 0 || isReadOnlyUser}
                     className="footer-button"
                     title="保存选中的配对为任务批次"
                 >

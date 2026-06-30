@@ -123,6 +123,14 @@ export const PRODUCTION_WORKSPACE_SBAS_VIEWS = [
   },
 ];
 
+export const PRODUCTION_WORKSPACE_LT1_VIEWS = [
+  {
+    key: 'lt1_production',
+    label: '陆探一 GeoTIFF 生产',
+    description: '运行 LT-1 Gamma 单景流水线，输出多视、地理编码后的 analysis_ready.tif。',
+  },
+];
+
 export const PRODUCTION_WORKSPACE_WORKBENCHES = [
   {
     key: 'dinsar_workbench',
@@ -138,16 +146,19 @@ export const PRODUCTION_WORKSPACE_WORKBENCHES = [
     defaultView: 'sbas_insar_planning',
     views: PRODUCTION_WORKSPACE_SBAS_VIEWS,
   },
+  {
+    key: 'lt1_workbench',
+    label: '陆探一工作台',
+    description: '面向 LT-1 非 D-InSAR 影像生产，组织源资产选择、单景地理编码和 GeoTIFF 产品登记。',
+    defaultView: 'lt1_production',
+    views: PRODUCTION_WORKSPACE_LT1_VIEWS,
+  },
 ];
 
 export const PRODUCTION_WORKSPACE_VIEWS = [
   ...PRODUCTION_WORKSPACE_DINSAR_VIEWS,
   ...PRODUCTION_WORKSPACE_SBAS_VIEWS,
-  {
-    key: 'lt1_production',
-    label: '陆探一生产占位',
-    description: 'LT-1 源压缩包本机登记，按需 materialize 到 Task_Pool；D-InSAR/SBAS 生产不走 UNC。',
-  },
+  ...PRODUCTION_WORKSPACE_LT1_VIEWS,
   {
     key: 'sentinel1_production',
     label: 'Sentinel-1 生产占位',

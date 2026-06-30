@@ -28,7 +28,7 @@ const fmtBytes = (value) => {
 const StatusBadge = ({ value }) => {
   const text = String(value || '-');
   const status = text.toUpperCase();
-  const tone = status === 'OK' || status === 'MATCHED' || status === 'SELECTED'
+  const tone = status === 'OK' || status === 'MATCHED' || status === 'SELECTED' || text.startsWith('已生产')
     ? 'ok'
     : status === 'WARNING' || status === 'OPEN' || status === 'MISSING'
       ? 'warn'
@@ -202,6 +202,7 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
                 <th>产品</th>
                 <th>轨道</th>
                 <th>状态</th>
+                <th>生产</th>
                 <th>完整性</th>
                 <th>动作</th>
                 <th>文件</th>
@@ -216,6 +217,7 @@ export default function AssetInventoryPanel({ readOnly = false, onTaskStart }) {
                     <td>{item.source_format}<small>{item.imaging_mode} / {item.polarization}</small></td>
                     <td>{item.relative_orbit || '-'}<small>abs {item.absolute_orbit || '-'}</small></td>
                     <td><StatusBadge value={item.parse_status} /></td>
+                    <td><StatusBadge value={(item.lt1_image_produced || item.lt1_landsar_produced) ? '已生产 GeoTIFF' : '未生产'} /></td>
                     <td title={item.archive_integrity_error || ''}>
                       <StatusBadge value={item.archive_integrity_status || 'NOT_CHECKED'} />
                       <small>{item.archive_integrity_member_count != null ? `${item.archive_integrity_member_count} files` : item.archive_integrity_method || '-'}</small>

@@ -4,6 +4,7 @@ import { getTaskTypeLabel } from '../config/taskUiPolicies';
 export default function GlobalTaskCenter({
   isVisible,
   activeTasks,
+  runtimeSummary,
   t,
   isAdmin,
   showCancelTask,
@@ -14,14 +15,27 @@ export default function GlobalTaskCenter({
   onCloseCancelTask,
 }) {
   const [expanded, setExpanded] = useState(false);
-  if (!isVisible || activeTasks.length === 0) {
+  const jobs = runtimeSummary?.jobs || {};
+  const worker = runtimeSummary?.worker || {};
+  const scan = runtimeSummary?.scan || {};
+  const activeJobs = Array.isArray(jobs.items) ? jobs.items : [];
+  const activeCount = Math.max(
+    activeTasks.length,
+    Number(jobs.active_count) || 0,
+  );
+  const workerCount = Number(worker.worker_count) || 0;
+  const queuedJobs = Number(jobs.queued_count) || 0;
+  const runningJobs = Number(jobs.running_count) || 0;
+  const scanJobCount = Number(scan.active_job_count) || 0;
+
+  if (!isVisible || activeCount === 0) {
     return null;
   }
 
-  const activeCount = activeTasks.length;
   const avgProgress = Math.round(
     activeTasks.reduce((sum, task) => sum + (Number(task.progress) || 0), 0) / Math.max(1, activeCount)
   );
+  const visibleJobs = activeJobs.slice(0, 8);
 
   return (
     <div className="global-task-overlay">
@@ -29,7 +43,7 @@ export default function GlobalTaskCenter({
         <button className="task-center-button" onClick={() => setExpanded(true)}>
           <span className="task-center-dot" />
           <span>后台任务 {activeCount}</span>
-          <strong>{avgProgress}%</strong>
+          <strong>{runningJobs > 0 ? `执行 ${runningJobs}` : `${avgProgress}%`}</strong>
         </button>
       )}
       {expanded && (
@@ -37,12 +51,45 @@ export default function GlobalTaskCenter({
           <div className="task-center-header">
             <div>
               <h3>后台任务</h3>
-              <p>任务正在执行，你可以继续使用其他功能；同类重复提交由系统限制。</p>
+              <p>展示 Worker、执行中 Job、排队 Job 和任务进度；同类重复提交由后端冲突检查处理。</p>
             </div>
             <button className="task-center-close" onClick={() => setExpanded(false)} aria-label="关闭任务中心">
               ×
             </button>
           </div>
+          <div className="task-runtime-summary">
+            <div>
+              <span>Worker</span>
+              <strong>{workerCount}</strong>
+            </div>
+            <div>
+              <span>执行中</span>
+              <strong>{runningJobs}</strong>
+            </div>
+            <div>
+              <span>排队</span>
+              <strong>{queuedJobs}</strong>
+            </div>
+            <div>
+              <span>扫描</span>
+              <strong>{scanJobCount}</strong>
+            </div>
+          </div>
+          {visibleJobs.length > 0 && (
+            <div className="active-jobs-container">
+              {visibleJobs.map((job) => (
+                <div key={job.job_id} className="job-runtime-row">
+                  <span className={`job-status-chip ${String(job.status || '').toLowerCase()}`}>{job.status || '-'}</span>
+                  <span className="job-runtime-title">
+                    {getTaskTypeLabel(job.task_type || job.job_type)}
+                  </span>
+                  <span className="job-runtime-worker" title={job.locked_by || ''}>
+                    {job.locked_by ? `Worker ${job.locked_by}` : (job.status === 'RETRY' ? '等待重试' : '等待领取')}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="active-tasks-container">
             {(() => {
               const waterTasks = activeTasks.filter(task =>
@@ -73,11 +120,16 @@ export default function GlobalTaskCenter({
                       </div>
                     </div>
                   )}
+                  {otherTasks.length === 0 && waterTasks.length === 0 && visibleJobs.length > 0 && (
+                    <div className="task-progress-item task-progress-item--muted">
+                      <p className="task-status-msg">当前只有 Job 运行态，任务进度尚未写入 system_tasks。</p>
+                    </div>
+                  )}
                 </>
               );
             })()}
           </div>
-          <p className="overlay-footer-hint">任务中心只展示状态，不再锁定整个界面。需要互斥的操作由功能页按钮和后端任务冲突检查处理。</p>
+          <p className="overlay-footer-hint">取消按钮只作用于可跟踪的 Task；纯 Job 取消需要在对应功能页或运维接口处理。</p>
           {isAdmin && (
             <div style={{ marginTop: '16px', textAlign: 'center' }}>
               {!showCancelTask ? (

@@ -11,6 +11,7 @@ const LazyDinsarProductionPanel = lazy(() => import('./DinsarProductionPanel'));
 const LazySbasInsarProductionPanel = lazy(() => import('./SbasInsarProductionPanel'));
 const LazySbasInsarProductsPanel = lazy(() => import('./SbasInsarProductsPanel'));
 const LazyDinsarProductsPanel = lazy(() => import('./DinsarProductsPanel'));
+const LazyLandsarLt1ProductionPanel = lazy(() => import('./LandsarLt1ProductionPanel'));
 const LazyPairPlanningPanel = lazy(() => import('./panels/PairPlanningPanel'));
 const LazyPairsListPanel = lazy(() => import('./panels/PairsListPanel'));
 const LazyBatchPanel = lazy(() => import('./panels/BatchPanel'));
@@ -25,17 +26,6 @@ const WORKFLOW_STEPS = [
 ];
 
 const SENSOR_PRODUCTION_PLACEHOLDERS = {
-  lt1_production: {
-    title: '陆探一生产占位',
-    note: '当前保留 LT-1 源压缩包本机登记与按需 materialize 入口。',
-    rows: [
-      ['数据来源', '本机源压缩包 archive'],
-      ['精轨策略', '按生产任务关联 orbit 资产'],
-      ['准备方式', '按需 materialize 到 Task_Pool'],
-      ['生产边界', 'D-InSAR/SBAS 不走 UNC'],
-      ['结果管理', '进入统一产品 catalog'],
-    ],
-  },
   sentinel1_production: {
     title: 'Sentinel-1 生产占位',
     note: '当前主要沉淀数据与精轨管理约束，SBAS 仅保留规划能力。',
@@ -206,6 +196,13 @@ export default function ProductionWorkspace({
     });
   };
 
+  const handleLt1ImageQueued = taskId => {
+    onTaskStart?.(taskId, 'LT-1 地理编码 GeoTIFF 生产任务已入队。', {
+      taskType: 'SAR_SCENE_PREPROCESS',
+      nonBlocking: true,
+    });
+  };
+
   const renderContent = () => {
     if (activeView === 'dinsar_pairing') {
       return (
@@ -215,11 +212,11 @@ export default function ProductionWorkspace({
           isLoading={isLoading}
           isReadOnlyUser={readOnly}
           hasEnoughRadarScenesForPlanning={hasEnoughRadarScenesForPlanning}
-          onOpenPairingModal={pairingPanel?.openModal}
+          onOpenPairingModal={pairingPanel?.onOpenPairingModal}
           hasRadarSearched={hasRadarSearched}
-          onRefreshRadarSearch={radarPanel?.refresh}
-          onSearchAll={radarPanel?.searchAll}
-          onRefreshDinsar={pairsPanel?.refreshDinsar}
+          onRefreshRadarSearch={pairingPanel?.onRefreshRadarSearch}
+          onSearchAll={radarPanel?.onSearchAll}
+          onRefreshDinsar={pairingPanel?.onRefreshDinsar}
           language={language}
         />
       );
@@ -228,8 +225,12 @@ export default function ProductionWorkspace({
     if (activeView === 'dinsar_pairs') {
       return (
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(360px, 0.9fr)', gap: 14 }}>
-          <LazyPairsListPanel pairsPanel={pairsPanel} isReadOnlyUser={readOnly} language={language} />
-          <LazyBatchPanel pairsPanel={pairsPanel} isReadOnlyUser={readOnly} language={language} />
+          <LazyPairsListPanel
+            onVisualizePair={pairsPanel?.onVisualizePair}
+            onTogglePairVisibility={pairsPanel?.onTogglePairVisibility}
+            onCreateDinsarBatch={pairsPanel?.onCreateDinsarBatch}
+          />
+          <LazyBatchPanel />
         </div>
       );
     }
@@ -272,11 +273,15 @@ export default function ProductionWorkspace({
       return <LazySbasInsarProductsPanel readOnly={readOnly} onJobQueued={handleSbasProductQueued} />;
     }
 
+    if (activeView === 'lt1_production') {
+      return <LazyLandsarLt1ProductionPanel readOnly={readOnly} onJobQueued={handleLt1ImageQueued} />;
+    }
+
     return <PlaceholderView config={SENSOR_PRODUCTION_PLACEHOLDERS[activeView]} />;
   };
 
   return (
-    <div style={shellStyle}>
+    <div className="production-workspace-shell" style={shellStyle}>
       <div style={headerStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div>

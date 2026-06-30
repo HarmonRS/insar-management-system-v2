@@ -208,12 +208,14 @@ function App() {
         setHealthError: state.setHealthError,
     })));
     const {
-        activeTasks, setActiveTasks,
+        activeTasks, setActiveTasks, runtimeSummary, setRuntimeSummary,
         isCheckingTasks, setIsCheckingTasks,
         pendingTaskIds, setPendingTaskIds,
     } = useTaskStore(useShallow((state) => ({
         activeTasks: state.activeTasks,
         setActiveTasks: state.setActiveTasks,
+        runtimeSummary: state.runtimeSummary,
+        setRuntimeSummary: state.setRuntimeSummary,
         isCheckingTasks: state.isCheckingTasks,
         setIsCheckingTasks: state.setIsCheckingTasks,
         pendingTaskIds: state.pendingTaskIds,
@@ -918,6 +920,7 @@ function App() {
         licenseOk: !!licenseStatus?.ok,
         activeTasks,
         setActiveTasks,
+        setRuntimeSummary,
         pendingTaskIds,
         setPendingTaskIds,
         setIsCheckingTasks,
@@ -2114,6 +2117,7 @@ function App() {
                 isReadOnlyUser={isReadOnlyUser}
                 activeTasks={activeTasks}
                 avgTaskProgress={avgTaskProgress}
+                runtimeSummary={runtimeSummary}
                 licenseStatus={licenseStatus}
                 healthStatus={healthStatus}
                 healthLoading={healthLoading}
@@ -2197,6 +2201,7 @@ function App() {
                 licenseFileName={licenseFileName}
                 licenseUploadStatus={licenseUploadStatus}
                 activeTasks={activeTasks}
+                runtimeSummary={runtimeSummary}
                 showCancelTask={showCancelTask}
                 cancelTaskPwd={cancelTaskPwd}
                 onShowCancelTask={() => setShowCancelTask(true)}
