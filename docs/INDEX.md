@@ -33,6 +33,8 @@
   缁熶竴缁撴灉鐩綍銆佹爣鍑嗕骇鍝佸寘銆乧atalog 涓庡寮曟搸缁撴灉鍏卞瓨绾﹀畾銆?
 - [RESULT_EXTRACTION_ACCESS_CONTROL_AUDIT_20260630.md](RESULT_EXTRACTION_ACCESS_CONTROL_AUDIT_20260630.md)
   Result extraction and access-control audit: current D-InSAR export/registration boundaries, placeholder channels, admin/viewer limitations, and recommended exporter/operator/admin permission model.
+- [RESULT_DELIVERY_DOWNLOAD_DESIGN_20260630.md](RESULT_DELIVERY_DOWNLOAD_DESIGN_20260630.md)
+  Result delivery/download design: asynchronous delivery packages, user-owned downloads, temporary delivery root, DB maintenance, and placeholder boundaries for SBAS/LT-1/Sentinel-1/GF3 ortho.
 - [DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md](DINSAR_TASK_POOL_THREE_ENGINE_REFACTOR_20260614.md)  
   D-InSAR 淇濈暀 ENVI/SARscape銆丩andSAR銆丟amma/PyINT 涓夊紩鎿庯紝閫€鍑?ISCE2锛岀粺涓€ Task_Pool銆佺粨鏋滆仛鍚堝拰涓棿鏂囦欢娓呯悊鐨勫綋鍓嶈璁°€?
 - [LANDSAR_DEM_PREPARATION_CONTRACT_20260618.md](LANDSAR_DEM_PREPARATION_CONTRACT_20260618.md)  

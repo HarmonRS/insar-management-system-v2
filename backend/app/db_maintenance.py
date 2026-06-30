@@ -42,6 +42,7 @@ MIGRATION_FILES = [
     "010_source_orbit_asset_inventory.sql",
     "011_source_metadata_documents.sql",
     "012_source_archive_integrity.sql",
+    "013_result_delivery_requests.sql",
 ]
 
 

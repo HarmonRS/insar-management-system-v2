@@ -77,6 +77,14 @@ def _default_result_publish_root(project_root: str) -> str:
     return os.path.join(normalized_root, "production_results")
 
 
+def _default_result_delivery_root(project_root: str) -> str:
+    normalized_root = os.path.normpath(project_root)
+    drive, _tail = os.path.splitdrive(normalized_root)
+    if drive:
+        return os.path.join(drive + os.sep, "Result_Delivery")
+    return os.path.join(normalized_root, "result_delivery")
+
+
 def _default_input_root(project_root: str) -> str:
     normalized_root = os.path.normpath(project_root)
     drive, _tail = os.path.splitdrive(normalized_root)
@@ -313,6 +321,12 @@ class Settings(BaseSettings):
     PSINSAR_PRODUCT_DIR: str = ""
     RESULT_QUARANTINE_ROOT: str = ""
     RESULT_CATALOG_AUTO_REBUILD_ON_STARTUP: bool = True
+    RESULT_DELIVERY_ROOT: str = ""
+    RESULT_DELIVERY_PUBLIC_BASE_URL: str = "/deliveries"
+    RESULT_DELIVERY_RETENTION_DAYS: int = 7
+    RESULT_DELIVERY_MAX_ITEMS: int = 500
+    RESULT_DELIVERY_ZIP_MAX_BYTES: int = 21474836480
+    RESULT_DELIVERY_CHECKSUM_ENABLED: bool = True
 
     WSL_DISTRO: str = ""
     WSL_SHARED_CONDA_ENV: str = ""
@@ -625,6 +639,12 @@ class Settings(BaseSettings):
                 self,
                 "RESULT_QUARANTINE_ROOT",
                 os.path.join(self.RESULT_PUBLISH_ROOT, "_quarantine"),
+            )
+        if not self.RESULT_DELIVERY_ROOT:
+            object.__setattr__(
+                self,
+                "RESULT_DELIVERY_ROOT",
+                _default_result_delivery_root(project_root),
             )
         if not self.ISCE2_WORK_ROOT:
             object.__setattr__(
@@ -1088,6 +1108,7 @@ class Settings(BaseSettings):
         os.makedirs(settings.TIMESERIES_PRODUCT_DIR, exist_ok=True)
         os.makedirs(settings.PSINSAR_PRODUCT_DIR, exist_ok=True)
         os.makedirs(settings.RESULT_QUARANTINE_ROOT, exist_ok=True)
+        os.makedirs(settings.RESULT_DELIVERY_ROOT, exist_ok=True)
         os.makedirs(settings.SAR_ANALYSIS_READY_ROOT, exist_ok=True)
         os.makedirs(settings.SAR_ANALYSIS_WORK_ROOT, exist_ok=True)
         os.makedirs(settings.TASK_POOL_ROOT, exist_ok=True)

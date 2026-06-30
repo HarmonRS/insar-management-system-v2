@@ -21,6 +21,7 @@ from . import (
     orbit,
     pairing,
     ps_products,
+    result_deliveries,
     sbas_insar_products,
     radar,
     root_registry,
@@ -55,6 +56,7 @@ def include_all_routers(router: APIRouter) -> None:
     router.include_router(pairing.router)
     router.include_router(dinsar.router)
     router.include_router(dinsar_products.router)
+    router.include_router(result_deliveries.router)
     router.include_router(dinsar_production.router)
     router.include_router(landsar_lt1_production.router)
     router.include_router(sbas_insar_production.router)

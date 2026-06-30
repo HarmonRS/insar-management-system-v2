@@ -296,6 +296,12 @@ def _is_high_risk_write_path(path: str, method: str) -> bool:
     return any(normalized.startswith(prefix) for prefix in HIGH_RISK_WRITE_PATH_PREFIXES)
 
 
+def _is_user_self_service_write_path(path: str, method: str) -> bool:
+    normalized = _normalize_request_path(path)
+    upper_method = (method or "").upper()
+    return upper_method == "POST" and normalized == "/api/result-deliveries"
+
+
 def _get_client_ip(request: Request) -> Optional[str]:
     direct_ip = request.client.host if request.client else None
     if direct_ip in _TRUSTED_PROXY_IPS:
@@ -400,7 +406,11 @@ async def _require_auth(request: Request, db: AsyncSession = Depends(get_db)):
             await db.commit()
         raise HTTPException(status_code=401, detail="Authentication required.")
 
-    if (not _is_read_only_operation(path, method)) and user.role != ROLE_ADMIN:
+    if (
+        (not _is_read_only_operation(path, method))
+        and user.role != ROLE_ADMIN
+        and not _is_user_self_service_write_path(path, method)
+    ):
         if _is_high_risk_write_path(path, method):
             await add_audit_log(
                 db,

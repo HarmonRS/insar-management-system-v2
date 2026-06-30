@@ -44,6 +44,7 @@ from .engine_lock_service import engine_lock_service
 from .envi_service import build_envi_runner_command, extract_disp_results, get_envi_runner_cwd, get_envi_runner_env
 from .psinsar_catalog_service import psinsar_catalog_service
 from .result_catalog_service import result_catalog_service
+from .result_delivery_service import JOB_TYPE_RESULT_DELIVERY_BUILD, result_delivery_service
 from .sbas_insar_catalog_service import sbas_insar_catalog_service
 from .task_service import task_service
 from .timeseries_service import (
@@ -5160,6 +5161,30 @@ async def _handle_rebuild_dinsar_catalog_clean(job: SystemJobORM) -> None:
         )
 
 
+async def _handle_result_delivery_build(job: SystemJobORM) -> None:
+    if not job.task_id:
+        raise ValueError("RESULT_DELIVERY_BUILD requires task_id for progress tracking.")
+    payload = job.payload or {}
+    delivery_id = str(payload.get("delivery_id") or "").strip()
+    if not delivery_id:
+        raise ValueError("RESULT_DELIVERY_BUILD requires delivery_id payload.")
+
+    await task_service.start_task(job.task_id, message=f"正在生成成果交付包: {delivery_id}")
+    await task_service.add_log(job.task_id, "INFO", f"Result delivery build started: {delivery_id}")
+    result = await result_delivery_service.build_delivery(delivery_id)
+    summary = result.get("summary") or {}
+    await task_service.add_log(
+        job.task_id,
+        "INFO",
+        (
+            f"Result delivery build summary: delivery_id={delivery_id}, "
+            f"status={result.get('status')}, files={summary.get('file_count', 0)}, "
+            f"copied={summary.get('copied_files', 0)}, skipped={summary.get('skipped_files', 0)}, "
+            f"failed={summary.get('failed_items', 0)}, dir={result.get('delivery_dir')}"
+        ),
+    )
+
+
 async def _handle_timeseries_prepare(job: SystemJobORM) -> None:
     if not job.task_id:
         raise ValueError("TIMESERIES_PREPARE requires task_id for progress tracking.")
@@ -6206,6 +6231,7 @@ _HANDLERS = {
     JOB_TYPE_EXTRACT_DINSAR_PRODUCTS: _handle_extract_dinsar_products,
     JOB_TYPE_PUBLISH_DINSAR_PRODUCTS: _handle_publish_dinsar_products_clean,
     JOB_TYPE_REBUILD_DINSAR_CATALOG: _handle_rebuild_dinsar_catalog_clean,
+    JOB_TYPE_RESULT_DELIVERY_BUILD: _handle_result_delivery_build,
     JOB_TYPE_PAIRING_CACHE_REBUILD: _handle_pairing_cache_rebuild,
     JOB_TYPE_TIMESERIES_PREPARE: _handle_timeseries_prepare,
     JOB_TYPE_TIMESERIES_STACK_PREP: _handle_timeseries_stack_prep,

@@ -25,6 +25,7 @@ const TASK_UI_POLICIES = {
   ISCE2_RUN: { label: 'D-InSAR 历史任务', featureScope: 'dinsar_production' },
   PYINT_RUN: { label: 'PyINT D-InSAR 生产', featureScope: 'dinsar_production' },
   LANDSAR_RUN: { label: 'LandSAR D-InSAR 生产', featureScope: 'dinsar_production' },
+  RESULT_DELIVERY_BUILD: { label: '成果交付包生成', featureScope: 'result_extraction' },
   SBAS_GAMMA_WORKFLOW: { label: 'Gamma SBAS 工作流', featureScope: 'sbas_insar' },
   SBAS_LANDSAR_WORKFLOW: { label: 'LandSAR SBAS 工作流', featureScope: 'sbas_insar' },
   SBAS_COREGISTRATION: { label: 'SBAS 配准', featureScope: 'sbas_insar' },
@@ -42,6 +43,7 @@ const PREFIX_POLICIES = [
   { prefix: 'FLOOD_WATER_EXTRACTION_', label: '洪涝水体提取', featureScope: 'flood' },
   { prefix: 'FLOOD_DETECTION_', label: '洪涝检测', featureScope: 'flood' },
   { prefix: 'GF3_PROCESS_', label: 'GF3 场景处理', featureScope: 'water' },
+  { prefix: 'RESULT_DELIVERY_BUILD_', label: '成果交付包生成', featureScope: 'result_extraction' },
 ];
 
 export function getTaskUiPolicy(taskType) {

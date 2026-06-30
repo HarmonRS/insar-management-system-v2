@@ -322,6 +322,82 @@ class ResultCatalogStateORM(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class ResultDeliveryRequestORM(Base):
+    __tablename__ = "result_delivery_requests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    delivery_id = Column(String(64), unique=True, index=True, nullable=False)
+    owner_user_id = Column(Integer, ForeignKey("auth_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    owner_username = Column(String(64), index=True, nullable=False)
+    channel = Column(String(32), index=True, nullable=False)
+    status = Column(String(32), index=True, nullable=False, default="PENDING", server_default="PENDING")
+    package_mode = Column(String(16), nullable=False, default="directory", server_default="directory")
+    item_count = Column(Integer, nullable=False, default=0, server_default="0")
+    total_bytes = Column(BigInteger, nullable=False, default=0, server_default="0")
+    copied_bytes = Column(BigInteger, nullable=False, default=0, server_default="0")
+    delivery_root = Column(String, nullable=False)
+    delivery_dir = Column(String, nullable=False)
+    zip_path = Column(String, nullable=True)
+    manifest_path = Column(String, nullable=True)
+    expires_at = Column(DateTime, nullable=True, index=True)
+    task_id = Column(String(128), nullable=True, index=True)
+    job_id = Column(String(128), nullable=True, index=True)
+    error_message = Column(Text, nullable=True)
+    request_json = Column(JSON, nullable=True)
+    summary_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    owner = relationship("AuthUserORM")
+    items = relationship(
+        "ResultDeliveryItemORM",
+        back_populates="delivery",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("idx_result_delivery_owner_status", "owner_user_id", "status"),
+        Index("idx_result_delivery_channel_status", "channel", "status"),
+        Index("idx_result_delivery_created", "created_at"),
+    )
+
+
+class ResultDeliveryItemORM(Base):
+    __tablename__ = "result_delivery_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    delivery_id = Column(
+        String(64),
+        ForeignKey("result_delivery_requests.delivery_id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    source_product_id = Column(Integer, ForeignKey("result_products.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_result_id = Column(Integer, ForeignKey("dinsar_results.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_asset_id = Column(Integer, ForeignKey("result_assets.id", ondelete="SET NULL"), nullable=True, index=True)
+    display_name = Column(String(255), nullable=False)
+    source_path = Column(String, nullable=False)
+    relative_path = Column(String, nullable=True)
+    file_size = Column(BigInteger, nullable=False, default=0, server_default="0")
+    checksum_sha256 = Column(String(64), nullable=True)
+    status = Column(String(32), index=True, nullable=False, default="PENDING", server_default="PENDING")
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    delivery = relationship("ResultDeliveryRequestORM", back_populates="items")
+    product = relationship("ResultProductORM", foreign_keys=[source_product_id])
+    compat_result = relationship("DinsarResultORM", foreign_keys=[source_result_id])
+    asset = relationship("ResultAssetORM", foreign_keys=[source_asset_id])
+
+    __table_args__ = (
+        Index("idx_result_delivery_items_delivery_status", "delivery_id", "status"),
+        Index("idx_result_delivery_items_product", "source_product_id"),
+    )
+
+
 class PairingCacheStateORM(Base):
     __tablename__ = "pairing_cache_state"
 
