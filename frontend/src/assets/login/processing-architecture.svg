@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">Production Pipeline Architecture</title>
+  <desc id="desc">A pipeline diagram for SAR data parsing, precise orbit matching, D-InSAR and SBAS production, and catalog registration.</desc>
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#082f49"/>
+      <stop offset="0.48" stop-color="#0f3b5f"/>
+      <stop offset="1" stop-color="#164e63"/>
+    </linearGradient>
+    <filter id="shadow2" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#020617" flood-opacity="0.24"/>
+    </filter>
+  </defs>
+  <rect width="1440" height="900" fill="url(#bg2)"/>
+  <g opacity="0.18" fill="none" stroke="#bae6fd" stroke-width="2">
+    <path d="M132 170C345 72 525 75 672 178s335 103 564-4"/>
+    <path d="M80 700c203-126 385-132 545-18s378 113 735-3"/>
+  </g>
+  <g transform="translate(140 110)" filter="url(#shadow2)">
+    <rect width="1160" height="680" rx="20" fill="#f8fafc"/>
+    <text x="48" y="72" font-family="Segoe UI, Arial, sans-serif" font-size="32" font-weight="700" fill="#0f172a">生产处理链路</text>
+    <text x="48" y="106" font-family="Segoe UI, Arial, sans-serif" font-size="18" fill="#475569">增量扫描优先，解析与预览异步，生产结果统一登记到成果目录。</text>
+    <g transform="translate(64 170)" font-family="Segoe UI, Arial, sans-serif">
+      <g>
+        <rect width="184" height="122" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+        <text x="24" y="44" font-size="23" font-weight="700" fill="#0f172a">源数据扫描</text>
+        <text x="24" y="80" font-size="16" fill="#475569">增量过滤</text>
+      </g>
+      <g transform="translate(240 0)">
+        <rect width="184" height="122" rx="14" fill="#e0f2fe" stroke="#7dd3fc"/>
+        <text x="24" y="44" font-size="23" font-weight="700" fill="#0f172a">元数据解析</text>
+        <text x="24" y="80" font-size="16" fill="#475569">XML / TAR / ZIP</text>
+      </g>
+      <g transform="translate(480 0)">
+        <rect width="184" height="122" rx="14" fill="#dcfce7" stroke="#86efac"/>
+        <text x="24" y="44" font-size="23" font-weight="700" fill="#0f172a">精轨匹配</text>
+        <text x="24" y="80" font-size="16" fill="#475569">自动补链</text>
+      </g>
+      <g transform="translate(720 0)">
+        <rect width="184" height="122" rx="14" fill="#fef3c7" stroke="#fcd34d"/>
+        <text x="24" y="44" font-size="23" font-weight="700" fill="#0f172a">生产编排</text>
+        <text x="24" y="80" font-size="16" fill="#475569">队列 / Worker</text>
+      </g>
+      <g transform="translate(960 0)">
+        <rect width="132" height="122" rx="14" fill="#fee2e2" stroke="#fca5a5"/>
+        <text x="24" y="44" font-size="23" font-weight="700" fill="#0f172a">成果</text>
+        <text x="24" y="80" font-size="16" fill="#475569">登记交付</text>
+      </g>
+      <g fill="none" stroke="#2563eb" stroke-width="5" stroke-linecap="round">
+        <path d="M192 61h38"/>
+        <path d="M432 61h38"/>
+        <path d="M672 61h38"/>
+        <path d="M912 61h38"/>
+      </g>
+    </g>
+    <g transform="translate(64 380)" font-family="Segoe UI, Arial, sans-serif">
+      <rect width="500" height="190" rx="16" fill="#0f172a"/>
+      <text x="30" y="48" font-size="24" font-weight="700" fill="#f8fafc">D-InSAR / SBAS 生产</text>
+      <text x="30" y="84" font-size="17" fill="#cbd5e1">LandSAR、Gamma、SARscape 按任务类型接入</text>
+      <g transform="translate(30 120)">
+        <rect width="112" height="36" rx="18" fill="#2563eb"/>
+        <text x="24" y="24" font-size="15" fill="#ffffff">配对</text>
+        <rect x="130" width="112" height="36" rx="18" fill="#0ea5e9"/>
+        <text x="154" y="24" font-size="15" fill="#ffffff">处理</text>
+        <rect x="260" width="112" height="36" rx="18" fill="#10b981"/>
+        <text x="284" y="24" font-size="15" fill="#ffffff">登记</text>
+      </g>
+      <rect x="600" width="492" height="190" rx="16" fill="#eef2ff"/>
+      <text x="630" y="48" font-size="24" font-weight="700" fill="#0f172a">可审计运行记录</text>
+      <text x="630" y="84" font-size="17" fill="#475569">成功、部分成功、失败原因与日志明细独立记录</text>
+      <g fill="#2563eb">
+        <circle cx="648" cy="132" r="8"/>
+        <circle cx="648" cy="164" r="8"/>
+        <circle cx="846" cy="132" r="8"/>
+        <circle cx="846" cy="164" r="8"/>
+      </g>
+      <g font-size="16" fill="#334155">
+        <text x="668" y="137">任务批次</text>
+        <text x="668" y="169">失败归因</text>
+        <text x="866" y="137">成果目录</text>
+        <text x="866" y="169">交付申请</text>
+      </g>
+    </g>
+  </g>
+</svg>

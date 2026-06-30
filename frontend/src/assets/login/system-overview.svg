@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">Radar Data Production System Overview</title>
+  <desc id="desc">An engineering-style system overview with satellite acquisition, asset catalog, processing, result management, and map analysis.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="0.55" stop-color="#14345f"/>
+      <stop offset="1" stop-color="#0b4f63"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fafc" stop-opacity="0.96"/>
+      <stop offset="1" stop-color="#e0f2fe" stop-opacity="0.86"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#020617" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect width="1440" height="900" fill="url(#bg)"/>
+  <g opacity="0.28" stroke="#93c5fd" stroke-width="1">
+    <path d="M0 150H1440M0 300H1440M0 450H1440M0 600H1440M0 750H1440"/>
+    <path d="M160 0V900M320 0V900M480 0V900M640 0V900M800 0V900M960 0V900M1120 0V900M1280 0V900"/>
+  </g>
+  <g opacity="0.5" fill="none" stroke="#67e8f9" stroke-width="2">
+    <circle cx="1070" cy="270" r="150"/>
+    <circle cx="1070" cy="270" r="226"/>
+    <path d="M845 276c70-48 139-70 211-65 93 6 168 62 226 152"/>
+  </g>
+  <g transform="translate(150 120)" filter="url(#softShadow)">
+    <rect width="1140" height="660" rx="18" fill="#f8fafc" opacity="0.96"/>
+    <rect x="28" y="28" width="1084" height="74" rx="12" fill="#e2e8f0"/>
+    <text x="56" y="75" font-family="Segoe UI, Arial, sans-serif" font-size="30" font-weight="700" fill="#0f172a">雷达数据生产管理系统</text>
+    <text x="720" y="73" font-family="Segoe UI, Arial, sans-serif" font-size="18" fill="#475569">数据接入 · 生产编排 · 成果管理 · 地图分析</text>
+    <g transform="translate(56 146)">
+      <rect width="212" height="110" rx="12" fill="url(#panel)" stroke="#93c5fd"/>
+      <text x="24" y="42" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="700" fill="#0f172a">源数据接入</text>
+      <text x="24" y="75" font-family="Segoe UI, Arial, sans-serif" font-size="17" fill="#475569">LT-1 / Sentinel-1 / GF3</text>
+      <path d="M168 35l22 13-22 13z" fill="#2563eb"/>
+    </g>
+    <g transform="translate(332 146)">
+      <rect width="212" height="110" rx="12" fill="url(#panel)" stroke="#93c5fd"/>
+      <text x="24" y="42" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="700" fill="#0f172a">资产台账</text>
+      <text x="24" y="75" font-family="Segoe UI, Arial, sans-serif" font-size="17" fill="#475569">解析、精轨匹配、缓存</text>
+      <rect x="154" y="30" width="34" height="50" rx="6" fill="#0ea5e9"/>
+      <rect x="164" y="22" width="34" height="50" rx="6" fill="#2563eb" opacity="0.75"/>
+    </g>
+    <g transform="translate(608 146)">
+      <rect width="212" height="110" rx="12" fill="url(#panel)" stroke="#93c5fd"/>
+      <text x="24" y="42" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="700" fill="#0f172a">生产工作台</text>
+      <text x="24" y="75" font-family="Segoe UI, Arial, sans-serif" font-size="17" fill="#475569">D-InSAR / SBAS / 正射</text>
+      <circle cx="174" cy="56" r="28" fill="#10b981"/>
+      <path d="M162 55l10 10 20-24" fill="none" stroke="#f8fafc" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <g transform="translate(884 146)">
+      <rect width="212" height="110" rx="12" fill="url(#panel)" stroke="#93c5fd"/>
+      <text x="24" y="42" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="700" fill="#0f172a">成果目录</text>
+      <text x="24" y="75" font-family="Segoe UI, Arial, sans-serif" font-size="17" fill="#475569">登记、提取、交付包</text>
+      <path d="M156 36h42v44h-42z" fill="#f59e0b"/>
+      <path d="M156 36l20 18 22-18" fill="none" stroke="#fff7ed" stroke-width="5"/>
+    </g>
+    <g fill="none" stroke="#2563eb" stroke-width="5" stroke-linecap="round">
+      <path d="M276 201h42"/>
+      <path d="M552 201h42"/>
+      <path d="M828 201h42"/>
+    </g>
+    <g transform="translate(56 326)">
+      <rect width="1040" height="244" rx="16" fill="#0f172a"/>
+      <path d="M30 186c110-82 222-102 336-60 95 36 155 111 240 115 132 6 195-150 329-144 45 2 79 21 105 48v99H30z" fill="#0ea5e9" opacity="0.22"/>
+      <path d="M30 171c112-74 220-88 324-42 100 44 159 121 254 117 129-5 181-143 314-132 49 4 88 25 118 58" fill="none" stroke="#38bdf8" stroke-width="4"/>
+      <g transform="translate(46 36)">
+        <text font-family="Segoe UI, Arial, sans-serif" font-size="26" font-weight="700" fill="#f8fafc">统一生产态势</text>
+        <text y="42" font-family="Segoe UI, Arial, sans-serif" font-size="17" fill="#cbd5e1">任务、Worker、成果、日志形成可追溯闭环</text>
+      </g>
+      <g font-family="Segoe UI, Arial, sans-serif" font-size="18" fill="#e0f2fe">
+        <text x="60" y="194">扫描入库</text>
+        <text x="304" y="130">配对规划</text>
+        <text x="548" y="214">集群生产</text>
+        <text x="792" y="122">成果发布</text>
+      </g>
+    </g>
+  </g>
+</svg>

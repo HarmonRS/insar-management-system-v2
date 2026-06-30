@@ -2095,7 +2095,7 @@ function App() {
     if (!authChecked) {
         return (
             <div className="login-page-wrapper">
-                <div className="login-card">
+                <div className="login-card login-card--checking">
                     <h2>正在检查登录状态...</h2>
                     <p>请稍候，系统正在验证会话。</p>
                 </div>

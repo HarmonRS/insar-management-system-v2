@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">Cluster and Result Delivery Architecture</title>
+  <desc id="desc">A cluster processing and result delivery architecture for radar data production.</desc>
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111827"/>
+      <stop offset="0.48" stop-color="#123b61"/>
+      <stop offset="1" stop-color="#14532d"/>
+    </linearGradient>
+    <filter id="shadow3" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#020617" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  <rect width="1440" height="900" fill="url(#bg3)"/>
+  <g opacity="0.2" stroke="#d1fae5" stroke-width="1.5" fill="none">
+    <path d="M100 190h1240M100 360h1240M100 530h1240M100 700h1240"/>
+    <path d="M230 90v720M430 90v720M630 90v720M830 90v720M1030 90v720M1230 90v720"/>
+  </g>
+  <g transform="translate(130 104)" filter="url(#shadow3)" font-family="Segoe UI, Arial, sans-serif">
+    <rect width="1180" height="692" rx="22" fill="#f8fafc"/>
+    <text x="54" y="76" font-size="32" font-weight="700" fill="#0f172a">集群生产与成果交付</text>
+    <text x="54" y="110" font-size="18" fill="#475569">主服务器统一管理任务，子服务器只承担受控生产服务，成果回传后进入交付流程。</text>
+    <g transform="translate(70 172)">
+      <rect width="280" height="370" rx="18" fill="#e0f2fe" stroke="#7dd3fc"/>
+      <text x="34" y="52" font-size="25" font-weight="700" fill="#0f172a">主服务器</text>
+      <text x="34" y="88" font-size="17" fill="#475569">资产、任务、用户、审计</text>
+      <g transform="translate(34 132)" fill="#0f172a">
+        <rect width="212" height="42" rx="8" fill="#ffffff" stroke="#bfdbfe"/>
+        <text x="18" y="27" font-size="16">任务队列</text>
+        <rect y="62" width="212" height="42" rx="8" fill="#ffffff" stroke="#bfdbfe"/>
+        <text x="18" y="89" font-size="16">成果目录</text>
+        <rect y="124" width="212" height="42" rx="8" fill="#ffffff" stroke="#bfdbfe"/>
+        <text x="18" y="151" font-size="16">用户权限</text>
+      </g>
+    </g>
+    <g transform="translate(460 172)">
+      <rect width="280" height="370" rx="18" fill="#ecfdf5" stroke="#86efac"/>
+      <text x="34" y="52" font-size="25" font-weight="700" fill="#0f172a">生产节点</text>
+      <text x="34" y="88" font-size="17" fill="#475569">LandSAR / Gamma 执行</text>
+      <g transform="translate(34 132)">
+        <rect width="92" height="92" rx="14" fill="#10b981"/>
+        <text x="26" y="54" font-size="18" font-weight="700" fill="#ffffff">1.6</text>
+        <rect x="120" width="92" height="92" rx="14" fill="#059669"/>
+        <text x="146" y="54" font-size="18" font-weight="700" fill="#ffffff">GPU</text>
+        <rect y="120" width="212" height="46" rx="10" fill="#ffffff" stroke="#bbf7d0"/>
+        <text x="18" y="149" font-size="16" fill="#166534">受控 Worker 服务</text>
+      </g>
+    </g>
+    <g transform="translate(850 172)">
+      <rect width="260" height="370" rx="18" fill="#fef3c7" stroke="#fcd34d"/>
+      <text x="34" y="52" font-size="25" font-weight="700" fill="#0f172a">成果交付</text>
+      <text x="34" y="88" font-size="17" fill="#475569">申请、打包、下载</text>
+      <g transform="translate(34 132)">
+        <path d="M0 0h180l44 48v118H0z" fill="#ffffff" stroke="#fde68a"/>
+        <path d="M180 0v48h44" fill="#fde68a"/>
+        <text x="22" y="68" font-size="18" font-weight="700" fill="#92400e">交付包</text>
+        <text x="22" y="105" font-size="15" fill="#78350f">D-InSAR / SBAS</text>
+        <text x="22" y="132" font-size="15" fill="#78350f">LT-1 / GF3 正射</text>
+      </g>
+    </g>
+    <g fill="none" stroke="#2563eb" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M368 322h70"/>
+      <path d="M758 322h70"/>
+      <path d="M438 358h-70"/>
+      <path d="M828 358h-70"/>
+    </g>
+    <g fill="#2563eb">
+      <path d="M438 322l-14-10v20z"/>
+      <path d="M828 322l-14-10v20z"/>
+      <path d="M368 358l14-10v20z"/>
+      <path d="M758 358l14-10v20z"/>
+    </g>
+    <g transform="translate(70 584)">
+      <rect width="1040" height="56" rx="12" fill="#0f172a"/>
+      <text x="28" y="36" font-size="18" fill="#dbeafe">最小化子服务器代码暴露：仅部署受控执行服务、运行环境和任务数据目录；业务资产与权限仍由主服务器统一管理。</text>
+    </g>
+  </g>
+</svg>
