@@ -310,6 +310,28 @@ function hasRunCounts(run) {
   return [completed, failed, skipped, total].some(value => value != null);
 }
 
+function hasMixedRunOutcome(run) {
+  const { completed, failed, skipped } = getRunCounts(run);
+  return Number(failed || 0) > 0 && (Number(completed || 0) > 0 || Number(skipped || 0) > 0);
+}
+
+function getDisplayRunStatus(run) {
+  const rawStatus = String(run?.raw_status || '').toUpperCase();
+  const status = String(run?.status || '').toLowerCase();
+  if (rawStatus === 'PARTIAL_SUCCESS' || status === 'partial_success' || hasMixedRunOutcome(run)) {
+    return 'partial_success';
+  }
+  return run?.status;
+}
+
+function getDisplayTaskStatus(task, relatedRun = null) {
+  if (!task) return '';
+  if (String(task?.status || '').toUpperCase() === 'PARTIAL_SUCCESS' || hasMixedRunOutcome(relatedRun)) {
+    return 'PARTIAL_SUCCESS';
+  }
+  return task.status;
+}
+
 function formatRunCounts(run) {
   const { completed, failed, skipped, total } = getRunCounts(run);
   const parts = [];
@@ -443,10 +465,11 @@ function RunPathBlock({ run }) {
 }
 
 function RunStatusBlock({ run }) {
+  const displayStatus = getDisplayRunStatus(run);
   return (
     <div style={{ display: 'grid', gap: 4, minWidth: 120 }}>
-      <span className={`dinsar-status-pill ${statusToneClass(run?.status)}`}>
-        {formatStatus(run?.status)}
+      <span className={`dinsar-status-pill ${statusToneClass(displayStatus)}`}>
+        {formatStatus(displayStatus)}
       </span>
       {hasRunCounts(run) && (
         <span style={{ color: '#475569', fontSize: 11, lineHeight: 1.35 }}>
@@ -832,6 +855,10 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
     recentLimit: 1,
   });
   const latestRunWithTask = runs.find(run => run?.task_id) || null;
+  const relatedMonitoredRun = runs.find(run => {
+    const taskId = String(run?.task_id || '').trim();
+    return taskId && taskId === String(taskMonitor.latestTask?.task_id || '').trim();
+  }) || latestRunWithTask || null;
   const monitoredTask = taskMonitor.latestTask || (
     latestRunWithTask
       ? {
@@ -842,7 +869,10 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
               : latestRunWithTask.engine === 'landsar'
                 ? (latestRunWithTask.mode === 'cluster' ? 'LANDSAR_CLUSTER_RUN' : 'LANDSAR_RUN')
                 : 'IDL_RUN_DINSAR',
-        status: latestRunWithTask.raw_status || latestRunWithTask.status,
+        status: getDisplayTaskStatus(
+          { status: latestRunWithTask.raw_status || latestRunWithTask.status },
+          latestRunWithTask,
+        ),
         progress: ['COMPLETED', 'PARTIAL_SUCCESS'].includes(String(latestRunWithTask.raw_status || '').toUpperCase())
           || ['success', 'partial_success'].includes(String(latestRunWithTask.status || '').toLowerCase())
           ? 100
@@ -851,13 +881,14 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
       }
       : null
   );
+  const monitoredTaskDisplayStatus = getDisplayTaskStatus(monitoredTask, relatedMonitoredRun);
   const logTaskId = monitoredTask?.task_id || '';
   const showingRecentTask = !taskMonitor.isBusy && !!monitoredTask;
   const activeRunCount = runs.filter(run => ['running', 'pending'].includes(String(run.status || '').toLowerCase())).length;
   const issueRunCount = runs.filter(run => {
-    const status = String(run.status || '').toLowerCase();
+    const displayStatus = String(getDisplayRunStatus(run) || '').toLowerCase();
     const rawStatus = String(run.raw_status || '').toUpperCase();
-    return ['failed', 'partial_success'].includes(status)
+    return ['failed', 'partial_success'].includes(displayStatus)
       || ['FAILED', 'PARTIAL_SUCCESS'].includes(rawStatus);
   }).length;
   const productionReady = !!currentEngineObj?.available && !!rootDir.trim() && !pyintPreviewBlocksSubmit && !readOnly;
@@ -1998,34 +2029,79 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
         </div>
 
         {monitoredTask && (
+          (() => {
+            const isPartial = String(monitoredTaskDisplayStatus || '').toUpperCase() === 'PARTIAL_SUCCESS';
+            const isFailedStatus = String(monitoredTaskDisplayStatus || '').toUpperCase() === 'FAILED';
+            const panelTone = isPartial
+              ? {
+                background: '#fffbeb',
+                border: '#fcd34d',
+                title: '#92400e',
+                text: '#78350f',
+                track: '#fde68a',
+                fill: '#d97706',
+              }
+              : isFailedStatus
+                ? {
+                  background: '#fef2f2',
+                  border: '#fecaca',
+                  title: '#b91c1c',
+                  text: '#7f1d1d',
+                  track: '#fee2e2',
+                  fill: '#dc2626',
+                }
+                : showingRecentTask
+                  ? {
+                    background: '#eff6ff',
+                    border: '#bfdbfe',
+                    title: '#1d4ed8',
+                    text: '#1e40af',
+                    track: '#dbeafe',
+                    fill: '#3b82f6',
+                  }
+                  : {
+                    background: '#fefce8',
+                    border: '#fde68a',
+                    title: '#92400e',
+                    text: '#78350f',
+                    track: '#fde68a',
+                    fill: '#f59e0b',
+                  };
+            const monitoredCountsText = hasRunCounts(relatedMonitoredRun) ? formatRunCounts(relatedMonitoredRun) : '';
+            return (
           <div
             style={{
               marginBottom: 10,
               padding: '8px 10px',
-              background: showingRecentTask ? '#eff6ff' : '#fefce8',
+              background: panelTone.background,
               borderRadius: 6,
-              border: `1px solid ${showingRecentTask ? '#bfdbfe' : '#fde68a'}`,
+              border: `1px solid ${panelTone.border}`,
             }}
           >
             <div
               style={{
                 fontSize: 12,
                 fontWeight: 600,
-                color: showingRecentTask ? '#1d4ed8' : '#92400e',
+                color: panelTone.title,
                 marginBottom: 4,
               }}
             >
               {showingRecentTask ? '最近一次任务' : '当前任务'}
             </div>
-            <div style={{ fontSize: 12, color: showingRecentTask ? '#1e40af' : '#78350f', wordBreak: 'break-all' }}>
-              {monitoredTask.task_id} - {formatTaskType(monitoredTask.task_type)} - {formatStatus(monitoredTask.status)} - {monitoredTask.message}
+            <div style={{ fontSize: 12, color: panelTone.text, wordBreak: 'break-all' }}>
+              {monitoredTask.task_id} - {formatTaskType(monitoredTask.task_type)} - {formatStatus(monitoredTaskDisplayStatus)} - {monitoredTask.message}
             </div>
+            {monitoredCountsText && (
+              <div style={{ marginTop: 4, fontSize: 11, color: panelTone.text }}>
+                运行情况：{monitoredCountsText}
+              </div>
+            )}
             {monitoredTask.progress != null && (
               <div style={{ marginTop: 6 }}>
                 <div
                   style={{
                     height: 6,
-                    background: showingRecentTask ? '#dbeafe' : '#fde68a',
+                    background: panelTone.track,
                     borderRadius: 3,
                     overflow: 'hidden',
                   }}
@@ -2034,11 +2110,11 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
                     style={{
                       height: '100%',
                       width: `${monitoredTask.progress}%`,
-                      background: showingRecentTask ? '#3b82f6' : '#f59e0b',
+                      background: panelTone.fill,
                     }}
                   />
                 </div>
-                <div style={{ fontSize: 11, color: showingRecentTask ? '#1d4ed8' : '#92400e', marginTop: 2 }}>{monitoredTask.progress}%</div>
+                <div style={{ fontSize: 11, color: panelTone.title, marginTop: 2 }}>{monitoredTask.progress}%</div>
               </div>
             )}
 
@@ -2046,7 +2122,7 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
               style={{
                 marginTop: 8,
                 background: '#fff',
-                border: `1px solid ${showingRecentTask ? '#bfdbfe' : '#fde68a'}`,
+                border: `1px solid ${panelTone.border}`,
                 borderRadius: 6,
                 padding: '8px 10px',
               }}
@@ -2127,6 +2203,8 @@ export default function DinsarProductionPanel({ readOnly = false, onJobQueued })
               )}
             </div>
           </div>
+            );
+          })()
         )}
 
         <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>运行记录（已加载 {runs.length} 条）</div>
