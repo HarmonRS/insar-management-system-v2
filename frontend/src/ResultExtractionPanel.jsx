@@ -7,6 +7,7 @@ import {
   getResultDeliveryArchiveUrl,
   getResultDeliveryDownloadUrl,
   getResultDeliveryManifestUrl,
+  listResultDeliveryCatalog,
   listResultDeliveries,
 } from './api/resultDeliveries';
 import { getDinsarEngineMeta } from './utils/dinsarEngines';
@@ -34,9 +35,9 @@ const PRODUCT_CHANNELS = [
     key: 'lt1_ortho',
     group: '正射成果',
     label: 'LT-1 正射结果',
-    state: 'placeholder',
-    stateText: '待接入',
-    description: '陆探一正射生产将由 LandSAR 生产链注册到统一成果目录后开放交付。',
+    state: 'ready',
+    stateText: '可交付',
+    description: '服务器生产的 LT-1 分析就绪正射 GeoTIFF 已接入交付，可打包下载到本地。',
   },
   {
     key: 's1_ortho',
@@ -50,9 +51,9 @@ const PRODUCT_CHANNELS = [
     key: 'gf3_ortho',
     group: '正射成果',
     label: 'GF3 SARscape _geo',
-    state: 'placeholder',
-    stateText: '待接入',
-    description: 'GF3 外部生产成果登记后再接入统一交付。',
+    state: 'ready',
+    stateText: '可交付',
+    description: '已登记的 GF3 SARscape 标准化正射成品可直接创建交付包。',
   },
 ];
 
@@ -85,15 +86,87 @@ function extractTotal(payload, fallback = 0) {
 }
 
 function resultDisplayName(result) {
-  return String(result?.name || result?.task_alias || result?.task_name || result?.product_id || `#${result?.id || ''}`).trim();
+  return String(result?.display_name || result?.name || result?.task_alias || result?.task_name || result?.product_id || `#${result?.id || ''}`).trim();
+}
+
+function resultItemId(result) {
+  return result?.item_id ?? result?.id;
+}
+
+function selectionKey(channelKey, id) {
+  return `${channelKey}:${id}`;
 }
 
 function resultDateText(result) {
   const name = resultDisplayName(result);
+  if (result?.imaging_date) return String(result.imaging_date);
   const matches = name.match(/(\d{8})/g);
   if (matches?.length >= 2) return `${matches[0]} / ${matches[1]}`;
   if (matches?.length === 1) return matches[0];
   return '-';
+}
+
+function channelMetricLabel(channelKey) {
+  return {
+    dinsar: 'D-InSAR 可交付',
+    sbas: 'SBAS 目录',
+    lt1_ortho: 'LT-1 正射',
+    gf3_ortho: 'GF3 正射',
+    s1_ortho: 'Sentinel-1 正射',
+  }[channelKey] || '可交付结果';
+}
+
+function channelListTitle(channelKey) {
+  return {
+    dinsar: 'D-InSAR 结果列表',
+    lt1_ortho: 'LT-1 正射结果列表',
+    gf3_ortho: 'GF3 正射结果列表',
+  }[channelKey] || '结果列表';
+}
+
+function channelEmptyText(channelKey) {
+  return {
+    dinsar: '当前条件下没有可交付的 D-InSAR 结果。',
+    lt1_ortho: '当前条件下没有可交付的 LT-1 正射结果。',
+    gf3_ortho: '当前条件下没有可交付的 GF3 正射结果。',
+  }[channelKey] || '当前条件下没有可交付结果。';
+}
+
+function channelCreateTitle(channelKey) {
+  return {
+    dinsar: 'D-InSAR 成果交付',
+    lt1_ortho: 'LT-1 正射成果交付',
+    gf3_ortho: 'GF3 正射成果交付',
+  }[channelKey] || '成果交付';
+}
+
+function channelCreateSubtitle(channelKey) {
+  return {
+    dinsar: '选择已登记结果并生成下载包',
+    lt1_ortho: '选择服务器已生产正射 GeoTIFF 并生成下载包',
+    gf3_ortho: '选择已登记 GF3 SARscape 正射成品并生成下载包',
+  }[channelKey] || '选择结果并生成下载包';
+}
+
+function itemMetaText(item, channelKey) {
+  if (channelKey === 'dinsar') {
+    return `${resultDateText(item)} · ${item.pair_key || item.product_id || '-'}`;
+  }
+  const parts = [
+    item.imaging_date || resultDateText(item),
+    item.polarization,
+    item.pixel_size_m ? `${item.pixel_size_m} m` : null,
+    item.product_id,
+  ].filter(Boolean);
+  return parts.join(' · ') || '-';
+}
+
+function itemStatusText(item, channelKey) {
+  if (channelKey === 'dinsar') {
+    return item.is_cached ? '预览就绪' : '预览待建';
+  }
+  if (item.file_size) return formatBytes(item.file_size);
+  return item.health_status || item.status || 'READY';
 }
 
 function stateClass(state) {
@@ -125,6 +198,8 @@ export default function ResultExtractionPanel({ readOnly = false }) {
   const [activeChannel, setActiveChannel] = useState('dinsar');
   const [dinsarPayload, setDinsarPayload] = useState({ items: [], total: 0 });
   const [sbasPayload, setSbasPayload] = useState({ items: [], total: 0 });
+  const [lt1Payload, setLt1Payload] = useState({ items: [], total: 0 });
+  const [gf3Payload, setGf3Payload] = useState({ items: [], total: 0 });
   const [deliveriesPayload, setDeliveriesPayload] = useState({ items: [], total: 0 });
   const [loading, setLoading] = useState(true);
   const [deliveryLoading, setDeliveryLoading] = useState(false);
@@ -161,13 +236,21 @@ export default function ResultExtractionPanel({ readOnly = false }) {
         listSbasInsarProducts({ limit: 30, offset: 0 }),
         listResultDeliveries({ mine: true, limit: 20, offset: 0 }),
       ]);
+      const [lt1Data, gf3Data] = await Promise.all([
+        listResultDeliveryCatalog('lt1_ortho', { limit: PAGE_SIZE, offset: 0 }),
+        listResultDeliveryCatalog('gf3_ortho', { limit: PAGE_SIZE, offset: 0 }),
+      ]);
       const dinsarItems = normalizeItems(dinsarData);
       setDinsarPayload({ ...dinsarData, items: dinsarItems, total: extractTotal(dinsarData, dinsarItems.length) });
       const sbasItems = normalizeItems(sbasData);
       setSbasPayload({ ...sbasData, items: sbasItems, total: extractTotal(sbasData, sbasItems.length) });
+      const lt1Items = normalizeItems(lt1Data);
+      setLt1Payload({ ...lt1Data, items: lt1Items, total: extractTotal(lt1Data, lt1Items.length) });
+      const gf3Items = normalizeItems(gf3Data);
+      setGf3Payload({ ...gf3Data, items: gf3Items, total: extractTotal(gf3Data, gf3Items.length) });
       const deliveryItems = normalizeItems(deliveryData);
       setDeliveriesPayload({ ...deliveryData, items: deliveryItems, total: extractTotal(deliveryData, deliveryItems.length) });
-      setSelectedIds(new Set(dinsarItems.map(item => item.id).filter(id => id !== undefined && id !== null)));
+      setSelectedIds(new Set(dinsarItems.map(item => resultItemId(item)).filter(id => id !== undefined && id !== null).map(id => selectionKey('dinsar', id))));
     } catch (err) {
       setError(err?.response?.data?.detail || err.message || '结果目录加载失败');
     } finally {
@@ -191,41 +274,63 @@ export default function ResultExtractionPanel({ readOnly = false }) {
     return () => window.clearInterval(timer);
   }, [deliveriesPayload.items]);
 
-  const filteredDinsar = useMemo(() => {
+  const activePayload = activeChannel === 'lt1_ortho'
+    ? lt1Payload
+    : activeChannel === 'gf3_ortho'
+      ? gf3Payload
+      : activeChannel === 'sbas'
+        ? sbasPayload
+        : activeChannel === 's1_ortho'
+          ? { items: [], total: 0 }
+          : dinsarPayload;
+  const activeItems = activePayload.items || [];
+
+  const filteredResults = useMemo(() => {
     const value = query.trim().toLowerCase();
-    const items = dinsarPayload.items || [];
+    const items = activeItems;
     if (!value) return items;
     return items.filter(item => {
       const haystack = [
+        item.display_name,
         item.name,
         item.task_name,
         item.task_alias,
         item.pair_key,
         item.product_id,
         item.engine_code,
+        item.profile_code,
+        item.imaging_date,
+        item.polarization,
         item.file_path,
+        item.primary_asset_path,
+        item.publish_dir,
       ].filter(Boolean).join(' ').toLowerCase();
       return haystack.includes(value);
     });
-  }, [dinsarPayload.items, query]);
+  }, [activeItems, query]);
 
   const filteredIds = useMemo(
-    () => filteredDinsar.map(item => item.id).filter(id => id !== undefined && id !== null),
-    [filteredDinsar],
+    () => filteredResults.map(item => resultItemId(item)).filter(id => id !== undefined && id !== null),
+    [filteredResults],
   );
 
-  const selectedCountInView = filteredIds.filter(id => selectedIds.has(id)).length;
+  const filteredKeys = useMemo(
+    () => filteredIds.map(id => selectionKey(activeChannel, id)),
+    [activeChannel, filteredIds],
+  );
+
+  const selectedCountInView = filteredKeys.filter(key => selectedIds.has(key)).length;
   const allVisibleSelected = filteredIds.length > 0 && selectedCountInView === filteredIds.length;
   const latestDelivery = deliveriesPayload.items?.[0] || null;
 
-  const orthoPlaceholderCount = PRODUCT_CHANNELS.filter(channel => channel.group === '正射成果').length;
-  const currentCatalogTotal = Number(dinsarPayload.total || 0) + Number(sbasPayload.total || 0);
+  const readyOrthoCount = Number(lt1Payload.total || 0) + Number(gf3Payload.total || 0);
+  const currentCatalogTotal = Number(dinsarPayload.total || 0) + Number(sbasPayload.total || 0) + readyOrthoCount;
 
   const metrics = [
     {
-      label: 'D-InSAR 可交付',
-      value: dinsarPayload.total,
-      note: `当前载入 ${filteredDinsar.length}/${dinsarPayload.items.length} 条`,
+      label: channelMetricLabel(activeChannel),
+      value: activePayload.total,
+      note: `当前载入 ${filteredResults.length}/${activeItems.length} 条`,
       tone: 'primary',
     },
     {
@@ -237,24 +342,25 @@ export default function ResultExtractionPanel({ readOnly = false }) {
     {
       label: '当前接入目录',
       value: currentCatalogTotal,
-      note: 'D-InSAR + SBAS 已接入清单',
+      note: 'D-InSAR + SBAS + LT-1/GF3 正射',
       tone: 'neutral',
     },
     {
-      label: '正射通道',
-      value: orthoPlaceholderCount,
-      note: 'LT-1 / S1 / GF3 占位',
-      tone: 'warning',
+      label: '可交付正射',
+      value: readyOrthoCount,
+      note: 'LT-1 与 GF3 已接入，S1 预留',
+      tone: 'neutral',
     },
   ];
 
   const toggleOne = (id) => {
+    const key = selectionKey(activeChannel, id);
     setSelectedIds(prev => {
       const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
+      if (next.has(key)) {
+        next.delete(key);
       } else {
-        next.add(id);
+        next.add(key);
       }
       return next;
     });
@@ -264,30 +370,35 @@ export default function ResultExtractionPanel({ readOnly = false }) {
     setSelectedIds(prev => {
       const next = new Set(prev);
       if (allVisibleSelected) {
-        filteredIds.forEach(id => next.delete(id));
+        filteredKeys.forEach(key => next.delete(key));
       } else {
-        filteredIds.forEach(id => next.add(id));
+        filteredKeys.forEach(key => next.add(key));
       }
       return next;
     });
   };
 
   const handleCreateDelivery = async () => {
-    const ids = [...selectedIds].filter(id => filteredIds.includes(id));
+    const ids = filteredIds.filter(id => selectedIds.has(selectionKey(activeChannel, id)));
     if (ids.length === 0) {
-      setCreateError('请至少选择一条 D-InSAR 结果。');
+      setCreateError(`请至少选择一条${selectedChannel.label}。`);
       return;
     }
     setCreating(true);
     setCreateError('');
     setCreateResult(null);
     try {
-      const response = await createResultDelivery({
-        channel: 'dinsar',
-        compat_result_ids: ids,
+      const payload = {
+        channel: activeChannel,
         package_mode: packageMode,
         include_checksums: includeChecksums,
-      });
+      };
+      if (activeChannel === 'dinsar') {
+        payload.compat_result_ids = ids;
+      } else {
+        payload.item_ids = ids;
+      }
+      const response = await createResultDelivery(payload);
       setCreateResult(response);
       await loadDeliveries();
     } catch (err) {
@@ -353,12 +464,12 @@ export default function ResultExtractionPanel({ readOnly = false }) {
     </section>
   );
 
-  const renderDinsarWorkspace = () => (
+  const renderReadyWorkspace = () => (
     <section className="result-extraction-main-card">
       <div className="result-extraction-card-head">
         <div>
-          <span>D-InSAR 成果交付</span>
-          <strong>选择已登记结果并生成下载包</strong>
+          <span>{channelCreateTitle(activeChannel)}</span>
+          <strong>{channelCreateSubtitle(activeChannel)}</strong>
         </div>
         <button type="button" onClick={loadCatalogs} disabled={loading || creating}>
           刷新目录
@@ -372,7 +483,7 @@ export default function ResultExtractionPanel({ readOnly = false }) {
             type="text"
             value={query}
             onChange={event => setQuery(event.target.value)}
-            placeholder="任务名、日期、pair_key、引擎"
+            placeholder="任务名、日期、产品号、极化、引擎"
             disabled={loading || creating}
           />
         </label>
@@ -424,36 +535,34 @@ export default function ResultExtractionPanel({ readOnly = false }) {
       <div className="result-extraction-workspace-split">
         <div className="result-extraction-result-column">
           <div className="result-extraction-list-head">
-            <span>结果列表</span>
-            <strong>{selectedCountInView}/{filteredDinsar.length}</strong>
+            <span>{channelListTitle(activeChannel)}</span>
+            <strong>{selectedCountInView}/{filteredResults.length}</strong>
           </div>
           <div className="result-extraction-result-list">
             {loading ? (
               <div className="result-extraction-empty">正在加载成果目录...</div>
-            ) : filteredDinsar.length === 0 ? (
-              <div className="result-extraction-empty">当前条件下没有可交付的 D-InSAR 结果。</div>
+            ) : filteredResults.length === 0 ? (
+              <div className="result-extraction-empty">{channelEmptyText(activeChannel)}</div>
             ) : (
-              filteredDinsar.map(result => {
-                const id = result.id;
-                const engineMeta = getDinsarEngineMeta(result.engine_code);
+              filteredResults.map(result => {
+                const id = resultItemId(result);
+                const engineMeta = activeChannel === 'dinsar'
+                  ? getDinsarEngineMeta(result.engine_code)
+                  : { tone: 'landsar', shortLabel: result.engine_code || result.profile_code || 'ORTHO' };
                 return (
-                  <label key={id} className="result-extraction-result-row">
+                  <label key={`${activeChannel}-${id}`} className="result-extraction-result-row">
                     <input
                       type="checkbox"
-                      checked={selectedIds.has(id)}
+                      checked={selectedIds.has(selectionKey(activeChannel, id))}
                       onChange={() => toggleOne(id)}
                       disabled={creating}
                     />
                     <span className="result-extraction-result-main">
-                      <strong title={result.file_path || resultDisplayName(result)}>{resultDisplayName(result)}</strong>
-                      <span>
-                        {resultDateText(result)}
-                        {' · '}
-                        {result.pair_key || result.product_id || '-'}
-                      </span>
+                      <strong title={result.file_path || result.primary_asset_path || resultDisplayName(result)}>{resultDisplayName(result)}</strong>
+                      <span>{itemMetaText(result, activeChannel)}</span>
                     </span>
                     <span className={`dinsar-engine-badge tone-${engineMeta.tone}`}>{engineMeta.shortLabel}</span>
-                    <span className="result-extraction-status-chip">{result.is_cached ? '预览就绪' : '预览待建'}</span>
+                    <span className="result-extraction-status-chip">{itemStatusText(result, activeChannel)}</span>
                   </label>
                 );
               })
@@ -480,7 +589,7 @@ export default function ResultExtractionPanel({ readOnly = false }) {
           </div>
           <div>
             <span>交付接口</span>
-            <strong>{selectedChannel.key === 'dinsar' ? '已接入' : '待实现'}</strong>
+            <strong>{selectedChannel.state === 'ready' ? '已接入' : '待实现'}</strong>
           </div>
           <div>
             <span>用户权限</span>
@@ -513,13 +622,14 @@ export default function ResultExtractionPanel({ readOnly = false }) {
           <span>成果交付出口</span>
           <strong>结果提取工作台</strong>
           <p>
-            将 D-InSAR 成果交付下载和后续正射成果交付统一管理。当前 D-InSAR 支持后台交付包，
-            SBAS、LT-1 正射、Sentinel-1 正射和 GF3 正射先保留清晰占位。
+            将 D-InSAR、LT-1 正射和 GF3 正射成果交付下载统一管理。后台生成受控交付包，用户完成后下载到本地；
+            SBAS 和 Sentinel-1 正射保留清晰接入状态。
           </p>
         </div>
         <div className="result-extraction-hero-meta">
           <span>D-InSAR {formatNumber(dinsarPayload.total)}</span>
-          <span>SBAS {formatNumber(sbasPayload.total)}</span>
+          <span>LT-1 {formatNumber(lt1Payload.total)}</span>
+          <span>GF3 {formatNumber(gf3Payload.total)}</span>
           <span>{readOnly ? '自助交付' : '管理员'}</span>
         </div>
       </section>
@@ -549,7 +659,7 @@ export default function ResultExtractionPanel({ readOnly = false }) {
             </button>
           ))}
         </aside>
-        {activeChannel === 'dinsar' ? renderDinsarWorkspace() : renderPlaceholderWorkspace()}
+        {selectedChannel.state === 'ready' ? renderReadyWorkspace() : renderPlaceholderWorkspace()}
       </section>
     </div>
   );

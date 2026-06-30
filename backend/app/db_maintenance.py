@@ -43,6 +43,7 @@ MIGRATION_FILES = [
     "011_source_metadata_documents.sql",
     "012_source_archive_integrity.sql",
     "013_result_delivery_requests.sql",
+    "014_result_delivery_ortho_sources.sql",
 ]
 
 

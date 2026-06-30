@@ -377,6 +377,8 @@ class ResultDeliveryItemORM(Base):
     source_product_id = Column(Integer, ForeignKey("result_products.id", ondelete="SET NULL"), nullable=True, index=True)
     source_result_id = Column(Integer, ForeignKey("dinsar_results.id", ondelete="SET NULL"), nullable=True, index=True)
     source_asset_id = Column(Integer, ForeignKey("result_assets.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_radar_data_id = Column(Integer, ForeignKey("radar_data.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_scene_geo_id = Column(Integer, ForeignKey("sar_scene_geo.id", ondelete="SET NULL"), nullable=True, index=True)
     display_name = Column(String(255), nullable=False)
     source_path = Column(String, nullable=False)
     relative_path = Column(String, nullable=True)
@@ -391,10 +393,14 @@ class ResultDeliveryItemORM(Base):
     product = relationship("ResultProductORM", foreign_keys=[source_product_id])
     compat_result = relationship("DinsarResultORM", foreign_keys=[source_result_id])
     asset = relationship("ResultAssetORM", foreign_keys=[source_asset_id])
+    radar_data = relationship("RadarDataORM", foreign_keys=[source_radar_data_id])
+    scene_geo = relationship("SARSceneGeoORM", foreign_keys=[source_scene_geo_id])
 
     __table_args__ = (
         Index("idx_result_delivery_items_delivery_status", "delivery_id", "status"),
         Index("idx_result_delivery_items_product", "source_product_id"),
+        Index("idx_result_delivery_items_radar", "source_radar_data_id"),
+        Index("idx_result_delivery_items_scene_geo", "source_scene_geo_id"),
     )
 
 

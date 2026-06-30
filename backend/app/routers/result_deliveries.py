@@ -22,6 +22,7 @@ class ResultDeliveryCreateRequest(BaseModel):
     channel: str
     product_ids: Optional[List[int]] = None
     compat_result_ids: Optional[List[int]] = None
+    item_ids: Optional[List[int]] = None
     package_mode: str = "directory"
     include_checksums: Optional[bool] = None
 
@@ -64,6 +65,7 @@ async def create_result_delivery(
             channel=request.channel,
             product_ids=request.product_ids,
             compat_result_ids=request.compat_result_ids,
+            item_ids=request.item_ids,
             package_mode=request.package_mode,
             include_checksums=request.include_checksums,
         )
@@ -87,6 +89,28 @@ async def create_result_delivery(
     )
     await db.commit()
     return result_delivery_service.serialize_delivery(delivery)
+
+
+@router.get("/result-deliveries/catalog/{channel}")
+async def list_result_delivery_catalog(
+    channel: str,
+    limit: int = 100,
+    offset: int = 0,
+    query: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: AuthUserORM = Depends(_get_current_user),
+):
+    _ = current_user
+    try:
+        return await result_delivery_service.list_channel_catalog(
+            db,
+            channel=channel,
+            limit=limit,
+            offset=offset,
+            query=query,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/result-deliveries")

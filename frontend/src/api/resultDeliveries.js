@@ -9,6 +9,9 @@ export const createResultDelivery = payload =>
 export const listResultDeliveries = (params = {}) =>
   apiClient.get('/result-deliveries', { params }).then(r => r.data);
 
+export const listResultDeliveryCatalog = (channel, params = {}) =>
+  apiClient.get(`/result-deliveries/catalog/${encodeURIComponent(channel)}`, { params }).then(r => r.data);
+
 export const getResultDelivery = deliveryId =>
   apiClient.get(`/result-deliveries/${encodeURIComponent(deliveryId)}`).then(r => r.data);
 

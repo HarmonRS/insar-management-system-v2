@@ -20,10 +20,12 @@ from ..config import settings
 from ..models import (
     AuthUserORM,
     DinsarResultORM,
+    RadarDataORM,
     ResultAssetORM,
     ResultDeliveryItemORM,
     ResultDeliveryRequestORM,
     ResultProductORM,
+    SARSceneGeoORM,
 )
 from .dinsar_read_service import dinsar_read_service
 from .job_queue_service import job_queue_service
@@ -46,7 +48,17 @@ ITEM_STATUS_FAILED = "FAILED"
 ITEM_STATUS_SKIPPED = "SKIPPED"
 
 CHANNEL_DINSAR = "dinsar"
-SUPPORTED_READY_CHANNELS = {CHANNEL_DINSAR}
+CHANNEL_LT1_ORTHO = "lt1_ortho"
+CHANNEL_GF3_ORTHO = "gf3_ortho"
+CHANNEL_SBAS = "sbas"
+CHANNEL_S1_ORTHO = "s1_ortho"
+SUPPORTED_READY_CHANNELS = {CHANNEL_DINSAR, CHANNEL_LT1_ORTHO, CHANNEL_GF3_ORTHO}
+
+LT1_ANALYSIS_ENGINE = "lt_gamma"
+LT1_ANALYSIS_PROFILE = "lt1_gamma_geocoded_mli"
+GF3_STANDARD_SOURCE_FORMAT = "GF3_SARSCAPE_L2"
+GF3_NATIVE_PREVIEW_SOURCE_FORMAT = "GF3_SARSCAPE_NATIVE_PREVIEW"
+GF3_DELIVERABLE_SOURCE_FORMATS = {GF3_STANDARD_SOURCE_FORMAT, GF3_NATIVE_PREVIEW_SOURCE_FORMAT}
 
 PACKAGE_MODE_DIRECTORY = "directory"
 PACKAGE_MODE_ZIP = "zip"
@@ -58,11 +70,16 @@ _SAFE_ID_RE = re.compile(r"[^0-9A-Za-z_-]+")
 
 @dataclass(frozen=True)
 class DeliverySource:
-    product: ResultProductORM
-    compat_row: Optional[DinsarResultORM]
     display_name: str
     source_path: str
+    product: Optional[ResultProductORM] = None
+    compat_row: Optional[DinsarResultORM] = None
     source_asset_id: Optional[int] = None
+    source_radar_data_id: Optional[int] = None
+    source_scene_geo_id: Optional[int] = None
+    product_id: Optional[str] = None
+    task_name: Optional[str] = None
+    source_kind: str = "result_product"
 
 
 def _new_session() -> AsyncSession:
@@ -208,6 +225,59 @@ def _resolve_source_path(product: ResultProductORM, assets: List[ResultAssetORM]
     return "", None
 
 
+def _scene_product_id(scene: SARSceneGeoORM) -> str:
+    return f"sar_scene_geo:{scene.id}"
+
+
+def _scene_display_name(scene: SARSceneGeoORM, radar: RadarDataORM) -> str:
+    for value in (
+        radar.product_unique_id,
+        radar.unique_id,
+        radar.source_product_token,
+        os.path.basename(str(radar.file_path or "").rstrip("/\\")),
+        _scene_product_id(scene),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return f"scene_{scene.id}"
+
+
+def _radar_display_name(radar: RadarDataORM) -> str:
+    for value in (
+        radar.product_unique_id,
+        radar.unique_id,
+        radar.source_product_token,
+        os.path.basename(str(radar.file_path or "").rstrip("/\\")),
+        f"radar_{radar.id}",
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return f"radar_{radar.id}"
+
+
+def _manifest_path_for_scene(scene: SARSceneGeoORM) -> Optional[str]:
+    metadata = scene.analysis_metadata_json if isinstance(scene.analysis_metadata_json, dict) else {}
+    text = str(metadata.get("manifest_path") or "").strip()
+    if text:
+        return text
+    if scene.analysis_dir:
+        return os.path.join(scene.analysis_dir, "manifest.json")
+    return None
+
+
+def _quality_path_for_scene(scene: SARSceneGeoORM) -> Optional[str]:
+    if scene.analysis_dir:
+        return os.path.join(scene.analysis_dir, "quality.json")
+    return None
+
+
+def _catalog_file_size(path: Any) -> int:
+    text = str(path or "").strip()
+    return _file_size(text) if text else 0
+
+
 class ResultDeliveryService:
     def channels(self) -> List[Dict[str, Any]]:
         return [
@@ -220,7 +290,7 @@ class ResultDeliveryService:
                 "description": "已登记 D-InSAR catalog，可创建后台交付包并下载到本地。",
             },
             {
-                "key": "sbas",
+                "key": CHANNEL_SBAS,
                 "group": "InSAR 成果",
                 "label": "SBAS-InSAR 结果",
                 "state": "planned",
@@ -228,15 +298,15 @@ class ResultDeliveryService:
                 "description": "SBAS 结果 catalog 已有基础能力，本阶段暂不开放交付打包。",
             },
             {
-                "key": "lt1_ortho",
+                "key": CHANNEL_LT1_ORTHO,
                 "group": "正射成果",
                 "label": "LT-1 正射结果",
-                "state": "placeholder",
-                "state_text": "待接入",
-                "description": "陆探一正射生产将由 LandSAR 生产链注册后接入统一交付。",
+                "state": "ready",
+                "state_text": "可交付",
+                "description": "服务器生产的 LT-1 分析就绪正射 GeoTIFF 已接入交付，可打包下载到本地。",
             },
             {
-                "key": "s1_ortho",
+                "key": CHANNEL_S1_ORTHO,
                 "group": "正射成果",
                 "label": "Sentinel-1 正射结果",
                 "state": "placeholder",
@@ -244,12 +314,12 @@ class ResultDeliveryService:
                 "description": "Sentinel-1 正射生产尚未接入，当前只保留交付通道占位。",
             },
             {
-                "key": "gf3_ortho",
+                "key": CHANNEL_GF3_ORTHO,
                 "group": "正射成果",
                 "label": "GF3 SARscape _geo",
-                "state": "placeholder",
-                "state_text": "待接入",
-                "description": "GF3 外部生产成果登记后再接入统一交付。",
+                "state": "ready",
+                "state_text": "可交付",
+                "description": "已登记的 GF3 SARscape 标准化正射成品可直接创建交付包。",
             },
         ]
 
@@ -282,11 +352,14 @@ class ResultDeliveryService:
                 seen_products.add(int(product.id))
                 sources.append(
                     DeliverySource(
-                        product=product,
-                        compat_row=None,
                         display_name=dinsar_read_service.get_display_name(product),
                         source_path=source_path,
+                        product=product,
+                        compat_row=None,
                         source_asset_id=source_asset_id,
+                        product_id=product.product_id,
+                        task_name=product.task_alias or product.task_name,
+                        source_kind="dinsar_product",
                     )
                 )
 
@@ -319,15 +392,343 @@ class ResultDeliveryService:
                 seen_products.add(int(product.id))
                 sources.append(
                     DeliverySource(
-                        product=product,
-                        compat_row=record.compat_row,
                         display_name=record.display_name,
                         source_path=source_path,
+                        product=product,
+                        compat_row=record.compat_row,
                         source_asset_id=source_asset_id,
+                        product_id=product.product_id,
+                        task_name=product.task_alias or product.task_name,
+                        source_kind="dinsar_product",
                     )
                 )
 
         return sources
+
+    async def _resolve_lt1_sources(
+        self,
+        db: AsyncSession,
+        *,
+        item_ids: List[int],
+        product_ids: List[int],
+    ) -> List[DeliverySource]:
+        selected_ids = item_ids or product_ids
+        if not selected_ids:
+            return []
+        result = await db.execute(
+            select(SARSceneGeoORM, RadarDataORM)
+            .join(RadarDataORM, SARSceneGeoORM.radar_data_id == RadarDataORM.id)
+            .where(
+                SARSceneGeoORM.id.in_(selected_ids),
+                SARSceneGeoORM.status == "DONE",
+                SARSceneGeoORM.analysis_tif_path.isnot(None),
+                SARSceneGeoORM.analysis_engine == LT1_ANALYSIS_ENGINE,
+                SARSceneGeoORM.analysis_profile == LT1_ANALYSIS_PROFILE,
+            )
+            .order_by(SARSceneGeoORM.id.asc())
+        )
+        sources: List[DeliverySource] = []
+        for scene, radar in result.all():
+            analysis_dir = str(scene.analysis_dir or "").strip()
+            analysis_tif = str(scene.analysis_tif_path or "").strip()
+            source_path = analysis_dir if analysis_dir and os.path.isdir(analysis_dir) else analysis_tif
+            if not source_path:
+                continue
+            product_id = _scene_product_id(scene)
+            display_name = _scene_display_name(scene, radar)
+            sources.append(
+                DeliverySource(
+                    display_name=display_name,
+                    source_path=source_path,
+                    source_radar_data_id=int(radar.id) if radar.id is not None else None,
+                    source_scene_geo_id=int(scene.id) if scene.id is not None else None,
+                    product_id=product_id,
+                    task_name=display_name,
+                    source_kind="lt1_scene_geo",
+                )
+            )
+        return sources
+
+    async def _resolve_gf3_sources(
+        self,
+        db: AsyncSession,
+        *,
+        item_ids: List[int],
+    ) -> List[DeliverySource]:
+        if not item_ids:
+            return []
+        result = await db.execute(
+            select(RadarDataORM, SARSceneGeoORM)
+            .outerjoin(SARSceneGeoORM, SARSceneGeoORM.radar_data_id == RadarDataORM.id)
+            .where(
+                RadarDataORM.id.in_(item_ids),
+                RadarDataORM.source_format.in_(GF3_DELIVERABLE_SOURCE_FORMATS),
+                RadarDataORM.geocoded_flag.is_(True),
+            )
+            .order_by(RadarDataORM.id.asc())
+        )
+        sources: List[DeliverySource] = []
+        for radar, scene in result.all():
+            source_path = ""
+            source_scene_geo_id = None
+            if scene is not None and scene.analysis_tif_path:
+                analysis_dir = str(scene.analysis_dir or "").strip()
+                analysis_tif = str(scene.analysis_tif_path or "").strip()
+                source_path = analysis_dir if analysis_dir and os.path.isdir(analysis_dir) else analysis_tif
+                source_scene_geo_id = int(scene.id) if scene.id is not None else None
+            if not source_path:
+                source_path = str(radar.file_path or "").strip()
+            if not source_path:
+                continue
+            display_name = _radar_display_name(radar)
+            sources.append(
+                DeliverySource(
+                    display_name=display_name,
+                    source_path=source_path,
+                    source_radar_data_id=int(radar.id) if radar.id is not None else None,
+                    source_scene_geo_id=source_scene_geo_id,
+                    product_id=f"gf3_sarscape:{radar.id}",
+                    task_name=display_name,
+                    source_kind="gf3_radar_data",
+                )
+            )
+        return sources
+
+    async def _resolve_sources_for_channel(
+        self,
+        db: AsyncSession,
+        *,
+        channel: str,
+        product_ids: List[int],
+        compat_result_ids: List[int],
+        item_ids: List[int],
+    ) -> List[DeliverySource]:
+        if channel == CHANNEL_DINSAR:
+            return await self._resolve_dinsar_sources(
+                db,
+                product_ids=product_ids,
+                compat_result_ids=compat_result_ids,
+            )
+        if channel == CHANNEL_LT1_ORTHO:
+            return await self._resolve_lt1_sources(db, item_ids=item_ids, product_ids=product_ids)
+        if channel == CHANNEL_GF3_ORTHO:
+            return await self._resolve_gf3_sources(db, item_ids=item_ids or product_ids)
+        return []
+
+    async def list_channel_catalog(
+        self,
+        db: AsyncSession,
+        *,
+        channel: str,
+        limit: int = 100,
+        offset: int = 0,
+        query: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        channel = _normalize_channel(channel)
+        safe_limit = min(500, max(1, int(limit or 100)))
+        safe_offset = max(0, int(offset or 0))
+        query_text = str(query or "").strip()
+
+        if channel == CHANNEL_LT1_ORTHO:
+            filters = [
+                SARSceneGeoORM.status == "DONE",
+                SARSceneGeoORM.analysis_tif_path.isnot(None),
+                SARSceneGeoORM.analysis_engine == LT1_ANALYSIS_ENGINE,
+                SARSceneGeoORM.analysis_profile == LT1_ANALYSIS_PROFILE,
+            ]
+            if query_text:
+                like = f"%{query_text}%"
+                filters.append(
+                    or_(
+                        RadarDataORM.product_unique_id.ilike(like),
+                        RadarDataORM.unique_id.ilike(like),
+                        RadarDataORM.file_path.ilike(like),
+                        RadarDataORM.imaging_date.ilike(like),
+                    )
+                )
+            total_result = await db.execute(
+                select(func.count(SARSceneGeoORM.id))
+                .join(RadarDataORM, SARSceneGeoORM.radar_data_id == RadarDataORM.id)
+                .where(*filters)
+            )
+            rows_result = await db.execute(
+                select(SARSceneGeoORM, RadarDataORM)
+                .join(RadarDataORM, SARSceneGeoORM.radar_data_id == RadarDataORM.id)
+                .where(*filters)
+                .order_by(SARSceneGeoORM.updated_at.desc().nullslast(), SARSceneGeoORM.id.desc())
+                .limit(safe_limit)
+                .offset(safe_offset)
+            )
+            items = []
+            for scene, radar in rows_result.all():
+                display_name = _scene_display_name(scene, radar)
+                manifest_path = _manifest_path_for_scene(scene)
+                quality_path = _quality_path_for_scene(scene)
+                items.append(
+                    {
+                        "id": scene.id,
+                        "item_id": scene.id,
+                        "source_kind": "lt1_scene_geo",
+                        "product_id": _scene_product_id(scene),
+                        "catalog_name": "sar_scene_geo",
+                        "product_family": "lt1_analysis_ready_geotiff",
+                        "product_type": "analysis_ready_geotiff",
+                        "display_name": display_name,
+                        "task_name": display_name,
+                        "status": scene.status,
+                        "health_status": "OK",
+                        "engine_code": scene.analysis_engine,
+                        "profile_code": scene.analysis_profile,
+                        "radar_data_id": radar.id,
+                        "scene_geo_id": scene.id,
+                        "imaging_date": radar.imaging_date,
+                        "polarization": radar.polarization,
+                        "pixel_size_m": scene.pixel_size_m,
+                        "backscatter_unit": scene.analysis_backscatter_unit,
+                        "publish_dir": scene.analysis_dir,
+                        "manifest_path": manifest_path,
+                        "quality_path": quality_path,
+                        "primary_asset_path": scene.analysis_tif_path,
+                        "file_size": _catalog_file_size(scene.analysis_tif_path),
+                        "summary": {
+                            "radar_data_id": radar.id,
+                            "source_asset_ids": [radar.source_product_ref_id] if radar.source_product_ref_id else [],
+                            "imaging_date": radar.imaging_date,
+                            "polarization": radar.polarization,
+                            "pixel_size_m": scene.pixel_size_m,
+                        },
+                        "produced_at": scene.updated_at.isoformat() if scene.updated_at else None,
+                        "published_at": scene.updated_at.isoformat() if scene.updated_at else None,
+                    }
+                )
+            return {
+                "items": items,
+                "total": int(total_result.scalar_one() or 0),
+                "limit": safe_limit,
+                "offset": safe_offset,
+            }
+
+        if channel == CHANNEL_GF3_ORTHO:
+            filters = [
+                RadarDataORM.source_format.in_(GF3_DELIVERABLE_SOURCE_FORMATS),
+                RadarDataORM.geocoded_flag.is_(True),
+            ]
+            if query_text:
+                like = f"%{query_text}%"
+                filters.append(
+                    or_(
+                        RadarDataORM.product_unique_id.ilike(like),
+                        RadarDataORM.unique_id.ilike(like),
+                        RadarDataORM.file_path.ilike(like),
+                        RadarDataORM.imaging_date.ilike(like),
+                    )
+                )
+            total_result = await db.execute(select(func.count(RadarDataORM.id)).where(*filters))
+            rows_result = await db.execute(
+                select(RadarDataORM, SARSceneGeoORM)
+                .outerjoin(SARSceneGeoORM, SARSceneGeoORM.radar_data_id == RadarDataORM.id)
+                .where(*filters)
+                .order_by(RadarDataORM.acquisition_start_time_utc.desc().nullslast(), RadarDataORM.id.desc())
+                .limit(safe_limit)
+                .offset(safe_offset)
+            )
+            items = []
+            for radar, scene in rows_result.all():
+                display_name = _radar_display_name(radar)
+                primary_path = (
+                    str(scene.analysis_tif_path or "").strip()
+                    if scene is not None and scene.analysis_tif_path
+                    else str(radar.file_path or "").strip()
+                )
+                publish_dir = (
+                    str(scene.analysis_dir or "").strip()
+                    if scene is not None and scene.analysis_dir
+                    else str(radar.file_path or "").strip()
+                )
+                items.append(
+                    {
+                        "id": radar.id,
+                        "item_id": radar.id,
+                        "source_kind": "gf3_radar_data",
+                        "product_id": f"gf3_sarscape:{radar.id}",
+                        "catalog_name": "radar_data",
+                        "product_family": "gf3_ortho",
+                        "product_type": "sarscape_l2_geotiff" if radar.source_format == GF3_STANDARD_SOURCE_FORMAT else "sarscape_native_geo",
+                        "display_name": display_name,
+                        "task_name": display_name,
+                        "status": "READY",
+                        "health_status": "OK",
+                        "engine_code": (scene.analysis_engine if scene is not None else None) or "gf3_sarscape",
+                        "profile_code": (
+                            (scene.analysis_profile if scene is not None else None)
+                            or ("gf3_standard_geotiff" if radar.source_format == GF3_STANDARD_SOURCE_FORMAT else "gf3_native_geo")
+                        ),
+                        "source_format": radar.source_format,
+                        "radar_data_id": radar.id,
+                        "scene_geo_id": scene.id if scene is not None else None,
+                        "imaging_date": radar.imaging_date,
+                        "polarization": radar.polarization,
+                        "pixel_size_m": scene.pixel_size_m if scene is not None else None,
+                        "backscatter_unit": scene.analysis_backscatter_unit if scene is not None else None,
+                        "publish_dir": publish_dir,
+                        "manifest_path": _manifest_path_for_scene(scene) if scene is not None else None,
+                        "primary_asset_path": primary_path,
+                        "file_size": _catalog_file_size(primary_path),
+                        "summary": {
+                            "radar_data_id": radar.id,
+                            "source_asset_ids": [radar.source_product_ref_id] if radar.source_product_ref_id else [],
+                            "imaging_date": radar.imaging_date,
+                            "polarization": radar.polarization,
+                        },
+                        "produced_at": (
+                            scene.updated_at.isoformat() if scene is not None and scene.updated_at else None
+                        ),
+                        "published_at": (
+                            scene.updated_at.isoformat() if scene is not None and scene.updated_at else None
+                        ),
+                    }
+                )
+            return {
+                "items": items,
+                "total": int(total_result.scalar_one() or 0),
+                "limit": safe_limit,
+                "offset": safe_offset,
+            }
+
+        if channel == CHANNEL_DINSAR:
+            total = await dinsar_read_service.count_compat_records(db)
+            records = await dinsar_read_service.list_compat_records(db, limit=safe_limit, offset=safe_offset)
+            items = []
+            for record in records:
+                product = record.product
+                compat_row = record.compat_row
+                items.append(
+                    {
+                        "id": int(compat_row.id if compat_row is not None else product.id),
+                        "item_id": int(compat_row.id if compat_row is not None else product.id),
+                        "source_kind": "dinsar_result",
+                        "product_id": product.product_id,
+                        "catalog_name": product.catalog_name,
+                        "product_family": product.product_family,
+                        "product_type": product.product_type,
+                        "display_name": record.display_name,
+                        "task_name": product.task_alias or product.task_name,
+                        "status": product.status,
+                        "health_status": product.health_status,
+                        "engine_code": product.engine_code,
+                        "profile_code": product.profile_code,
+                        "pair_key": product.pair_key,
+                        "publish_dir": product.publish_dir,
+                        "manifest_path": product.manifest_path,
+                        "primary_asset_path": product.primary_asset_path or product.source_primary_path,
+                        "file_size": _catalog_file_size(product.primary_asset_path or product.source_primary_path),
+                        "produced_at": product.produced_at.isoformat() if product.produced_at else None,
+                        "published_at": product.published_at.isoformat() if product.published_at else None,
+                    }
+                )
+            return {"items": items, "total": total, "limit": safe_limit, "offset": safe_offset}
+
+        return {"items": [], "total": 0, "limit": safe_limit, "offset": safe_offset}
 
     async def create_delivery(
         self,
@@ -337,6 +738,7 @@ class ResultDeliveryService:
         channel: str,
         product_ids: Optional[List[int]] = None,
         compat_result_ids: Optional[List[int]] = None,
+        item_ids: Optional[List[int]] = None,
         package_mode: str = PACKAGE_MODE_DIRECTORY,
         include_checksums: Optional[bool] = None,
     ) -> ResultDeliveryRequestORM:
@@ -348,20 +750,20 @@ class ResultDeliveryService:
         max_items = max(1, int(settings.RESULT_DELIVERY_MAX_ITEMS or 500))
         normalized_product_ids = _normalize_int_ids(product_ids, max_count=max_items)
         normalized_compat_ids = _normalize_int_ids(compat_result_ids, max_count=max_items)
-        if not normalized_product_ids and not normalized_compat_ids:
+        normalized_item_ids = _normalize_int_ids(item_ids, max_count=max_items)
+        if not normalized_product_ids and not normalized_compat_ids and not normalized_item_ids:
             raise ValueError("select at least one result")
 
-        if len(normalized_product_ids) + len(normalized_compat_ids) > max_items:
+        if len(normalized_product_ids) + len(normalized_compat_ids) + len(normalized_item_ids) > max_items:
             raise ValueError(f"selected item count exceeds max limit ({max_items})")
 
-        if channel == CHANNEL_DINSAR:
-            sources = await self._resolve_dinsar_sources(
-                db,
-                product_ids=normalized_product_ids,
-                compat_result_ids=normalized_compat_ids,
-            )
-        else:
-            sources = []
+        sources = await self._resolve_sources_for_channel(
+            db,
+            channel=channel,
+            product_ids=normalized_product_ids,
+            compat_result_ids=normalized_compat_ids,
+            item_ids=normalized_item_ids,
+        )
 
         if not sources:
             raise ValueError("selected results do not have deliverable files")
@@ -376,6 +778,7 @@ class ResultDeliveryService:
             "channel": channel,
             "product_ids": normalized_product_ids,
             "compat_result_ids": normalized_compat_ids,
+            "item_ids": normalized_item_ids,
             "package_mode": package_mode,
             "include_checksums": (
                 bool(settings.RESULT_DELIVERY_CHECKSUM_ENABLED)
@@ -544,6 +947,8 @@ class ResultDeliveryService:
             "source_product_id": item.source_product_id,
             "source_result_id": item.source_result_id,
             "source_asset_id": item.source_asset_id,
+            "source_radar_data_id": item.source_radar_data_id,
+            "source_scene_geo_id": item.source_scene_geo_id,
             "display_name": item.display_name,
             "relative_path": item.relative_path,
             "file_size": item.file_size,
@@ -636,14 +1041,14 @@ class ResultDeliveryService:
             )
             delivery = result.scalar_one()
             request_json = delivery.request_json if isinstance(delivery.request_json, dict) else {}
-            if delivery.channel == CHANNEL_DINSAR:
-                sources = await self._resolve_dinsar_sources(
-                    db,
-                    product_ids=_normalize_int_ids(request_json.get("product_ids"), max_count=int(settings.RESULT_DELIVERY_MAX_ITEMS or 500)),
-                    compat_result_ids=_normalize_int_ids(request_json.get("compat_result_ids"), max_count=int(settings.RESULT_DELIVERY_MAX_ITEMS or 500)),
-                )
-            else:
-                sources = []
+            max_items = int(settings.RESULT_DELIVERY_MAX_ITEMS or 500)
+            sources = await self._resolve_sources_for_channel(
+                db,
+                channel=delivery.channel,
+                product_ids=_normalize_int_ids(request_json.get("product_ids"), max_count=max_items),
+                compat_result_ids=_normalize_int_ids(request_json.get("compat_result_ids"), max_count=max_items),
+                item_ids=_normalize_int_ids(request_json.get("item_ids"), max_count=max_items),
+            )
             task_id = delivery.task_id
 
         if not sources:
@@ -672,10 +1077,9 @@ class ResultDeliveryService:
         total_sources = len(sources)
         for source_index, source in enumerate(sources, start=1):
             folder = _sanitize_segment(
-                source.product.task_alias
-                or source.product.task_name
+                source.task_name
                 or source.display_name
-                or source.product.product_id,
+                or source.product_id,
                 default=f"product_{source_index}",
             )
             source_files = _iter_associated_files(source.source_path)
@@ -684,9 +1088,11 @@ class ResultDeliveryService:
                 item_payloads.append(
                     {
                         "delivery_id": delivery_id,
-                        "source_product_id": source.product.id,
+                        "source_product_id": source.product.id if source.product else None,
                         "source_result_id": source.compat_row.id if source.compat_row else None,
                         "source_asset_id": source.source_asset_id,
+                        "source_radar_data_id": source.source_radar_data_id,
+                        "source_scene_geo_id": source.source_scene_geo_id,
                         "display_name": source.display_name,
                         "source_path": source.source_path,
                         "relative_path": None,
@@ -736,9 +1142,11 @@ class ResultDeliveryService:
 
                 item_payload = {
                     "delivery_id": delivery_id,
-                    "source_product_id": source.product.id,
+                    "source_product_id": source.product.id if source.product else None,
                     "source_result_id": source.compat_row.id if source.compat_row else None,
                     "source_asset_id": source.source_asset_id if file_index == 1 else None,
+                    "source_radar_data_id": source.source_radar_data_id,
+                    "source_scene_geo_id": source.source_scene_geo_id,
                     "display_name": source.display_name,
                     "source_path": source_file,
                     "relative_path": relative_path,
@@ -751,9 +1159,12 @@ class ResultDeliveryService:
                 manifest_items.append(
                     {
                         "display_name": source.display_name,
-                        "product_id": source.product.product_id,
-                        "product_ref_id": source.product.id,
+                        "product_id": source.product_id or (source.product.product_id if source.product else None),
+                        "product_ref_id": source.product.id if source.product else None,
                         "source_result_id": source.compat_row.id if source.compat_row else None,
+                        "source_radar_data_id": source.source_radar_data_id,
+                        "source_scene_geo_id": source.source_scene_geo_id,
+                        "source_kind": source.source_kind,
                         "relative_path": relative_path.replace(os.sep, "/"),
                         "file_size": size,
                         "checksum_sha256": checksum,

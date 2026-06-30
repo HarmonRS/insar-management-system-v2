@@ -14,8 +14,9 @@
 ## 目标
 
 - 所有登录用户都可以申请成果交付。
-- D-InSAR 已登记成果先接入真实交付下载。
-- SBAS、LT-1 正射、Sentinel-1 正射、GF3 正射在页面和接口中保留清晰占位，不暴露假执行能力。
+- D-InSAR 已登记成果接入真实交付下载。
+- LT-1 正射与 GF3 正射接入真实交付下载。
+- SBAS 与 Sentinel-1 正射在页面和接口中保留清晰占位，不暴露假执行能力。
 - 大文件交付改为后台任务，不再由 HTTP 请求同步复制。
 - 用户最终可以把成果下载到本地；服务器交付区只是临时缓存。
 - 每次交付可审计、可过期清理、可校验。
@@ -25,6 +26,7 @@
 
 - 本阶段不实现 Sentinel-1 正射生产。
 - 本阶段不实现 SBAS 成果交付打包，只显示目录已接入但交付未接入。
+- 本阶段不触发 GF3 生产；GF3 交付只面向已经登记的 SARscape 标准化正射成品。
 - 本阶段不做跨节点对象存储或外部网盘。
 - 本阶段不把普通用户开放到任意服务器路径写入。
 
@@ -42,6 +44,13 @@
 - `admin`：用户、系统配置和全局清理。
 
 ## 交付模式
+
+## 正射成果口径
+
+- LT-1 正射：由服务器侧单景正射流水线生产，登记在 `sar_scene_geo`，主交付物是 `analysis_ready.tif`，随包包含预览、manifest、quality 等 sidecar 文件。
+- GF3 正射：系统拿到的就是外部 SARscape 已生产成品，当前可登记为 `GF3_SARSCAPE_NATIVE_PREVIEW`，标准化后也可登记为 `GF3_SARSCAPE_L2`；交付阶段只做受控打包和下载，不触发 GF3 生产。
+- Sentinel-1 正射：生产链尚未接入，结果提取页面保留占位，避免用户误操作。
+- SBAS-InSAR：成果目录可查，但交付打包尚未接入。
 
 ### 1. 目录交付
 
@@ -97,6 +106,7 @@
 
 - `delivery_id`。
 - `source_product_id` / `source_result_id`。
+- `source_radar_data_id` / `source_scene_geo_id`：用于 LT-1/GF3 单景正射资产追踪。
 - `display_name`。
 - `source_path`。
 - `relative_path`。
@@ -133,9 +143,23 @@ GET /api/result-deliveries/channels
 
 - `dinsar`: `ready`
 - `sbas`: `planned`
-- `lt1_ortho`: `planned`
+- `lt1_ortho`: `ready`
 - `s1_ortho`: `placeholder`
-- `gf3_ortho`: `placeholder`
+- `gf3_ortho`: `ready`
+
+### 获取可交付目录
+
+```http
+GET /api/result-deliveries/catalog/{channel}
+```
+
+第一版支持：
+
+- `dinsar`：兼容已有 D-InSAR catalog。
+- `lt1_ortho`：读取 `sar_scene_geo` 中 `lt_gamma / lt1_gamma_geocoded_mli` 且 `DONE` 的分析就绪 GeoTIFF。
+- `gf3_ortho`：读取 `radar_data.source_format in (GF3_SARSCAPE_NATIVE_PREVIEW, GF3_SARSCAPE_L2)` 且 `geocoded_flag = true` 的 SARscape 正射成品。
+
+返回统一字段包括 `item_id`、`source_kind`、`product_id`、`display_name`、`primary_asset_path`、`publish_dir`、`radar_data_id`、`scene_geo_id`。
 
 ### 创建交付任务
 
@@ -150,6 +174,7 @@ POST /api/result-deliveries
   "channel": "dinsar",
   "product_ids": ["..."],
   "compat_result_ids": [1, 2, 3],
+  "item_ids": [101, 102],
   "package_mode": "directory",
   "include_manifest": true,
   "include_checksums": true
@@ -159,7 +184,9 @@ POST /api/result-deliveries
 约束：
 
 - 普通用户只创建自己的任务。
-- `channel != dinsar` 时第一版返回 409 或 422，提示“通道尚未接入交付”。
+- `dinsar` 使用 `compat_result_ids` 或 `product_ids`。
+- `lt1_ortho` 使用 `item_ids = sar_scene_geo.id`。
+- `gf3_ortho` 使用 `item_ids = radar_data.id`。
 - 每次最大数量由 `RESULT_DELIVERY_MAX_ITEMS` 控制。
 - 不允许传入任意服务器输出路径。
 
@@ -200,7 +227,7 @@ RESULT_DELIVERY_BUILD
 处理流程：
 
 1. 将 delivery 标记为 `RUNNING`。
-2. 解析 D-InSAR catalog 中的文件路径。
+2. 按 channel 解析可交付源文件路径。
 3. 复制到交付目录。
 4. 生成 `manifest.json`。
 5. 可选计算 checksum。
@@ -244,8 +271,8 @@ RESULT_DELIVERY_CHECKSUM_ENABLED=true
 
 页面结构：
 
-- 通道栏：D-InSAR 可用，SBAS/LT-1/Sentinel-1/GF3 明确显示“未接入交付”。
-- 成果选择区：复用现有 D-InSAR catalog 列表。
+- 通道栏：D-InSAR、LT-1 正射、GF3 正射可用；SBAS/Sentinel-1 显示未接入交付。
+- 成果选择区：D-InSAR 复用现有 catalog 列表，LT-1/GF3 使用统一交付 catalog 查询。
 - 交付选项：目录交付 / 压缩包交付。
 - 我的交付包：状态、大小、文件数、过期时间、下载入口。
 
@@ -283,7 +310,7 @@ RESULT_DELIVERY_CHECKSUM_ENABLED=true
 
 - 文档落地。
 - 数据表和自维护 migration。
-- D-InSAR 目录交付后台任务。
+- D-InSAR、LT-1 正射、GF3 正射目录交付后台任务。
 - 我的交付包列表和详情。
 
 ### 阶段 2
@@ -295,12 +322,12 @@ RESULT_DELIVERY_CHECKSUM_ENABLED=true
 ### 阶段 3
 
 - SBAS 交付接入。
-- LT-1 正射、Sentinel-1 正射、GF3 正射在生产 catalog 完成后接入。
+- Sentinel-1 正射在生产 catalog 完成后接入。
 - exporter/operator 角色拆分。
 
 ## 验收标准
 
-- 普通登录用户能创建 D-InSAR 成果交付任务。
+- 普通登录用户能创建 D-InSAR、LT-1 正射、GF3 正射成果交付任务。
 - HTTP 请求只排队任务，不再同步复制大文件。
 - 交付完成后用户能下载到本地。
 - 普通用户不能指定任意服务器目录。
