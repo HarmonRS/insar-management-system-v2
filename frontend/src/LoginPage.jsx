@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import apiClient from './api/client';
-import clusterDeliveryUrl from './assets/login/cluster-delivery.svg';
-import processingArchitectureUrl from './assets/login/processing-architecture.svg';
-import systemOverviewUrl from './assets/login/system-overview.svg';
+import clusterDeliveryUrl from './assets/login/cluster-delivery-art.webp';
+import processingArchitectureUrl from './assets/login/processing-architecture-art.webp';
+import systemOverviewUrl from './assets/login/system-overview-art.webp';
 
 const loginSlides = [
   {

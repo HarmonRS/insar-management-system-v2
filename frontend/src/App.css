@@ -4125,32 +4125,27 @@ input[type="checkbox"] {
 
 .login-page-wrapper {
   min-height: 100vh;
-  background:
-    linear-gradient(135deg, rgba(15, 23, 42, 0.04), rgba(37, 99, 235, 0.07)),
-    linear-gradient(180deg, #f8fafc 0%, #e8eefc 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 28px;
+  background: #020617;
+  display: grid;
+  padding: 0;
 }
 
 .login-shell {
-  width: min(1180px, 100%);
-  min-height: min(720px, calc(100vh - 56px));
+  grid-area: 1 / 1;
+  width: 100%;
+  min-height: 100vh;
   display: grid;
-  grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+  grid-template-columns: clamp(360px, 32vw, 480px) minmax(0, 1fr);
   background: #ffffff;
-  border: 1px solid #dbe4f3;
-  border-radius: 18px;
-  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.14);
   overflow: hidden;
 }
 
 .login-card {
   width: 100%;
-  background: #ffffff;
+  min-height: 100vh;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
   border-right: 1px solid #dbe4f3;
-  padding: 34px;
+  padding: clamp(32px, 5vh, 56px) clamp(28px, 4vw, 52px);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -4158,10 +4153,13 @@ input[type="checkbox"] {
 }
 
 .login-card--checking {
+  place-self: center;
   width: min(420px, 94vw);
+  min-height: auto;
   border: 1px solid #dbe4f3;
   border-radius: 14px;
   box-shadow: var(--shadow-panel);
+  padding: 28px;
 }
 
 .login-card h2 {
@@ -4266,42 +4264,60 @@ input[type="checkbox"] {
 }
 
 .login-visual-panel {
+  position: relative;
   min-width: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 18px;
-  padding: 34px;
-  background: #f8fafc;
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+  padding: clamp(32px, 5vw, 72px);
+  background: #020617;
+  color: #f8fafc;
+}
+
+.login-visual-panel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(2, 6, 23, 0.68) 0%, rgba(2, 6, 23, 0.34) 38%, rgba(2, 6, 23, 0.08) 100%),
+    linear-gradient(0deg, rgba(2, 6, 23, 0.72) 0%, rgba(2, 6, 23, 0.18) 52%, rgba(2, 6, 23, 0.18) 100%);
+  pointer-events: none;
 }
 
 .login-slide-copy {
-  max-width: 680px;
+  position: relative;
+  z-index: 2;
+  max-width: min(720px, 74%);
+  padding-bottom: 36px;
 }
 
 .login-slide-copy span {
-  color: var(--color-accent-strong);
+  color: #7dd3fc;
   font-size: 0.82em;
   font-weight: 700;
 }
 
 .login-slide-copy h3 {
   margin: 8px 0 8px;
-  color: var(--color-text-primary);
-  font-size: 1.55em;
-  line-height: 1.25;
+  color: #f8fafc;
+  font-size: 3.4rem;
+  line-height: 1.08;
+  text-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
 }
 
 .login-slide-copy p {
   margin: 0;
-  color: var(--color-text-secondary);
-  line-height: 1.58;
+  max-width: 680px;
+  color: #dbeafe;
+  font-size: 1.02em;
+  line-height: 1.68;
+  text-shadow: 0 10px 26px rgba(0, 0, 0, 0.38);
 }
 
 .login-slide-frame {
-  position: relative;
-  min-height: 0;
-  border: 1px solid #cbd5e1;
-  border-radius: 12px;
+  position: absolute;
+  inset: 0;
   overflow: hidden;
   background: #0f172a;
 }
@@ -4323,8 +4339,11 @@ input[type="checkbox"] {
 }
 
 .login-slide-dots {
+  position: absolute;
+  z-index: 2;
+  right: clamp(28px, 4vw, 60px);
+  bottom: clamp(28px, 4vw, 56px);
   display: flex;
-  justify-content: center;
   gap: 8px;
 }
 
@@ -4344,6 +4363,12 @@ input[type="checkbox"] {
   background: var(--color-accent);
 }
 
+@media (max-width: 1240px) {
+  .login-slide-copy h3 {
+    font-size: 2.8rem;
+  }
+}
+
 @media (max-width: 920px) {
   .login-page-wrapper {
     align-items: flex-start;
@@ -4351,31 +4376,39 @@ input[type="checkbox"] {
   }
 
   .login-shell {
-    min-height: auto;
+    min-height: 100vh;
     grid-template-columns: 1fr;
   }
 
   .login-card {
+    min-height: auto;
     border-right: none;
     border-bottom: 1px solid #dbe4f3;
     padding: 24px;
   }
 
   .login-visual-panel {
-    min-height: 420px;
+    min-height: min(58vh, 560px);
     padding: 24px;
+  }
+
+  .login-slide-copy {
+    max-width: 100%;
+    padding-bottom: 34px;
+  }
+
+  .login-slide-copy h3 {
+    font-size: 2.2rem;
+  }
+
+  .login-slide-dots {
+    right: auto;
+    left: 24px;
+    bottom: 20px;
   }
 }
 
 @media (max-width: 560px) {
-  .login-page-wrapper {
-    padding: 12px;
-  }
-
-  .login-shell {
-    border-radius: 12px;
-  }
-
   .login-card,
   .login-visual-panel {
     padding: 18px;
@@ -4383,7 +4416,7 @@ input[type="checkbox"] {
 
   .login-card h2,
   .login-slide-copy h3 {
-    font-size: 1.28em;
+    font-size: 1.28rem;
   }
 
   .login-visual-panel {
