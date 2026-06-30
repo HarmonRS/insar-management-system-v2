@@ -81,6 +81,41 @@ class PairingStateService:
         )
         return result.scalar_one_or_none()
 
+    def _cache_requires_rebuild(
+        self,
+        *,
+        scene_count: int,
+        dirty_scene_count: int,
+        metric_cache_count: int,
+    ) -> bool:
+        return bool(
+            dirty_scene_count > 0
+            or (scene_count > 1 and metric_cache_count == 0)
+        )
+
+    def _effective_status(
+        self,
+        *,
+        state: Optional[PairingCacheStateORM],
+        scene_count: int,
+        dirty_scene_count: int,
+        metric_cache_count: int,
+    ) -> str:
+        raw_status = str(getattr(state, "status", None) or "").strip().upper()
+        if not raw_status:
+            return "DIRTY" if self._cache_requires_rebuild(
+                scene_count=scene_count,
+                dirty_scene_count=dirty_scene_count,
+                metric_cache_count=metric_cache_count,
+            ) else "READY"
+        if raw_status == "DIRTY" and not self._cache_requires_rebuild(
+            scene_count=scene_count,
+            dirty_scene_count=dirty_scene_count,
+            metric_cache_count=metric_cache_count,
+        ):
+            return "READY"
+        return raw_status
+
     def _build_state_payload(
         self,
         *,
@@ -89,7 +124,13 @@ class PairingStateService:
         dirty_scene_count: int,
         metric_cache_count: int,
     ) -> Dict[str, Any]:
-        status = state.status if state is not None else "UNINITIALIZED"
+        raw_status = state.status if state is not None else "UNINITIALIZED"
+        status = self._effective_status(
+            state=state,
+            scene_count=scene_count,
+            dirty_scene_count=dirty_scene_count,
+            metric_cache_count=metric_cache_count,
+        )
         last_error = state.last_error if state is not None else None
         needs_rebuild = bool(
             dirty_scene_count > 0
@@ -103,11 +144,13 @@ class PairingStateService:
             "cache_scope": state.cache_scope if state is not None else PAIRING_CACHE_SCOPE_GLOBAL,
             "metric_version": (state.metric_version if state is not None else None) or self.metric_version,
             "status": status,
+            "raw_status": raw_status,
             "scene_count": int(scene_count),
             "pair_count": int(metric_cache_count),
             "dirty_scene_count": int(dirty_scene_count),
             "needs_rebuild": needs_rebuild,
             "cache_ready": cache_ready,
+            "stale_dirty_normalized": raw_status == "DIRTY" and status == "READY",
             "last_full_rebuild_at": state_dict.get("last_full_rebuild_at"),
             "last_incremental_reconcile_at": state_dict.get("last_incremental_reconcile_at"),
             "last_error": last_error,
@@ -130,7 +173,11 @@ class PairingStateService:
             state = PairingCacheStateORM(
                 cache_scope=PAIRING_CACHE_SCOPE_GLOBAL,
                 metric_version=self.metric_version,
-                status="DIRTY" if scene_count > 1 else "READY",
+                status="DIRTY" if self._cache_requires_rebuild(
+                    scene_count=scene_count,
+                    dirty_scene_count=dirty_scene_count,
+                    metric_cache_count=metric_cache_count,
+                ) else "READY",
                 scene_count=scene_count,
                 pair_count=metric_cache_count,
                 dirty_scene_count=dirty_scene_count,
@@ -149,10 +196,16 @@ class PairingStateService:
         state.pair_count = metric_cache_count
         state.dirty_scene_count = dirty_scene_count
 
-        if state.status == "READY" and (
-            dirty_scene_count > 0 or (scene_count > 1 and metric_cache_count == 0)
-        ):
+        requires_rebuild = self._cache_requires_rebuild(
+            scene_count=scene_count,
+            dirty_scene_count=dirty_scene_count,
+            metric_cache_count=metric_cache_count,
+        )
+        if requires_rebuild and state.status == "READY":
             state.status = "DIRTY"
+        elif not requires_rebuild and state.status == "DIRTY":
+            state.status = "READY"
+            state.last_error = None
         elif state.status in {None, ""}:
             state.status = "DIRTY" if scene_count > 1 else "READY"
 
