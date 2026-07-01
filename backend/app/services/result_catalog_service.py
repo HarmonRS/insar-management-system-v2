@@ -12,11 +12,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from geoalchemy2.shape import from_shape
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from shapely.geometry import Polygon, shape
 
 from ..config import settings
 from ..models import (
     DinsarProductProfileORM,
+    DinsarProductionRunItemORM,
     DinsarTaskItemORM,
     PairingMetricCacheORM,
     PairingNetworkEdgeORM,
@@ -1519,8 +1521,16 @@ class ResultCatalogService:
         products = result.scalars().all()
 
         groups: Dict[str, Dict[str, Any]] = {}
+        pair_keys_for_trace = set()
+        aliases_for_trace = set()
         for product in products:
             pair_key = str(product.pair_key or "").strip() or f"product:{product.id}"
+            if str(product.pair_key or "").strip():
+                pair_keys_for_trace.add(str(product.pair_key or "").strip())
+            for alias_value in (product.task_alias, product.task_name):
+                alias_text = str(alias_value or "").strip()
+                if alias_text:
+                    aliases_for_trace.add(alias_text)
             group = groups.setdefault(
                 pair_key,
                 {
@@ -1552,11 +1562,49 @@ class ResultCatalogService:
                 if group.get(key) in (None, "") and getattr(product, key) not in (None, ""):
                     group[key] = getattr(product, key)
 
+        failed_trace_by_pair_key: Dict[str, List[DinsarProductionRunItemORM]] = {}
+        failed_trace_by_alias: Dict[str, List[DinsarProductionRunItemORM]] = {}
+        trace_conditions = []
+        if pair_keys_for_trace:
+            trace_conditions.append(DinsarProductionRunItemORM.pair_key.in_(sorted(pair_keys_for_trace)))
+        if aliases_for_trace:
+            trace_conditions.append(DinsarProductionRunItemORM.task_alias.in_(sorted(aliases_for_trace)))
+            trace_conditions.append(DinsarProductionRunItemORM.task_name.in_(sorted(aliases_for_trace)))
+        if trace_conditions:
+            trace_result = await db.execute(
+                select(DinsarProductionRunItemORM)
+                .options(selectinload(DinsarProductionRunItemORM.run))
+                .where(DinsarProductionRunItemORM.status == "FAILED")
+                .where(or_(*trace_conditions))
+                .order_by(
+                    DinsarProductionRunItemORM.ended_at.desc().nullslast(),
+                    DinsarProductionRunItemORM.updated_at.desc().nullslast(),
+                    DinsarProductionRunItemORM.id.desc(),
+                )
+            )
+            for attempt in trace_result.scalars().all():
+                pair_key = str(attempt.pair_key or "").strip()
+                if pair_key:
+                    failed_trace_by_pair_key.setdefault(pair_key, []).append(attempt)
+                for alias_value in (attempt.task_alias, attempt.task_name):
+                    alias_text = str(alias_value or "").strip()
+                    if alias_text:
+                        failed_trace_by_alias.setdefault(alias_text, []).append(attempt)
+
         items: List[Dict[str, Any]] = []
         for group in groups.values():
             products_for_group: List[ResultProductORM] = group.pop("_products")
+            failed_attempts_for_group: List[DinsarProductionRunItemORM] = []
+            pair_key = str(group.get("pair_key") or "").strip()
+            if pair_key:
+                failed_attempts_for_group.extend(failed_trace_by_pair_key.get(pair_key, []))
+            for alias_value in (group.get("task_alias"), group.get("task_name")):
+                alias_text = str(alias_value or "").strip()
+                if alias_text and not failed_attempts_for_group:
+                    failed_attempts_for_group.extend(failed_trace_by_alias.get(alias_text, []))
             engine_results = build_engine_results(
                 products=products_for_group,
+                failed_attempts=failed_attempts_for_group,
                 data_family=group.get("data_family") or "unknown",
                 include_legacy=include_legacy,
             )

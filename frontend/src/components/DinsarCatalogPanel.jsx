@@ -67,6 +67,34 @@ function engineStatusTone(status) {
   return 'neutral';
 }
 
+function formatEngineResultStatus(status) {
+  const normalized = String(status || 'missing').toLowerCase();
+  if (normalized === 'ready') return '已生产';
+  if (normalized === 'failed') return '生产失败';
+  if (normalized === 'missing') return '未生产';
+  if (normalized === 'blocked') return '不适用';
+  if (normalized === 'running') return '生产中';
+  if (normalized === 'legacy') return '历史结果';
+  return status || '未生产';
+}
+
+function buildEngineResultTitle(result = {}) {
+  const parts = [formatEngineResultStatus(result.status)];
+  if (result.skip_reason === 'production_failed') {
+    parts.push('该引擎已有失败生产记录，不是单纯缺失结果。');
+  }
+  if (result.production_run_id) {
+    parts.push(`run=${result.production_run_id}`);
+  }
+  if (result.production_error) {
+    parts.push(String(result.production_error).replace(/\s+/g, ' ').slice(0, 220));
+  }
+  if (result.latest_log_path) {
+    parts.push(`log=${result.latest_log_path}`);
+  }
+  return parts.filter(Boolean).join('\n');
+}
+
 function MetaField({ label, value, multiline = false }) {
   const displayValue = value === null || value === undefined || value === '' ? '-' : value;
   return (
@@ -373,8 +401,9 @@ export default function DinsarCatalogPanel({
                           <span
                             key={engineCode}
                             className={`dinsar-engine-result-chip tone-${engineStatusTone(result.status)}`}
+                            title={buildEngineResultTitle(result)}
                           >
-                            {engineMeta.shortLabel}: {result.status || 'missing'}
+                            {engineMeta.shortLabel}: {formatEngineResultStatus(result.status)}
                           </span>
                         );
                       })}
