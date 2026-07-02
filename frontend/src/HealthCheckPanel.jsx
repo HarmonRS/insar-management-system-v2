@@ -7,6 +7,7 @@ import { syncWaterScenesFromDisk } from './api/water';
 import { listEngines, runWslCheck } from './api/dinsarProduction';
 import { getOrbitStatus, syncOrbitPools } from './api/orbit';
 import LogManagementPanel from './LogManagementPanel';
+import OpsTaskMaintenancePanel from './OpsTaskMaintenancePanel';
 
 const toNumber = (value) => {
   const parsed = Number(value);
@@ -1507,6 +1508,7 @@ const HealthCheckPanel = ({ currentUser }) => {
                 )}
 
                 {/* 日志管理 */}
+                <OpsTaskMaintenancePanel isAdmin={isAdmin} />
                 <LogManagementPanel isAdmin={isAdmin} />
               </div>
             </section>

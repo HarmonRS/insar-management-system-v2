@@ -18,6 +18,7 @@ from . import (
     license,
     logs,
     monitor,
+    ops_maintenance,
     orbit,
     pairing,
     ps_products,
@@ -48,6 +49,7 @@ def include_all_routers(router: APIRouter) -> None:
     router.include_router(tools.router)
     router.include_router(unpack.router)
     router.include_router(monitor.router)
+    router.include_router(ops_maintenance.router)
     router.include_router(orbit.router)
     router.include_router(assets.router)
     router.include_router(root_registry.router)

@@ -3109,6 +3109,269 @@ input[type="checkbox"] {
   cursor: not-allowed;
 }
 
+.health-action-button.danger {
+  border-color: #b91c1c;
+  background: #b91c1c;
+}
+
+.ops-task-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.ops-task-header,
+.ops-task-detail-header,
+.ops-task-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ops-task-header h4,
+.ops-task-detail-header h4 {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: 0.95em;
+}
+
+.ops-task-header p,
+.ops-task-detail-header p {
+  margin: 4px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 0.82em;
+  line-height: 1.5;
+}
+
+.ops-task-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ops-task-summary > div,
+.ops-task-preview-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.ops-task-summary span,
+.ops-task-preview-cell span {
+  color: #64748b;
+  font-size: 0.78em;
+}
+
+.ops-task-summary strong,
+.ops-task-preview-cell strong {
+  color: #0f172a;
+  font-size: 0.9em;
+}
+
+.ops-task-filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ops-task-filters label {
+  display: grid;
+  gap: 4px;
+  color: #475569;
+  font-size: 0.78em;
+  font-weight: 700;
+}
+
+.ops-task-filters select {
+  min-width: 150px;
+  padding: 7px 9px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #0f172a;
+}
+
+.ops-task-table-wrap {
+  overflow: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.ops-task-table {
+  width: 100%;
+  min-width: 880px;
+  border-collapse: collapse;
+  font-size: 0.82em;
+}
+
+.ops-task-table th,
+.ops-task-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid #e2e8f0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.ops-task-table th {
+  color: #475569;
+  background: #f8fafc;
+  font-weight: 800;
+}
+
+.ops-task-table tr.selected td {
+  background: #eff6ff;
+}
+
+.ops-task-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.ops-task-name {
+  color: #0f172a;
+  font-weight: 800;
+}
+
+.ops-task-muted {
+  color: #64748b;
+  font-size: 0.82em;
+  line-height: 1.5;
+}
+
+.ops-task-empty {
+  color: #64748b;
+  text-align: center !important;
+}
+
+.ops-task-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.76em;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.ops-task-badge.tone-danger {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.ops-task-badge.tone-warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.ops-task-badge.tone-ok {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.ops-task-badge.tone-info {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.ops-task-badge.tone-neutral {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.ops-task-detail,
+.ops-task-preview {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+
+.ops-task-diagnosis {
+  display: grid;
+  gap: 6px;
+}
+
+.ops-task-two-col {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.ops-task-section-title {
+  margin-bottom: 6px;
+  color: #334155;
+  font-size: 0.82em;
+  font-weight: 800;
+}
+
+.ops-task-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px;
+}
+
+.ops-task-path-list,
+.ops-task-log-list {
+  display: grid;
+  gap: 6px;
+}
+
+.ops-task-path {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.ops-task-path.blocked {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.ops-task-path span,
+.ops-task-path em,
+.ops-task-log-list span {
+  color: #64748b;
+  font-size: 0.76em;
+  font-style: normal;
+}
+
+.ops-task-path code {
+  color: #0f172a;
+  font-size: 0.78em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ops-task-log-list > div {
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.ops-task-log-list p {
+  margin: 3px 0 0;
+  color: #334155;
+  font-size: 0.8em;
+  line-height: 1.45;
+}
+
 .log-management-panel {
   display: grid;
   gap: 10px;
@@ -3459,6 +3722,23 @@ input[type="checkbox"] {
 
   .health-grid {
     grid-template-columns: 1fr;
+  }
+
+  .ops-task-header,
+  .ops-task-detail-header,
+  .ops-task-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ops-task-summary,
+  .ops-task-two-col {
+    grid-template-columns: 1fr;
+  }
+
+  .ops-task-filters label,
+  .ops-task-filters select {
+    width: 100%;
   }
 }
 
